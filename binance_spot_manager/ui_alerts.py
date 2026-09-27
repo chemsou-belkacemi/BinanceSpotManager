@@ -1,4 +1,4 @@
-"""Sélection des alertes affichées sur le Dashboard (sans canal distant)."""
+"""Sélection des alertes affichées sur toutes les pages (sans canal distant)."""
 
 from __future__ import annotations
 

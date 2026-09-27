@@ -3,10 +3,6 @@
 from __future__ import annotations
 
 import sys
-import io
-import math
-import struct
-import wave
 from pathlib import Path
 
 import pandas as pd
@@ -21,7 +17,6 @@ from binance_spot_manager.execution_engine import ExecutionEngine  # noqa: E402
 from binance_spot_manager.models import EntryStatus, EventType, SLStatus, SyncStatus, TPStatus  # noqa: E402
 from binance_spot_manager.oco_preview import preview_oco_sell  # noqa: E402
 from binance_spot_manager.position_engine import recompute_position  # noqa: E402
-from binance_spot_manager.ui_alerts import unseen_alerts  # noqa: E402
 from ui_common import (  # noqa: E402
     banner,
     fmt_percent,
@@ -40,59 +35,6 @@ st.set_page_config(page_title="Dashboard — BinanceSpotManager", page_icon="�
 page_header("Dashboard", "Worker, portefeuille et positions en temps réel")
 banner(settings)
 sidebar_status(settings)
-
-
-def _alert_tone() -> bytes:
-    """Petit bip WAV généré localement, sans fichier ni service externe."""
-    sample_rate = 16000
-    frames = b"".join(
-        struct.pack("<h", int(6500 * math.sin(2 * math.pi * 880 * i / sample_rate)))
-        for i in range(int(sample_rate * 0.22))
-    )
-    output = io.BytesIO()
-    with wave.open(output, "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(sample_rate)
-        wav.writeframes(frames)
-    return output.getvalue()
-
-
-@st.fragment(run_every="3s")
-def dashboard_alerts() -> None:
-    records = service.events.tail(limit=100)
-    if "alert_last_seen" not in st.session_state:
-        st.session_state.alert_last_seen = max(
-            (str(record.get("ts") or "") for record in records), default=""
-        )
-    sound_enabled = st.checkbox(
-        "Bip pour les nouveaux événements", value=False, key="alert_sound_enabled"
-    )
-    if st.button("Tester le bip", key="alert_sound_test"):
-        st.audio(_alert_tone(), autoplay=True)
-
-    alerts, last_seen = unseen_alerts(records, st.session_state.alert_last_seen)
-    st.session_state.alert_last_seen = last_seen
-    if alerts:
-        newest = alerts[-1]
-        st.session_state.alert_latest = newest
-        if sound_enabled:
-            st.audio(_alert_tone(), autoplay=True)
-    latest = st.session_state.get("alert_latest")
-    if latest:
-        message = (
-            f"{latest.get('ts', '')} · {latest.get('symbol') or 'Bot'} · "
-            f"{latest.get('message') or latest.get('event')}"
-        )
-        if latest.get("level") in {"ERROR", "CRITICAL"}:
-            st.error(message)
-        else:
-            st.info(message)
-    else:
-        st.caption("Alertes locales actives : nouveaux TP, SL, erreurs et fin de position.")
-
-
-dashboard_alerts()
 
 
 # ==========================================================================
