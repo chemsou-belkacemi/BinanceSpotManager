@@ -99,7 +99,7 @@ if rules is not None:
     balances = dict(portfolio.base_balances)
     balances[settings.quote_asset] = portfolio.quote_free
 
-symbol_status_box(symbol, rules, price, balances)
+symbol_status_box(symbol, rules, balances)
 
 if rules_error:
     st.stop()
@@ -422,6 +422,8 @@ execution_policy = st.radio(
 # ==========================================================================
 # Simulation
 # ==========================================================================
+
+st.caption("Le prix affiché se rafraîchit toutes les 2 s ; la simulation se recalcule quand le formulaire change.")
 
 spec = StrategySpec(
     symbol=rules.symbol,

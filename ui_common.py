@@ -127,7 +127,14 @@ def load_rules(symbol: str) -> tuple[Optional[SymbolRules], str]:
         return None, f"Paire non vérifiable : {exc}"
 
 
-def symbol_status_box(symbol: str, rules: Optional[SymbolRules], price: Optional[float], balances: dict) -> None:
+@st.fragment(run_every="2s")
+def live_price_metric(symbol: str, quote_asset: str) -> None:
+    price = get_service().current_price(symbol)
+    st.metric("Prix actuel", fmt_price(price), quote_asset)
+    st.caption("Actualisation automatique toutes les 2 s")
+
+
+def symbol_status_box(symbol: str, rules: Optional[SymbolRules], balances: dict) -> None:
     """Bloc d'etat d'une paire, tel que decrit section 21."""
     if not symbol:
         return
@@ -137,7 +144,8 @@ def symbol_status_box(symbol: str, rules: Optional[SymbolRules], price: Optional
 
     st.success(f"{rules.symbol} ✅ — paire valide ({rules.status})")
     cols = st.columns(4)
-    cols[0].metric("Prix actuel", fmt_price(price), f"{rules.quote_asset}")
+    with cols[0]:
+        live_price_metric(rules.symbol, rules.quote_asset)
     cols[1].metric("Base", rules.base_asset)
     cols[2].metric("Quote", rules.quote_asset)
     cols[3].metric(
