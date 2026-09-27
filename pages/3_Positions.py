@@ -1,0 +1,654 @@
+"""Positions — détail, ordres réels, réconciliation et édition du plan de sortie."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from binance_spot_manager.config import get_settings  # noqa: E402
+from binance_spot_manager.execution_engine import ExecutionEngine  # noqa: E402
+from binance_spot_manager.models import (  # noqa: E402
+    CloseReason,
+    EntryStatus,
+    EventType,
+    SLRuleAfterTP,
+    SLStatus,
+    TPStatus,
+    utcnow,
+)
+from binance_spot_manager.position_engine import (  # noqa: E402
+    PositionEngine,
+    finish_position,
+    percent_change,
+    recompute_position,
+)
+from binance_spot_manager.reconciliation_engine import audit_open_orders  # noqa: E402
+from ui_common import (  # noqa: E402
+    banner,
+    fmt_percent,
+    fmt_price,
+    fmt_qty,
+    fmt_quote,
+    get_service,
+    page_header,
+    sidebar_status,
+)
+
+settings = get_settings()
+service = get_service()
+
+st.set_page_config(page_title="Positions — BinanceSpotManager", page_icon="📌", layout="wide")
+page_header("Positions", "Détail, ordres réels et plan de sortie")
+banner(settings)
+sidebar_status(settings)
+
+positions = service.positions.list_all()
+
+if not positions:
+    st.info("Aucune position enregistrée. Crée-en une depuis **New Trade**.")
+    st.stop()
+
+labels = {
+    f"{p.symbol} · {p.status.value} · {p.created_at.strftime('%d/%m %H:%M')}": p
+    for p in positions
+}
+choice = st.selectbox("Position", list(labels.keys()))
+position = labels[choice]
+
+rules = service.rules_cache.get(position.symbol)
+price = service.current_price(position.symbol)
+if price:
+    position.metrics.current_price = price
+    recompute_position(position)
+
+execution = ExecutionEngine(settings=settings, events=service.events)
+
+
+# ==========================================================================
+# Aides d'edition
+# ==========================================================================
+
+
+def _save(message: str) -> None:
+    recompute_position(position)
+    service.positions.save(position)
+    st.success(message)
+    st.cache_resource.clear()
+    st.rerun()
+
+
+def _reorder_tps() -> None:
+    """Renumeroie les TP dans l'ordre croissant des prix cibles.
+
+    Apres une suppression ou une modification, les sequences doivent rester
+    coherentes : TP1 est toujours le plus proche, et `next_tp` doit renvoyer
+    le bon niveau.
+    """
+    for index, tp in enumerate(
+        sorted(position.take_profits, key=lambda t: t.target_price or 0.0),
+        start=1,
+    ):
+        tp.sequence_number = index
+
+
+# ==========================================================================
+# En-tête
+# ==========================================================================
+
+st.subheader(f"{position.symbol}")
+head = st.columns(5)
+head[0].metric("État", position.status.value)
+head[1].metric("Sync", position.sync_status.value)
+head[2].metric("Prix actuel", fmt_price(price))
+head[3].metric("Prix moyen", fmt_price(position.metrics.average_price))
+head[4].metric("Quantité nette", fmt_qty(position.metrics.net_qty))
+
+head2 = st.columns(5)
+head2[0].metric("Capital engagé", fmt_price(position.metrics.capital_committed))
+head2[1].metric("Capital en attente", fmt_price(position.metrics.capital_pending))
+head2[2].metric(
+    "PnL latent", fmt_price(position.pnl.unrealized), fmt_percent(position.pnl.unrealized_percent)
+)
+head2[3].metric("PnL réalisé", fmt_price(position.pnl.realized))
+head2[4].metric("PnL total", fmt_price(position.pnl.total))
+
+st.caption(
+    f"Position {position.position_id} · source "
+    f"{position.source_groups[0].source.value if position.source_groups else '—'} · "
+    f"créée le {position.created_at.strftime('%d/%m/%Y %H:%M')} UTC · "
+    f"environnement {position.environment}"
+)
+
+# ==========================================================================
+# Progression
+# ==========================================================================
+
+progress_cols = st.columns(4)
+next_tp = position.next_tp
+progress_cols[0].metric(
+    "Prochain TP",
+    f"TP{next_tp.sequence_number} @ {fmt_price(next_tp.target_price)}" if next_tp else "—",
+)
+progress_cols[1].metric("TP atteints", f"{len(position.executed_tps)}/{len(position.take_profits)}")
+progress_cols[2].metric(
+    "SL", f"{fmt_price(position.stop_loss.resolved_price)} ({position.stop_loss.status.value})"
+)
+progress_cols[3].metric(
+    "Référence break-even",
+    fmt_price(position.metrics.break_even_with_fees),
+    help="Prix moyen majoré des commissions d'achat déjà payées (estimation).",
+)
+
+if position.take_profits:
+    st.progress(len(position.executed_tps) / len(position.take_profits))
+
+# ==========================================================================
+# Entries
+# ==========================================================================
+
+st.subheader("Entries")
+st.dataframe(
+    pd.DataFrame(
+        [
+            {
+                "N°": e.sequence_number,
+                "Type": e.order_type.value,
+                "Prix résolu": fmt_price(e.resolved_price),
+                "Statut": e.status.value,
+                "Qté demandée": fmt_qty(e.requested_qty),
+                "Qté Binance": fmt_qty(e.binance_qty),
+                "Exécutée": fmt_qty(e.executed_qty),
+                "Prix remplissage": fmt_price(e.average_fill_price),
+                "Dépensé": fmt_quote(e.quote_spent, position.quote_asset),
+                "Capital %": f"{e.capital_percent:.1f}",
+                "orderId": e.order_id or "—",
+                "clientOrderId": e.client_order_id or "—",
+            }
+            for e in position.sorted_entries
+        ]
+    ),
+    width="stretch",
+    hide_index=True,
+)
+
+# ==========================================================================
+# Plan de sortie — Take Profits
+# ==========================================================================
+
+st.subheader("Plan de sortie — Take Profits")
+
+pending_tps = [tp for tp in position.sorted_tps if tp.status is TPStatus.PENDING]
+executed_tps = [tp for tp in position.sorted_tps if tp.status is not TPStatus.PENDING]
+
+if not position.take_profits:
+    st.info("Aucun TP défini sur cette position.")
+
+mode = st.radio(
+    "Mode d'édition",
+    ["Lot de TP", "TP par TP"],
+    horizontal=True,
+    help="Modifier un ou plusieurs TP en une fois, ou modifier un TP isolé.",
+)
+
+# ---------------------------------------------------------------- lot complet
+if mode == "Lot de TP" and pending_tps:
+    st.caption(
+        "Modifie les prix et les pourcentages de vente. Le total des ventes est "
+        "affiché pour vérifier qu'il atteint 100 % — sinon une partie de la "
+        "position resterait sans plan de sortie."
+    )
+
+    with st.form("tp_bulk_form"):
+        edited: list[dict] = []
+        for tp in pending_tps:
+            cols = st.columns([1, 2, 2, 1])
+            cols[0].markdown(f"**TP {tp.sequence_number}**")
+            new_price = cols[1].number_input(
+                "Prix",
+                min_value=0.0,
+                value=float(tp.target_price or 0.0),
+                step=float(rules.tick_size),
+                format="%.2f",
+                key=f"bulk_price_{tp.tp_id}",
+            )
+            new_sell = cols[2].number_input(
+                "Vente %",
+                min_value=0.0,
+                max_value=100.0,
+                value=float(tp.sell_percent),
+                step=1.0,
+                key=f"bulk_sell_{tp.tp_id}",
+            )
+            cols[3].caption(f"actuel\n{fmt_price(tp.target_price)}")
+            edited.append({"tp": tp, "price": new_price, "sell": new_sell})
+
+        total_sell = sum(row["sell"] for row in edited)
+        st.markdown(f"**Total des ventes : {total_sell:.2f} %**")
+
+        submitted = st.form_submit_button("Enregistrer tous les TP")
+
+    if submitted:
+        errors: list[str] = []
+
+        average = position.metrics.average_price
+        prices = []
+
+        for row in edited:
+            tp = row["tp"]
+            new_price = float(rules.round_price(row["price"], mode="down"))
+
+            if new_price <= 0:
+                errors.append(f"TP {tp.sequence_number} : prix nul")
+                continue
+            if average and new_price <= average:
+                errors.append(
+                    f"TP {tp.sequence_number} : prix ({fmt_price(new_price)}) "
+                    f"sous le prix moyen ({fmt_price(average)})"
+                )
+                continue
+
+            tp.target_price = new_price
+            tp.target_percent = percent_change(new_price, average) if average else tp.target_percent
+            tp.sell_percent = row["sell"]
+            prices.append((tp.sequence_number, new_price))
+
+        # Verifie que les TP restent ordonnes.
+        ordered = sorted(prices, key=lambda item: item[1])
+        if [seq for seq, _ in ordered] != sorted(seq for seq, _ in prices):
+            errors.append("Les TP ne sont pas dans l'ordre croissant des prix")
+
+        if errors:
+            for error in errors:
+                st.error(error)
+        else:
+            _reorder_tps()
+            for tp in pending_tps:
+                tp.estimated_qty = position.metrics.net_qty * tp.sell_percent / 100.0
+
+            position.log(
+                EventType.POSITION_UPDATED,
+                f"Plan de sortie modifié ({len(edited)} TP) depuis Positions",
+                total_sell=total_sell,
+            )
+            if total_sell < 99.99:
+                position.log(
+                    EventType.POSITION_UPDATED,
+                    f"Attention : les TP ne vendent que {total_sell:.2f} % "
+                    "de la position",
+                )
+            _save(f"Plan de sortie enregistré ({len(edited)} TP)")
+
+# ------------------------------------------------------------- TP par TP
+if mode == "TP par TP":
+    if not position.take_profits:
+        st.caption("Aucun TP à modifier.")
+
+    for tp in position.sorted_tps:
+        is_pending = tp.status is TPStatus.PENDING
+        title = (
+            f"TP {tp.sequence_number} · {fmt_percent(tp.target_percent)} · "
+            f"vente {tp.sell_percent:.0f} % · {tp.status.value}"
+        )
+
+        with st.expander(title, expanded=is_pending and len(pending_tps) <= 2):
+            if not is_pending:
+                st.info(
+                    f"Ce TP est en statut {tp.status.value} — il n'est plus "
+                    "modifiable. Une vente déclenchée ne se réécrit pas."
+                )
+                st.caption(
+                    f"Prix cible {fmt_price(tp.target_price)} · "
+                    f"vendue {fmt_qty(tp.executed_qty)} · "
+                    f"gain réalisé {fmt_price(tp.gain_realized)}"
+                )
+                continue
+
+            cols = st.columns(3)
+            new_price = cols[0].number_input(
+                "Prix cible",
+                min_value=0.0,
+                value=float(tp.target_price or 0.0),
+                step=float(rules.tick_size),
+                format="%.2f",
+                key=f"single_price_{tp.tp_id}",
+            )
+            new_sell = cols[1].number_input(
+                "Vente (%)",
+                min_value=0.0,
+                max_value=100.0,
+                value=float(tp.sell_percent),
+                step=1.0,
+                key=f"single_sell_{tp.tp_id}",
+            )
+            cols[2].metric("Gain estimé", fmt_price(tp.gain_estimated))
+
+            confirm_save = st.checkbox(
+                "Confirmer la modification", key=f"confirm_save_{tp.tp_id}"
+            )
+            buttons = st.columns(2)
+
+            if buttons[0].button(
+                "💾 Enregistrer",
+                key=f"save_tp_{tp.tp_id}",
+                disabled=not confirm_save,
+                width="stretch",
+            ):
+                target = float(rules.round_price(new_price, mode="down"))
+                average = position.metrics.average_price
+
+                if target <= 0:
+                    st.error("Prix cible invalide.")
+                elif average and target <= average:
+                    st.error(
+                        f"Le prix cible doit rester au-dessus du prix moyen "
+                        f"({fmt_price(average)})."
+                    )
+                else:
+                    tp.target_price = target
+                    tp.target_percent = percent_change(target, average) if average else None
+                    tp.sell_percent = new_sell
+                    tp.estimated_qty = position.metrics.net_qty * new_sell / 100.0
+                    position.log(
+                        EventType.POSITION_UPDATED,
+                        f"TP {tp.sequence_number} modifié : {fmt_price(target)} · "
+                        f"vente {new_sell:.0f} %",
+                        tp_id=tp.tp_id,
+                    )
+                    _reorder_tps()
+                    _save(f"TP {tp.sequence_number} enregistré")
+
+            if buttons[1].button(
+                "🗑️ Supprimer",
+                key=f"del_tp_{tp.tp_id}",
+                disabled=not confirm_save,
+                width="stretch",
+            ):
+                tp.status = TPStatus.CANCELED
+                tp.last_error = "Supprimé manuellement depuis le Dashboard"
+                position.log(
+                    EventType.POSITION_UPDATED,
+                    f"TP {tp.sequence_number} supprimé manuellement",
+                    tp_id=tp.tp_id,
+                )
+
+                total_after = sum(
+                    t.sell_percent
+                    for t in position.take_profits
+                    if t.status is TPStatus.PENDING
+                )
+                position.log(
+                    EventType.POSITION_UPDATED,
+                    f"Attention : les TP restants ne vendent que {total_after:.2f} % "
+                    "de la position",
+                )
+                _reorder_tps()
+                _save(f"TP {tp.sequence_number} supprimé")
+
+# ==========================================================================
+# Stop Loss
+# ==========================================================================
+
+st.subheader("Stop Loss")
+
+sl = position.stop_loss
+sl_cols = st.columns(5)
+sl_cols[0].metric("Mode", sl.mode.value)
+sl_cols[1].metric("Valeur", sl.value)
+sl_cols[2].metric("Prix résolu", fmt_price(sl.resolved_price))
+sl_cols[3].metric("Quantité protégée", fmt_qty(sl.quantity))
+sl_cols[4].metric("Statut", sl.status.value)
+
+st.caption(
+    f"Remplacements : {sl.replace_count} · orderId {sl.order_id or '—'} · "
+    f"clientOrderId {sl.client_order_id or '—'} · décalage limite "
+    f"{sl.limit_offset_percent} %"
+)
+if sl.last_error:
+    st.error(sl.last_error)
+
+if position.is_open and position.metrics.net_qty > 0:
+    with st.expander("Modifier / supprimer le SL", expanded=False):
+        st.warning(
+            "Déplacer le SL annule l'ordre existant puis en crée un nouveau. "
+            "Supprimer le SL laisse la position **sans aucune protection** — "
+            "le worker le recréera au cycle suivant, mais il y aura une fenêtre "
+            "sans stop."
+        )
+
+        edit_cols = st.columns(2)
+
+        new_sl_price = edit_cols[0].number_input(
+            "Nouveau prix de SL",
+            min_value=0.0,
+            value=float(sl.resolved_price or 0.0),
+            step=float(rules.tick_size),
+            format="%.2f",
+            key="sl_new_price",
+        )
+        rule_options = [rule.value for rule in SLRuleAfterTP]
+        manual_rule = edit_cols[1].selectbox(
+            "Ou appliquer une règle", ["—"] + rule_options, key="sl_new_rule"
+        )
+
+        confirm_sl = st.checkbox(
+            "Je confirme l'action sur le SL unique", key="sl_confirm"
+        )
+
+        sl_buttons = st.columns(2)
+
+        if sl_buttons[0].button(
+            "💾 Déplacer le SL",
+            key="sl_move",
+            disabled=not confirm_sl,
+            width="stretch",
+        ):
+            engine = PositionEngine(rules)
+            target = float(new_sl_price)
+            if manual_rule != "—":
+                resolved = engine.compute_sl_rule_price(position, manual_rule)
+                if resolved:
+                    target = float(rules.round_price(resolved, mode="down"))
+
+            remaining = position.metrics.net_qty
+            result = execution.move_stop_loss(
+                position, new_stop_price=target, quantity=remaining
+            )
+            position.stop_loss.resolved_price = target
+            recompute_position(position)
+            service.positions.save(position)
+
+            if result.success:
+                position.log(
+                    EventType.SL_MOVED,
+                    f"SL déplacé vers {fmt_price(target)} depuis le Dashboard",
+                    new_stop=target,
+                )
+                service.positions.save(position)
+                st.success(f"SL déplacé vers {fmt_price(target)}")
+                st.cache_resource.clear()
+                st.rerun()
+            else:
+                st.error(f"SL non déplacé : {result.error}")
+
+        if sl_buttons[1].button(
+            "🗑️ Supprimer le SL",
+            key="sl_delete",
+            disabled=not confirm_sl,
+            width="stretch",
+        ):
+            if sl.order_id:
+                cancelled = execution.cancel_order(
+                    position.symbol,
+                    order_id=sl.order_id,
+                    client_order_id=sl.client_order_id,
+                )
+                if not cancelled.success:
+                    st.error(f"Annulation refusée : {cancelled.error}")
+                    st.stop()
+
+            sl.status = SLStatus.CANCELED
+            sl.order_id = None
+            sl.client_order_id = None
+            position.log(
+                EventType.MANUAL_CHANGE,
+                "SL supprimé manuellement — position non protégée",
+            )
+            _save("SL supprimé")
+else:
+    st.caption("Le SL n'est modifiable que sur une position ouverte avec quantité.")
+
+# ==========================================================================
+# Ordres réels + réconciliation
+# ==========================================================================
+
+st.subheader("Ordres ouverts réels (Binance)")
+
+orders, error = service.open_orders(position.symbol)
+if error:
+    st.info(error)
+
+if orders:
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "orderId": o.order_id,
+                    "clientOrderId": o.client_order_id,
+                    "Sens": o.side,
+                    "Type": o.order_type,
+                    "Prix": fmt_price(o.price),
+                    "Stop": fmt_price(o.stop_price),
+                    "Quantité": fmt_qty(o.orig_qty),
+                    "Exécuté": fmt_qty(o.executed_qty),
+                    "Statut": o.status,
+                    "Origine": o.owner or "hors bot",
+                }
+                for o in orders
+            ]
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+else:
+    st.caption("Aucun ordre ouvert côté Binance pour cette paire.")
+
+raw_orders = [
+    {
+        "orderId": o.order_id,
+        "clientOrderId": o.client_order_id,
+        "side": o.side,
+        "type": o.order_type,
+        "origQty": o.orig_qty,
+        "price": o.price,
+    }
+    for o in orders
+]
+for finding in audit_open_orders(position, raw_orders):
+    st.warning(f"⚠️ {finding.message} — {finding.suggested_action}")
+
+st.markdown("**Réconcilier avec Binance**")
+if st.button("Lancer une réconciliation"):
+    with st.spinner("Comparaison de l'état local et de l'état Binance..."):
+        report = service.reconciliation.reconcile(position)
+
+    if not report.has_desync:
+        st.success("✅ État local et Binance synchronisés.")
+    else:
+        st.warning(f"{len(report.findings)} écart(s) détecté(s) :")
+        for finding in report.findings:
+            level = {"CRITICAL": st.error, "WARNING": st.warning}.get(
+                finding.severity, st.info
+            )
+            suffix = " (appliqué automatiquement)" if finding.auto_applied else ""
+            level(f"[{finding.kind}] {finding.message}{suffix}")
+            if finding.suggested_action:
+                st.caption(f"Action suggérée : {finding.suggested_action}")
+    service.positions.save(position)
+
+# ==========================================================================
+# Automatisation
+# ==========================================================================
+
+st.subheader("Automatisation")
+auto_cols = st.columns(2)
+paused = auto_cols[0].toggle("Mettre en pause", value=position.automation.paused)
+cancel_on_tp1 = auto_cols[1].toggle(
+    "Annuler les Entries restantes au TP1",
+    value=position.automation.cancel_remaining_entries_on_first_tp,
+)
+
+if (
+    paused != position.automation.paused
+    or cancel_on_tp1 != position.automation.cancel_remaining_entries_on_first_tp
+):
+    position.automation.paused = paused
+    position.automation.cancel_remaining_entries_on_first_tp = cancel_on_tp1
+    position.log(
+        EventType.POSITION_UPDATED,
+        f"Automatisation {'mise en pause' if paused else 'réactivée'}",
+    )
+    service.positions.save(position)
+    st.success("Préférence enregistrée")
+
+# ==========================================================================
+# Historique
+# ==========================================================================
+
+st.subheader("Historique")
+if position.history:
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Date": h.timestamp.strftime("%d/%m/%Y %H:%M:%S"),
+                    "Événement": h.event_type.value,
+                    "Message": h.message,
+                }
+                for h in reversed(position.history)
+            ]
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+else:
+    st.caption("Aucun événement enregistré pour cette position.")
+
+# ==========================================================================
+# Fermeture manuelle
+# ==========================================================================
+
+if position.is_open:
+    st.divider()
+    with st.expander("Fermer la position (manuel)", expanded=False):
+        st.warning(
+            "Cette action clôture la position localement et annule les ordres "
+            "suivis. Elle n'envoie **aucune vente** : les sorties déjà exécutées "
+            "côté Binance doivent être réconciliées d'abord."
+        )
+        confirm_close = st.checkbox("Je confirme la fermeture locale")
+        if st.button("Fermer la position", disabled=not confirm_close):
+            for entry in position.open_entries:
+                execution.cancel_entry(position, entry)
+            if position.stop_loss.status is SLStatus.ACTIVE and position.stop_loss.order_id:
+                execution.cancel_order(position.symbol, order_id=position.stop_loss.order_id)
+                position.stop_loss.status = SLStatus.CANCELED
+            finish_position(position, CloseReason.MANUAL_CLOSE)
+            service.positions.save(position)
+            st.success("Position fermée localement.")
+            st.rerun()
+
+if position.status.value == "CLOSED":
+    st.divider()
+    st.info(
+        f"Position terminée le "
+        f"{position.closed_at.strftime('%d/%m/%Y %H:%M') if position.closed_at else '—'} — "
+        f"raison {position.close_reason.value if position.close_reason else '—'} — "
+        f"PnL réalisé {fmt_quote(position.pnl.realized, position.quote_asset)}"
+    )

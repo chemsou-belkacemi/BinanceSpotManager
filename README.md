@@ -1,0 +1,282 @@
+# BinanceSpotManager V2
+
+Gestionnaire intelligent de positions Spot Binance. Une paire = une position active.
+Développé en **Python + Streamlit**, conçu pour fonctionner **exclusivement sur Binance Demo**
+pendant la phase de développement et de validation.
+
+> **Sécurité — à lire en premier.** Toute écriture (création d'ordre, annulation,
+> protection, vente) est refusée si l'URL cible n'est pas dans la liste blanche Demo,
+> avec le message `SECURITE : operation interdite hors Binance Demo`. Le mode Live
+> n'est pas implémenté : `BSM_RUN_MODE=LIVE` est ramené à `DRY_RUN` au chargement.
+
+---
+
+## 1. Installation
+
+Windows / PowerShell, depuis la racine du projet :
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+Ne jamais modifier `.venv` manuellement.
+
+## 2. Configuration
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+```
+
+Variables essentielles :
+
+| Variable | Rôle | Valeur par défaut |
+|---|---|---|
+| `BSM_ENV` | `DEMO` ou `LIVE` | `DEMO` |
+| `BSM_RUN_MODE` | `DRY_RUN`, `DEMO_MANUAL`, `DEMO_AUTO` | `DRY_RUN` |
+| `BSM_DEMO_BASE_URL` | URL Binance Demo | `https://testnet.binance.vision` |
+| `BSM_DEMO_API_KEY` | clé API Demo | vide |
+| `BSM_DEMO_API_SECRET` | secret API Demo | vide |
+| `BSM_QUOTE_ASSET` | actif de cotation | `USDT` |
+
+**Quelle URL utiliser ?** Le cahier des charges mentionnait `https://demo-api.binance.com`.
+Le testnet Spot public de Binance est `https://testnet.binance.vision`, et **les deux sont
+acceptés** par la liste blanche. Mets dans `.env` l'URL correspondant à tes clés — si elles
+viennent de `testnet.binance.vision`, la valeur par défaut convient.
+
+Le fichier `.env` est ignoré par Git. Les clés ne sont jamais affichées par l'application.
+
+## 3. Vérification avant tout lancement
+
+```powershell
+python scripts/check_connection.py
+```
+
+Affiche : mode, URL, appartenance à la liste blanche, ping, offset horloge, état du compte,
+solde, existence de la paire et filtres. **Ne crée aucun ordre.**
+
+Si les clés sont absentes, le script reste utilisable pour tout ce qui est public (prix, filtres).
+
+## 4. Lancement de l'interface
+
+```powershell
+streamlit run app.py
+```
+
+Pages disponibles dans le menu de gauche :
+
+| Page | Rôle |
+|---|---|
+| **Dashboard** | worker, portefeuille, positions, ordres réels, annulation, journal |
+| **New Trade** | création d'une position complète (Quick / Advanced) |
+| **Positions** | détail, ordres Binance, réconciliation, SL manuel, automatisation |
+| **History** | positions terminées, statistiques, duplication de stratégie |
+| **Settings** | sécurité, risque, presets, notifications, diagnostic |
+
+## 5. Lancement du worker
+
+Le worker est un processus **séparé** de Streamlit. Deux façons :
+
+**Depuis l'interface** — Dashboard → *Démarrer le worker*. Le processus est détaché
+(sans fenêtre visible sous Windows) et son état s'affiche dans le bandeau.
+
+**En ligne de commande :**
+
+```powershell
+python scripts/bot_worker.py
+```
+
+Le worker écrit son PID, son heartbeat et son état dans `data/bot_runtime.json`,
+tourne toutes les 5 secondes, et reste vivant même sans aucune position.
+
+**Arrêt :** bouton *Arrêter proprement* du Dashboard, ou suppression de `data/bot_stop.flag`.
+L'*Arrêt forcé* tue le processus — à réserver à un worker bloqué.
+
+Un verrou (`data/bot_worker.lock`) empêche deux workers de piloter le même compte.
+Si un worker démarre alors qu'un autre est vivant, le démarrage est refusé.
+
+## 6. Créer un trade
+
+1. **New Trade** → saisir la paire (`BTCUSDT`). Le bot vérifie immédiatement la paire,
+   affiche le prix, les soldes, `tickSize`, `stepSize`, `minQty`, `minNotional`.
+2. Choisir le capital : montant fixe, pourcentage du solde, ou risque maximum.
+   La réserve de capital est prélevée **avant** tout calcul et n'est jamais engagée.
+3. Définir les Entries (1 à N, jusqu'à 20 dans l'interface). Chaque Entry est Market
+   ou Limit, en prix ou en pourcentage, avec référence `Entry 1` / `Entry précédente` /
+   `Prix actuel`.
+4. Définir les TP (1 à N), chacun indépendant, avec son pourcentage de vente et sa
+   règle de SL après atteinte.
+5. Définir le SL (prix fixe ou pourcentage sous prix moyen / Entry 1 / dernière Entry).
+6. Lire la simulation : prix moyen, quantités, SL, perte max, gain par TP, gain total,
+   scénarios A/B/C, exposition et risque portefeuille.
+7. Cocher la confirmation et lancer. Le worker doit être démarré pour que les TP et le
+   SL soient surveillés.
+
+Si une position existe déjà sur la paire, **aucune seconde position n'est créée** :
+les nouvelles Entries sont ajoutées à la position existante.
+
+## 7. Modes opérationnels
+
+| Mode | Comportement |
+|---|---|
+| `DRY_RUN` | Prix réels, calculs réels, **aucun ordre envoyé**. Idéal pour tester. |
+| `DEMO_MANUAL` | Demo avec validation humaine possible avant chaque envoi. |
+| `DEMO_AUTO` | Demo, le worker agit automatiquement. |
+| `LIVE` | **Non implémenté.** Toute écriture est refusée. |
+
+Pour changer de mode : éditer `BSM_RUN_MODE` dans `.env`, puis *Recharger la configuration*
+dans Settings. Aucune bascule Live automatique n'est possible.
+
+## 8. Architecture
+
+```
+BinanceSpotManager/
+├── app.py                      point d'entrée Streamlit
+├── ui_common.py                helpers d'interface partagés
+├── requirements.txt
+├── .env.example / .gitignore / pytest.ini
+├── binance_spot_manager/
+│   ├── config.py               Settings + garde-fous de sécurité
+│   ├── binance_client.py       client Spot signé HMAC-SHA256
+│   ├── symbol_rules.py         tickSize / stepSize / minQty / minNotional
+│   ├── models.py               modèles dynamiques (Pydantic v2)
+│   ├── position_store.py       persistance JSON atomique
+│   ├── event_store.py          journal JSONL
+│   ├── strategy_engine.py      résolution des niveaux, sizing, scénarios
+│   ├── risk_engine.py          limites portefeuille
+│   ├── position_engine.py      logique métier d'une position
+│   ├── execution_engine.py     envoi d'ordres, idempotence
+│   ├── automation_engine.py    surveillance TP, SL évolutif
+│   ├── reconciliation_engine.py comparaison état local ↔ Binance
+│   ├── notification_engine.py  Telegram / Email (+ SMS / WhatsApp réservés)
+│   ├── bot_process_manager.py  démarrage/arrêt du worker, verrou
+│   └── dashboard_service.py    façade de lecture pour l'interface
+├── pages/                      1_Dashboard, 2_New_Trade, 3_Positions,
+│                               4_History, 5_Settings
+├── scripts/                    bot_worker, check_connection,
+│                               check_open_orders, demo_tests
+├── tests/                      test_engines, test_risk_and_store,
+│                               test_automation, test_demo_integration
+├── data/                       positions/, signals/, bot_runtime.json, ...
+└── logs/                       events.jsonl, bot.log, errors.log
+```
+
+### Responsabilités
+
+- **Strategy Engine** ne touche jamais au réseau : il transforme une saisie en plan chiffré.
+- **Position Engine** ne touche jamais au réseau : il recalcule l'état local.
+- **Execution Engine** est le seul à envoyer des ordres, et vérifie toujours
+  l'existence d'un ordre avant d'en créer un.
+- **Automation Engine** décide *quand* agir, l'Execution Engine *comment*.
+- **Reconciliation Engine** ne corrige automatiquement qu'un fill réel non ambigu.
+
+## 9. Choix techniques importants
+
+**Un seul SL côté Binance.** Le projet ne crée jamais un OCO par TP : c'est le worker qui
+surveille les TP et déclenche les ventes. Cela évite `Filter failure: MAX_NUM_ALGO_ORDERS`.
+Il n'y a qu'un `STOP_LOSS_LIMIT` pour la quantité restante, recalculé après chaque TP.
+
+**Idempotence.** Chaque ordre porte un `clientOrderId` du type `BSM-D-BTC-<position>-E3`,
+construit pour rester sous les 36 caractères. Avant tout envoi ou retry, le bot demande à
+Binance si cet identifiant existe déjà : si oui, il adopte l'ordre existant au lieu d'en
+créer un second. C'est ce qui permet de redémarrer le bot sans doubler les ordres.
+
+**Confirmation obligatoire des TP.** Un TP n'est jamais considéré exécuté parce que le prix
+a touché le niveau. Il faut un fill confirmé par Binance ; un TP partiellement exécuté
+enregistre ce qui a réellement été vendu et le cycle suivant prend le reste.
+
+**Prix en `Decimal`, quantités toujours arrondies vers le bas.** Les arrondis passent par
+`tickSize` et `stepSize` récupérés dynamiquement — jamais codés en dur — et les valeurs sont
+envoyées en texte, pour éviter la notation scientifique que Binance refuse.
+
+**Fenêtre non protégée signalée.** Si le SL ne peut pas être recréé après un déplacement,
+l'événement est journalisé en niveau `CRITICAL` plutôt que masqué.
+
+## 10. Tests
+
+Tests hors ligne (aucun réseau, aucun ordre) :
+
+```powershell
+pytest -q
+```
+
+Couvrent : arrondis prix/quantité, minQty, minNotional, formatage sans notation
+scientifique, conversions prix ↔ pourcentage, les trois modes de capital, répartitions,
+prix moyen pondéré, scénarios A/B/C, détection de plan invalide, application des fills,
+idempotence du recalcul, les six règles de SL évolutif, le risque portefeuille,
+la règle « une paire = une position », l'écriture atomique, et toute la chaîne
+d'automation TP/SL avec un client Binance simulé.
+
+Tests d'intégration Demo (lecture seule) :
+
+```powershell
+pytest tests/test_demo_integration.py -q
+python scripts/demo_tests.py
+python scripts/demo_tests.py --execute   # ajoute /order/test (aucune exécution)
+```
+
+ou pour ne lancer que le hors ligne :
+
+```powershell
+pytest -q -m unit
+```
+
+Aucun test destructif n'est lancé automatiquement au démarrage de l'application.
+
+## 11. Où sont les données et les logs
+
+| Chemin | Contenu |
+|---|---|
+| `data/positions/<position_id>.json` | une position par fichier, écriture atomique |
+| `data/bot_runtime.json` | état, PID, heartbeat du worker |
+| `data/bot_stop.flag` | présent = arrêt demandé |
+| `data/bot_worker.lock` | verrou anti double-worker |
+| `data/settings.json` | réglages de la page Settings |
+| `data/presets.json` | presets enregistrés |
+| `logs/events.jsonl` | journal d'événements, une ligne JSON par événement |
+| `logs/bot.log` | journal d'exécution |
+| `logs/errors.log` | erreurs applicatives |
+
+## 12. Résolution de problèmes
+
+**Le worker ne démarre pas.** Vérifier `data/bot_worker.lock` : s'il contient un PID mort,
+Settings → *Nettoyer l'état du worker*. Si un worker vivant le détient, l'arrêter d'abord.
+
+**Le dashboard affiche « Worker inactif » avec un heartbeat ancien.** Le processus est
+probablement bloqué : *Arrêt forcé*, puis nettoyage, puis redémarrage.
+
+**Les ordres n'apparaissent pas.** En `DRY_RUN`, aucun ordre n'existe côté Binance — c'est
+le comportement attendu. Sinon, vérifier que les clés API sont renseignées et que le compte
+Demo est actif.
+
+**`Filter failure`** — les quantités ou prix ne respectent pas les filtres. Vérifier via
+`check_connection.py` : `minQty`, `minNotional`, `tickSize`, `stepSize` de la paire.
+
+**Paire inexistante ou non vérifiable** — erreur réseau ou symbole erroné ; New Trade
+affiche le détail.
+
+## 13. Limites connues de cette version
+
+- **Mode Live non implémenté.** L'architecture est prête (configuration séparée, URL
+  distincte, clés distinctes) mais l'exécution Live est refusée par le code.
+- **Analyse de signaux Telegram non implémentée.** L'abstraction existe (canal, déduplication
+  prévue par `content_hash`), l'intégration viendra après le cœur du bot.
+- **SMS et WhatsApp** : interfaces présentes, envoi désactivé.
+- **Le montant engagé dans le sizing dépend du solde lu au moment du calcul.** Si le solde
+  change entre la simulation et l'exécution, les quantités envoyées peuvent différer.
+- **Persistance JSON locale.** Migrable vers SQLite/PostgreSQL : tous les accès passent par
+  `PositionStore`, aucun appel direct au système de fichiers ailleurs.
+- **Le break-even avec frais** estime le point d'équilibre à partir des commissions d'achat
+  réellement constatées, sans coût de sortie estimé. Il est présenté comme une estimation.
+- **Un seul TP est traité par cycle** (5 s) pour garder un état cohérent — sur une chute très
+  rapide du prix, plusieurs TP peuvent être atteints avant que le cycle suivant ne les traite,
+  mais ils seront bien exécutés aux niveaux prévus.
+
+## 14. Évolutions prévues
+
+Telegram (listener, parser, déduplication, validation humaine), TradingView et autres
+sources de signaux, statistiques avancées (win rate par source, drawdown, fréquence
+d'atteinte des TP), SMS / WhatsApp, et — après validation complète sur Demo — un mode Live
+avec ses propres contrôles et confirmations renforcées.
