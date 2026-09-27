@@ -25,6 +25,10 @@ def test_one_stop_click_waits_then_refreshes(monkeypatch):
 
     app = AppTest.from_file(str(DASHBOARD), default_timeout=20).run()
     assert not app.exception
+    metric_labels = [metric.label for metric in app.metric]
+    assert "Positions suivies" in metric_labels
+    assert "Boucles" not in metric_labels
+    assert "Heartbeat" not in metric_labels
     stop = next(button for button in app.button if "Arrêter proprement" in button.label)
     stop.click().run()
     assert not app.exception

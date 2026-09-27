@@ -55,6 +55,8 @@ from ui_common import (  # noqa: E402
     fmt_qty,
     fmt_quote,
     get_service,
+    live_market_price,
+    live_price,
     load_rules,
     page_header,
     sidebar_status,
@@ -94,7 +96,7 @@ price = None
 balances: dict[str, float] = {}
 
 if rules is not None:
-    price = service.current_price(rules.symbol)
+    price = live_price(rules.symbol)
     portfolio = service.portfolio()
     balances = dict(portfolio.base_balances)
     balances[settings.quote_asset] = portfolio.quote_free
@@ -232,7 +234,8 @@ for index in range(int(entry_count)):
         default_offset = [None, -2.0, -5.0][index] if index < 3 else None
         if order_type is OrderType.MARKET:
             col_mid.markdown("**Prix**")
-            col_mid.info(f"Marché ≈ {fmt_price(price)}")
+            with col_mid:
+                live_market_price(rules.symbol)
             price_mode = PriceMode.FIXED_PRICE
             offset = None
             fixed_price = price
@@ -427,173 +430,180 @@ execution_policy = st.radio(
 # Simulation
 # ==========================================================================
 
-st.caption("Le prix affiché se rafraîchit toutes les 2 s ; la simulation se recalcule quand le formulaire change.")
+st.caption("Le prix et la simulation se rafraîchissent automatiquement toutes les 1 s.")
 
-spec = StrategySpec(
-    symbol=rules.symbol,
-    entries=entry_specs,
-    take_profits=tp_specs,
-    stop_loss=SLSpec(mode=sl_mode, value=sl_value),
-    capital_mode=capital_mode,
-    capital_amount=capital_amount,
-    capital_percent=capital_percent,
-    risk_percent=risk_percent,
-    available_quote=available_quote,
-    reserve_percent=float(reserve_percent),
-    current_price=float(price or 0.0),
-    tp_execution_policy=(
-        TPExecutionPolicy.MARKET_ON_TRIGGER
-        if execution_policy == "MARKET_ON_TRIGGER"
-        else TPExecutionPolicy.LIMIT_ON_TRIGGER
-    ),
-    source=SignalSource.MANUAL,
-    source_name="manual",
-)
+@st.fragment(run_every="1s")
+def simulation_panel():
+    price = live_price(rules.symbol)
+    spec = StrategySpec(
+        symbol=rules.symbol,
+        entries=entry_specs,
+        take_profits=tp_specs,
+        stop_loss=SLSpec(mode=sl_mode, value=sl_value),
+        capital_mode=capital_mode,
+        capital_amount=capital_amount,
+        capital_percent=capital_percent,
+        risk_percent=risk_percent,
+        available_quote=available_quote,
+        reserve_percent=float(reserve_percent),
+        current_price=float(price or 0.0),
+        tp_execution_policy=(
+            TPExecutionPolicy.MARKET_ON_TRIGGER
+            if execution_policy == "MARKET_ON_TRIGGER"
+            else TPExecutionPolicy.LIMIT_ON_TRIGGER
+        ),
+        source=SignalSource.MANUAL,
+        source_name="manual",
+    )
 
-plan = StrategyEngine(rules).build(spec)
+    plan = StrategyEngine(rules).build(spec)
 
-# Arrondi au tick AVANT validation : un prix deduit d'un pourcentage tombe
-# rarement sur un multiple exact du tickSize, et Binance refuserait l'ordre.
-for resolved_entry in plan.entries:
-    if resolved_entry.price > 0:
-        resolved_entry.price = float(rules.round_price(resolved_entry.price, mode="down"))
-for resolved_tp in plan.take_profits:
-    if resolved_tp.target_price > 0:
-        resolved_tp.target_price = float(
-            rules.round_price(resolved_tp.target_price, mode="down")
-        )
-if plan.stop_loss.price > 0:
-    plan.stop_loss.price = float(rules.round_price(plan.stop_loss.price, mode="down"))
-
-# Les erreurs de filtre dependent des prix arrondis : on relance la validation.
-plan.errors = [
-    e for e in plan.errors if "tickSize" not in e and "minNotional" not in e
-]
-for resolved_entry in plan.entries:
-    if resolved_entry.price > 0 and resolved_entry.qty > 0:
-        plan.errors.extend(
-            f"Entry {resolved_entry.sequence} : {err}"
-            for err in rules.validate_order(
-                resolved_entry.price,
-                resolved_entry.qty,
-                market=resolved_entry.order_type.value == "MARKET",
+    # Arrondi au tick AVANT validation : un prix deduit d'un pourcentage tombe
+    # rarement sur un multiple exact du tickSize, et Binance refuserait l'ordre.
+    for resolved_entry in plan.entries:
+        if resolved_entry.price > 0:
+            resolved_entry.price = float(rules.round_price(resolved_entry.price, mode="down"))
+    for resolved_tp in plan.take_profits:
+        if resolved_tp.target_price > 0:
+            resolved_tp.target_price = float(
+                rules.round_price(resolved_tp.target_price, mode="down")
             )
-        )
+    if plan.stop_loss.price > 0:
+        plan.stop_loss.price = float(rules.round_price(plan.stop_loss.price, mode="down"))
 
-st.divider()
-st.subheader("Simulation")
+    # Les erreurs de filtre dependent des prix arrondis : on relance la validation.
+    plan.errors = [
+        e for e in plan.errors if "tickSize" not in e and "minNotional" not in e
+    ]
+    for resolved_entry in plan.entries:
+        if resolved_entry.price > 0 and resolved_entry.qty > 0:
+            plan.errors.extend(
+                f"Entry {resolved_entry.sequence} : {err}"
+                for err in rules.validate_order(
+                    resolved_entry.price,
+                    resolved_entry.qty,
+                    market=resolved_entry.order_type.value == "MARKET",
+                )
+            )
 
-if plan.errors:
-    error_list(plan.errors)
+    st.divider()
+    st.subheader("Simulation")
+
+    if plan.errors:
+        error_list(plan.errors)
+        warning_list(plan.warnings)
+        st.stop()
+
     warning_list(plan.warnings)
-    st.stop()
 
-warning_list(plan.warnings)
+    # -- carte de résumé (section 42) ------------------------------------------
 
-# -- carte de résumé (section 42) ------------------------------------------
+    left, right = st.columns([2, 3])
 
-left, right = st.columns([2, 3])
-
-with left:
-    st.markdown(f"### {plan.symbol}")
-    st.markdown(
-        f"""
-**Prix actuel** : {fmt_price(price)} {quote_asset}
-
-**Solde {quote_asset}** : {fmt_price(available_quote)}
-
-**Capital** : {fmt_price(plan.capital_total)} {quote_asset}
-
-**Capital en réserve** : {fmt_price(plan.capital_reserved)}
-"""
-    )
-    for entry in plan.entries:
+    with left:
+        st.markdown(f"### {plan.symbol}")
         st.markdown(
-            f"**E{entry.sequence}** — {fmt_quote(entry.quote_amount, quote_asset)} "
-            f"@ {fmt_price(entry.price)} → {fmt_qty(entry.qty)} {rules.base_asset}"
+            f"""
+    **Prix actuel** : {fmt_price(price)} {quote_asset}
+
+    **Solde {quote_asset}** : {fmt_price(available_quote)}
+
+    **Capital** : {fmt_price(plan.capital_total)} {quote_asset}
+
+    **Capital en réserve** : {fmt_price(plan.capital_reserved)}
+    """
         )
-    st.markdown(
-        f"""
-**Prix moyen estimé** : {fmt_price(plan.estimated_average_price)}
-
-**Quantité totale** : {fmt_qty(plan.estimated_total_qty)} {rules.base_asset}
-
-**SL** : {fmt_price(plan.stop_loss.price)} ({fmt_percent(plan.stop_loss.percent_from_average)})
-
-**Perte max au SL** : {fmt_quote(plan.loss_max_estimated, quote_asset)}
-
-**Risque** : {plan.risk_percent_of_capital:.2f} % du capital engagé
-"""
-    )
-
-with right:
-    st.markdown("### Take Profits")
-    tp_rows = []
-    for tp in plan.take_profits:
-        tp_rows.append(
-            {
-                "TP": tp.sequence,
-                "Cible": fmt_percent(tp.target_percent),
-                "Prix": fmt_price(tp.target_price),
-                "Vente": f"{tp.sell_percent:.0f} %",
-                "Quantité": fmt_qty(tp.estimated_qty),
-                "Gain estimé": fmt_quote(tp.gain_estimated, quote_asset),
-                "SL après": tp.sl_rule_after_hit.value,
-            }
-        )
-    st.dataframe(tp_rows, width="stretch", hide_index=True)
-    st.metric("Gain total estimé", fmt_quote(plan.gain_total_estimated, quote_asset))
-
-# -- scénarios (section 74) ------------------------------------------------
-
-with st.expander("Scénarios d'exécution", expanded=False):
-    for scenario in plan.scenarios:
+        for entry in plan.entries:
+            st.markdown(
+                f"**E{entry.sequence}** — {fmt_quote(entry.quote_amount, quote_asset)} "
+                f"@ {fmt_price(entry.price)} → {fmt_qty(entry.qty)} {rules.base_asset}"
+            )
         st.markdown(
-            f"**{scenario.label}** — investi {fmt_quote(scenario.invested, quote_asset)} · "
-            f"prix moyen {fmt_price(scenario.average_price)} · "
-            f"SL {fmt_price(scenario.sl_price)} · "
-            f"perte max {fmt_quote(scenario.max_loss, quote_asset)}"
+            f"""
+    **Prix moyen estimé** : {fmt_price(plan.estimated_average_price)}
+
+    **Quantité totale** : {fmt_qty(plan.estimated_total_qty)} {rules.base_asset}
+
+    **SL** : {fmt_price(plan.stop_loss.price)} ({fmt_percent(plan.stop_loss.percent_from_average)})
+
+    **Perte max au SL** : {fmt_quote(plan.loss_max_estimated, quote_asset)}
+
+    **Risque** : {plan.risk_percent_of_capital:.2f} % du capital engagé
+    """
         )
 
-# -- aperçu graphique (section 75) -----------------------------------------
+    with right:
+        st.markdown("### Take Profits")
+        tp_rows = []
+        for tp in plan.take_profits:
+            tp_rows.append(
+                {
+                    "TP": tp.sequence,
+                    "Cible": fmt_percent(tp.target_percent),
+                    "Prix": fmt_price(tp.target_price),
+                    "Vente": f"{tp.sell_percent:.0f} %",
+                    "Quantité": fmt_qty(tp.estimated_qty),
+                    "Gain estimé": fmt_quote(tp.gain_estimated, quote_asset),
+                    "SL après": tp.sl_rule_after_hit.value,
+                }
+            )
+        st.dataframe(tp_rows, width="stretch", hide_index=True)
+        st.metric("Gain total estimé", fmt_quote(plan.gain_total_estimated, quote_asset))
 
-with st.expander("Aperçu des niveaux", expanded=False):
-    levels: list[tuple[str, float]] = []
-    for tp in reversed(plan.take_profits):
-        levels.append((f"TP{tp.sequence}", tp.target_price))
-    levels.append(("Prix moyen", plan.estimated_average_price))
-    for entry in reversed(plan.entries):
-        levels.append((f"E{entry.sequence}", entry.price))
-    levels.append(("SL", plan.stop_loss.price))
+    # -- scénarios (section 74) ------------------------------------------------
 
-    max_level = max(v for _, v in levels if v > 0) if levels else 1.0
-    for label, value in levels:
-        if value <= 0:
-            continue
-        width = max(int(value / max_level * 100), 2)
-        st.markdown(f"`{label:>10}` {fmt_price(value)}")
-        st.progress(min(width, 100) / 100)
+    with st.expander("Scénarios d'exécution", expanded=False):
+        for scenario in plan.scenarios:
+            st.markdown(
+                f"**{scenario.label}** — investi {fmt_quote(scenario.invested, quote_asset)} · "
+                f"prix moyen {fmt_price(scenario.average_price)} · "
+                f"SL {fmt_price(scenario.sl_price)} · "
+                f"perte max {fmt_quote(scenario.max_loss, quote_asset)}"
+            )
 
-# -- risque portefeuille (section 72) --------------------------------------
+    # -- aperçu graphique (section 75) -----------------------------------------
 
-try:
-    risk = RiskEngine(service.risk_limits()).evaluate(
-        plan, service.risk_snapshot(available_quote), symbol=rules.symbol
-    )
-except Exception as exc:
-    risk = RiskReport()
-    risk.refuse(f"Risque non calculable : {exc}")
+    with st.expander("Aperçu des niveaux", expanded=False):
+        levels: list[tuple[str, float]] = []
+        for tp in reversed(plan.take_profits):
+            levels.append((f"TP{tp.sequence}", tp.target_price))
+        levels.append(("Prix moyen", plan.estimated_average_price))
+        for entry in reversed(plan.entries):
+            levels.append((f"E{entry.sequence}", entry.price))
+        levels.append(("SL", plan.stop_loss.price))
 
-st.markdown("### Exposition après ce trade")
-cols = st.columns(4)
-cols[0].metric("Exposition", f"{risk.planned_exposure_percent:.1f} %")
-cols[1].metric("Risque de cette position", f"{risk.planned_risk_percent:.2f} %")
-cols[2].metric("Risque total projeté", f"{risk.projected_total_risk_percent:.2f} %")
-cols[3].metric("Capital libre après", fmt_price(risk.capital_free_after))
+        max_level = max(v for _, v in levels if v > 0) if levels else 1.0
+        for label, value in levels:
+            if value <= 0:
+                continue
+            width = max(int(value / max_level * 100), 2)
+            st.markdown(f"`{label:>10}` {fmt_price(value)}")
+            st.progress(min(width, 100) / 100)
 
-for refusal in risk.refusals:
-    st.error(f"❌ {refusal}")
-warning_list(risk.warnings)
+    # -- risque portefeuille (section 72) --------------------------------------
+
+    try:
+        risk = RiskEngine(service.risk_limits()).evaluate(
+            plan, service.risk_snapshot(available_quote), symbol=rules.symbol
+        )
+    except Exception as exc:
+        risk = RiskReport()
+        risk.refuse(f"Risque non calculable : {exc}")
+
+    st.markdown("### Exposition après ce trade")
+    cols = st.columns(4)
+    cols[0].metric("Exposition", f"{risk.planned_exposure_percent:.1f} %")
+    cols[1].metric("Risque de cette position", f"{risk.planned_risk_percent:.2f} %")
+    cols[2].metric("Risque total projeté", f"{risk.projected_total_risk_percent:.2f} %")
+    cols[3].metric("Capital libre après", fmt_price(risk.capital_free_after))
+
+    for refusal in risk.refusals:
+        st.error(f"❌ {refusal}")
+    warning_list(risk.warnings)
+    return spec, plan, risk, price
+
+
+spec, plan, risk, price = simulation_panel()
 
 # ==========================================================================
 # Lancement

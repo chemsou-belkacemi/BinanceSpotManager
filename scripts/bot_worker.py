@@ -1,6 +1,6 @@
 """Worker BinanceSpotManager — process separe de Streamlit (section 9).
 
-Boucle ~5 s :
+Boucle configurable (1 s dans les preferences locales) :
   1. lire le drapeau d'arret, sortir proprement le cas echeant ;
   2. ecrire heartbeat + PID + etat dans data/bot_runtime.json ;
   3. pour chaque position ouverte : recuperer le prix, lancer un cycle
@@ -54,7 +54,7 @@ from binance_spot_manager.models import (  # noqa: E402
 )
 from binance_spot_manager.notification_engine import NotificationEngine  # noqa: E402
 from binance_spot_manager.position_engine import PositionEngine, finish_position, recompute_position  # noqa: E402
-from binance_spot_manager.position_store import PositionStore, RuntimeStore  # noqa: E402
+from binance_spot_manager.position_store import PositionStore, RuntimeStore, get_settings_store  # noqa: E402
 from binance_spot_manager.reconciliation_engine import ReconciliationEngine  # noqa: E402
 from binance_spot_manager.symbol_rules import SymbolRulesCache  # noqa: E402
 
@@ -166,7 +166,6 @@ class Worker:
     # ------------------------------------------------------------------
 
     def _loop_forever(self) -> None:
-        interval = max(self.settings.worker_interval, 1)
         self._set_state(WorkerState.IDLE, "En attente de positions")
 
         while self._running:
@@ -200,7 +199,18 @@ class Worker:
                     self.notifications.notify(self.notifications.error(str(exc), context="worker"))
 
             elapsed = time.time() - started
+            interval = self._worker_interval()
             time.sleep(max(interval - elapsed, 0.2))
+
+    def _worker_interval(self) -> int:
+        """Cadence sauvegardee dans Settings, avec repli sur la configuration."""
+        saved = get_settings_store().load()
+        value = saved.get("worker_interval") if isinstance(saved, dict) else None
+        try:
+            interval = int(value) if value is not None else self.settings.worker_interval
+        except (TypeError, ValueError):
+            interval = self.settings.worker_interval
+        return max(1, min(interval, 300))
 
     def _stop_requested(self) -> bool:
         return BOT_STOP_FLAG.exists()
@@ -430,7 +440,7 @@ class Worker:
         """
         unique = sorted({s for s in symbols if s})
         now = time.time()
-        if unique and now - self._price_fetched_at > max(self.settings.worker_interval - 1, 1):
+        if unique and now - self._price_fetched_at > max(self._worker_interval() - 1, 1):
             try:
                 self._price_cache = self.client.get_prices(unique)
                 self._price_fetched_at = now

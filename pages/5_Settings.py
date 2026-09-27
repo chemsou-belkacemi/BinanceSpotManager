@@ -168,8 +168,8 @@ with tabs[1]:
         )
         st.success(
             "Réglages enregistrés dans data/settings.json. "
-            "Les valeurs de `.env` restent la référence au démarrage : "
-            "duplique-les dans `.env` pour qu'elles s'appliquent aussi au worker."
+            "L'intervalle de boucle s'applique au worker au prochain cycle. "
+            "Les autres réglages de risque ne sont pas appliqués au worker par ce bouton."
         )
 
     st.divider()
@@ -334,6 +334,14 @@ Erreur Binance · Worker offline · Capital insuffisant · Désynchronisation
 # ==========================================================================
 
 with tabs[4]:
+    st.subheader("Diagnostic du worker")
+    worker_status = service.worker_status()
+    worker_cols = st.columns(4)
+    worker_cols[0].metric("État", worker_status.label)
+    worker_cols[1].metric("PID", worker_status.pid or "—")
+    worker_cols[2].metric("Heartbeat", f"{worker_status.heartbeat_age:.0f} s" if worker_status.heartbeat_age is not None else "—")
+    worker_cols[3].metric("Boucles", worker_status.loop_count)
+
     st.subheader("Connexion Binance")
 
     if st.button("Tester la connexion maintenant"):

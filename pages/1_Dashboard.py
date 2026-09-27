@@ -179,15 +179,10 @@ def worker_panel() -> None:
         )
         st.rerun(scope="app")  # actualise aussi l'etat dans la barre laterale
 
-    cols = st.columns(5)
+    cols = st.columns(3)
     cols[0].metric("État", status.label)
     cols[1].metric("PID", status.pid or "—")
-    cols[2].metric(
-        "Heartbeat",
-        f"{status.heartbeat_age:.0f} s" if status.heartbeat_age is not None else "—",
-    )
-    cols[3].metric("Boucles", status.loop_count)
-    cols[4].metric("Positions suivies", status.positions_monitored)
+    cols[2].metric("Positions suivies", status.positions_monitored)
 
     if status.last_message:
         st.caption(f"Dernier message : {status.last_message}")
@@ -195,7 +190,7 @@ def worker_panel() -> None:
         st.error(f"Dernière erreur : {status.last_error}")
     if status.is_stale:
         st.warning(
-            "Le heartbeat n'est plus rafraîchi. Le worker est peut-être bloqué : "
+            "Le worker ne répond plus. Il est peut-être bloqué : "
             "utiliser l'arrêt forcé ci-dessous, puis relancer."
         )
     flash = st.session_state.get("worker_flash")

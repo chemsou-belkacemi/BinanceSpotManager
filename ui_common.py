@@ -72,10 +72,8 @@ def sidebar_status(settings: Optional[Settings] = None) -> None:
         st.markdown(f"{dot} **{status.label}**")
         if status.pid:
             st.caption(f"PID {status.pid}")
-        if status.heartbeat_age is not None:
-            st.caption(f"Heartbeat : il y a {status.heartbeat_age:.0f} s")
         if status.is_stale:
-            st.warning("Heartbeat ancien : le worker est peut-être bloqué")
+            st.warning("Le worker ne répond plus : il est peut-être bloqué")
         if status.last_error:
             st.error(status.last_error)
 
@@ -183,11 +181,22 @@ def load_rules(symbol: str) -> tuple[Optional[SymbolRules], str]:
         return None, f"Paire non vérifiable : {exc}"
 
 
-@st.fragment(run_every="2s")
+@st.cache_data(ttl=1, show_spinner=False)
+def live_price(symbol: str) -> Optional[float]:
+    """Prix courtement partage entre les blocs de la page New Trade."""
+    return get_service().current_price(symbol)
+
+
+@st.fragment(run_every="1s")
 def live_price_metric(symbol: str, quote_asset: str) -> None:
-    price = get_service().current_price(symbol)
+    price = live_price(symbol)
     st.metric("Prix actuel", fmt_price(price), quote_asset)
-    st.caption("Actualisation automatique toutes les 2 s")
+    st.caption("Actualisation automatique toutes les 1 s")
+
+
+@st.fragment(run_every="1s")
+def live_market_price(symbol: str) -> None:
+    st.info(f"Marché ≈ {fmt_price(live_price(symbol))}")
 
 
 def symbol_status_box(symbol: str, rules: Optional[SymbolRules], balances: dict) -> None:

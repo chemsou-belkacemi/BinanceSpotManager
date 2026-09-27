@@ -46,6 +46,23 @@ def test_loop_reports_monitored_positions(monkeypatch, count, expected_state):
     assert states[-1][1]["loop_count"] == 1
 
 
+@pytest.mark.parametrize(
+    ("saved", "expected"),
+    [({"worker_interval": 1}, 1), ({"worker_interval": 2}, 2),
+     ({"worker_interval": "invalid"}, 5), ({}, 5),
+     ({"worker_interval": 0}, 1), ({"worker_interval": 999}, 300)],
+)
+def test_worker_interval_uses_saved_preference(monkeypatch, saved, expected):
+    worker = Worker.__new__(Worker)
+    worker.settings = SimpleNamespace(worker_interval=5)
+    monkeypatch.setattr(
+        "scripts.bot_worker.get_settings_store",
+        lambda: SimpleNamespace(load=lambda: saved),
+    )
+
+    assert worker._worker_interval() == expected
+
+
 def test_reconciliation_persists_recovered_sync_status():
     worker = Worker.__new__(Worker)
     position = Position(symbol="BTCUSDT", base_asset="BTC", quote_asset="USDT")
