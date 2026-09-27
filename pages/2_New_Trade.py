@@ -34,7 +34,7 @@ from binance_spot_manager.models import (  # noqa: E402
     TPReference,
 )
 from binance_spot_manager.position_engine import PositionEngine  # noqa: E402
-from binance_spot_manager.risk_engine import RiskEngine  # noqa: E402
+from binance_spot_manager.risk_engine import RiskEngine, RiskReport  # noqa: E402
 from binance_spot_manager.strategy_engine import (  # noqa: E402
     EntrySpec,
     SLSpec,
@@ -576,9 +576,13 @@ with st.expander("Aperçu des niveaux", expanded=False):
 
 # -- risque portefeuille (section 72) --------------------------------------
 
-risk = RiskEngine(service.risk_limits()).evaluate(
-    plan, service.risk_snapshot(available_quote), symbol=rules.symbol
-)
+try:
+    risk = RiskEngine(service.risk_limits()).evaluate(
+        plan, service.risk_snapshot(available_quote), symbol=rules.symbol
+    )
+except Exception as exc:
+    risk = RiskReport()
+    risk.refuse(f"Risque non calculable : {exc}")
 
 st.markdown("### Exposition après ce trade")
 cols = st.columns(4)

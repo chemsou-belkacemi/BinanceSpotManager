@@ -14,7 +14,7 @@ de refus explicites, affiches tels quels dans New Trade.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Mapping, Optional
 
 from .models import Position
 from .strategy_engine import StrategyPlan
@@ -89,22 +89,32 @@ class RiskEngine:
     def snapshot(
         positions: list[Position],
         quote_balance: float,
+        quote_rates: Mapping[str, float] | None = None,
     ) -> PortfolioSnapshot:
-        """Construit l'etat portefeuille a partir des positions ouvertes."""
+        """Construit l'etat portefeuille dans une devise commune.
+
+        Sans ``quote_rates``, le comportement historique (une seule devise)
+        est conserve. Avec des taux, toute devise manquante bloque le calcul.
+        """
         snapshot = PortfolioSnapshot(quote_balance=quote_balance)
 
         for position in positions:
             if not position.is_open:
                 continue
+            rate = 1.0
+            if quote_rates is not None:
+                rate = quote_rates.get(position.quote_asset, 0.0)
+                if rate <= 0:
+                    raise ValueError(f"Taux {position.quote_asset} indisponible pour le risque")
             snapshot.open_positions += 1
-            snapshot.capital_committed += position.metrics.capital_committed
-            snapshot.capital_pending += position.metrics.capital_pending
+            snapshot.capital_committed += position.metrics.capital_committed * rate
+            snapshot.capital_pending += position.metrics.capital_pending * rate
 
             exposure = position.metrics.capital_committed + position.metrics.capital_pending
             snapshot.exposure_by_symbol[position.symbol] = (
-                snapshot.exposure_by_symbol.get(position.symbol, 0.0) + exposure
+                snapshot.exposure_by_symbol.get(position.symbol, 0.0) + exposure * rate
             )
-            snapshot.total_risk_quote += abs(position.metrics.max_loss_at_sl)
+            snapshot.total_risk_quote += abs(position.metrics.max_loss_at_sl) * rate
 
         return snapshot
 

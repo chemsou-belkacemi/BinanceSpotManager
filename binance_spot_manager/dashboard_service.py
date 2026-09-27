@@ -24,6 +24,7 @@ from .models import (
     utcnow,
 )
 from .notification_engine import NotificationEngine
+from .wallet_valuation import WalletValuation, conversion_rate, value_wallet
 from .position_engine import recompute_position
 from .position_store import PositionStore, get_presets_store, get_settings_store, summarize
 from .risk_engine import PortfolioSnapshot, RiskEngine, RiskLimits
@@ -154,6 +155,14 @@ class DashboardService:
     # Portefeuille
     # ------------------------------------------------------------------
 
+    def wallet_valuation(self) -> WalletValuation:
+        """Soldes réels libres + bloqués, cotés sur la même API Demo."""
+        if not self.settings.is_demo or not self.settings.has_credentials:
+            raise ValueError("Compte Binance Demo connecté requis")
+        balances = self.client.get_balances()
+        prices = self.client.get_prices()
+        return value_wallet(balances, prices)
+
     def portfolio(self, *, live: bool = True) -> PortfolioView:
         """Vue portefeuille. `live=False` evite tout appel reseau (tests/DRY_RUN)."""
         view = PortfolioView(quote_asset=self.settings.quote_asset)
@@ -179,13 +188,40 @@ class DashboardService:
             view.base_balances = self._last_known_bases(positions)
 
         open_positions = [p for p in positions if p.status.is_open]
+        quote_assets = {p.quote_asset for p in positions}
+        rates = {self.settings.quote_asset: 1.0}
+        if quote_assets - rates.keys():
+            try:
+                prices = self.client.get_prices() if live else {}
+                for asset in quote_assets - rates.keys():
+                    rate = conversion_rate(asset, self.settings.quote_asset, prices)
+                    if rate is None:
+                        view.errors.append(
+                            f"Taux {asset}/{self.settings.quote_asset} indisponible : "
+                            "totaux des positions incomplets"
+                        )
+                    else:
+                        rates[asset] = rate
+            except Exception as exc:
+                view.errors.append(f"Taux de conversion indisponibles : {exc}")
         view.open_positions = len(open_positions)
-        view.capital_committed = sum(p.metrics.capital_committed for p in open_positions)
-        view.capital_pending = sum(p.metrics.capital_pending for p in open_positions)
-        view.unrealized_pnl = sum(p.pnl.unrealized for p in open_positions)
-        view.realized_pnl = sum(p.pnl.realized for p in positions)
+        view.capital_committed = sum(
+            p.metrics.capital_committed * rates.get(p.quote_asset, 0.0) for p in open_positions
+        )
+        view.capital_pending = sum(
+            p.metrics.capital_pending * rates.get(p.quote_asset, 0.0) for p in open_positions
+        )
+        view.unrealized_pnl = sum(
+            p.pnl.unrealized * rates.get(p.quote_asset, 0.0) for p in open_positions
+        )
+        view.realized_pnl = sum(
+            p.pnl.realized * rates.get(p.quote_asset, 0.0) for p in positions
+        )
         view.total_pnl = view.unrealized_pnl + view.realized_pnl
-        view.total_risk_quote = sum(abs(p.metrics.max_loss_at_sl) for p in open_positions)
+        view.total_risk_quote = sum(
+            abs(p.metrics.max_loss_at_sl) * rates.get(p.quote_asset, 0.0)
+            for p in open_positions
+        )
 
         total = view.quote_free + view.quote_locked + view.capital_committed
         view.capital_total = total
@@ -214,7 +250,17 @@ class DashboardService:
     def risk_snapshot(self, quote_free: Optional[float] = None) -> PortfolioSnapshot:
         if quote_free is None:
             quote_free = self.portfolio(live=False).quote_free
-        return RiskEngine.snapshot(self.positions.list_all(), quote_free)
+        positions = self.positions.list_all()
+        quote_assets = {p.quote_asset for p in positions if p.is_open}
+        rates = {self.settings.quote_asset: 1.0}
+        if quote_assets - rates.keys():
+            prices = self.client.get_prices()
+            for asset in quote_assets - rates.keys():
+                rate = conversion_rate(asset, self.settings.quote_asset, prices)
+                if rate is None:
+                    raise ValueError(f"Taux {asset}/{self.settings.quote_asset} indisponible")
+                rates[asset] = rate
+        return RiskEngine.snapshot(positions, quote_free, quote_rates=rates)
 
     def risk_limits(self) -> RiskLimits:
         return RiskLimits(

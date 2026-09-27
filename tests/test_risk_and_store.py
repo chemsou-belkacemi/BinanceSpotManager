@@ -67,6 +67,21 @@ def test_snapshot_aggregates_exposure_per_symbol():
     assert snapshot.exposure_by_symbol["BTCUSDT"] == pytest.approx(500.0)
 
 
+def test_snapshot_converts_usdc_positions_before_aggregating_risk():
+    usdt = make_open_position("BTCUSDT", capital=300, risk=15)
+    usdc = make_open_position("BTCUSDC", capital=200, risk=10)
+    usdc.quote_asset = "USDC"
+    snapshot = RiskEngine.snapshot(
+        [usdt, usdc], quote_balance=1000,
+        quote_rates={"USDT": 1.0, "USDC": 1.02},
+    )
+    assert snapshot.capital_committed == pytest.approx(504)
+    assert snapshot.total_risk_quote == pytest.approx(25.2)
+    assert snapshot.exposure_by_symbol["BTCUSDC"] == pytest.approx(204)
+    with pytest.raises(ValueError, match="USDC"):
+        RiskEngine.snapshot([usdc], 1000, quote_rates={"USDT": 1.0})
+
+
 # ==========================================================================
 # Refus
 # ==========================================================================

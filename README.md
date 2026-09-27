@@ -74,6 +74,7 @@ Pages disponibles dans le menu de gauche :
 | **Positions** | détail, ordres Binance, réconciliation, SL manuel, automatisation |
 | **History** | positions terminées, statistiques, duplication de stratégie |
 | **Settings** | sécurité, risque, presets, notifications, diagnostic |
+| **Investissement** | achat Market Demo simple sans sortie, ou avec TP seul / SL seul |
 
 ## 5. Lancement du worker
 
@@ -116,6 +117,30 @@ Si un worker démarre alors qu'un autre est vivant, le démarrage est refusé.
 
 Si une position existe déjà sur la paire, **aucune seconde position n'est créée** :
 les nouvelles Entries sont ajoutées à la position existante.
+
+### Investissement long terme
+
+La page **Investissement** propose un achat simple (sans position bot, TP ou SL),
+ou deux sorties exclusives : TP seul ou SL seul. Un achat simple peut utiliser
+la devise de cotation de la paire (par exemple USDC dans BTCUSDC ou BTC dans
+ETHBTC) et reste possible sur une paire déjà suivie : il ne change pas l'OCO
+ni les quantités de la position existante. Les sorties suivies TP/SL acceptent
+les paires cotées en USDT et USDC. Le risque est converti en USDT au taux
+Binance Demo, sans supposer une parité fixe ; si un taux nécessaire manque,
+l'achat avec sortie est refusé.
+Elle exige un worker actif, une paire sans position ouverte, un achat Market et
+le respect des limites de risque du portefeuille. L'achat est calculé avec une
+marge de 2 % pour éviter de dépasser le budget lors d'un mouvement du cours.
+Après confirmation du fill, le worker place l'ordre de sortie sur Binance Demo :
+`LIMIT` GTC pour le TP, `STOP_LOSS_LIMIT` GTC pour le SL. Il ne crée jamais
+l'autre branche. Un TP seul laisse la totalité du capital investi exposée ;
+un SL stop-limit peut se déclencher sans se remplir en marché rapide.
+Vérifier l'ordre effectivement ouvert dans le Dashboard après l'achat.
+
+Le Dashboard affiche aussi tous les soldes Spot Demo non nuls, libres **et**
+bloqués par les ordres, avec une valorisation indicative en USDT et EUR à
+partir des cotations Demo. Un actif sans taux est signalé et exclu du total,
+jamais valorisé à zéro en silence.
 
 ## 7. Modes opérationnels
 

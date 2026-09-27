@@ -46,9 +46,10 @@ st.markdown(
 Ouvre une page dans le menu de gauche.
 
 **New Trade** construit une position complète (Entries, TP, SL) avec simulation
-avant lancement. **Dashboard** suit le worker, le portefeuille et les ordres
-réels. **Positions** détaille chaque position, **History** conserve les
-positions terminées, **Settings** regroupe les réglages.
+avant lancement. **Investissement** permet un achat simple sans sortie ou un
+achat avec TP seul / SL seul. **Dashboard** suit le worker, le portefeuille
+multidevise et les ordres réels. **Positions** détaille chaque position,
+**History** conserve les positions terminées, **Settings** regroupe les réglages.
 """
 )
 

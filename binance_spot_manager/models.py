@@ -87,6 +87,7 @@ class TPExecutionPolicy(str, Enum):
 
     MARKET_ON_TRIGGER = "MARKET_ON_TRIGGER"
     LIMIT_ON_TRIGGER = "LIMIT_ON_TRIGGER"
+    LIMIT_GTC = "LIMIT_GTC"
 
 
 class EntryStatus(str, Enum):
@@ -184,6 +185,7 @@ class EventType(str, Enum):
     ERROR = "ERROR"
     POSITION_FINISHED = "POSITION_FINISHED"
     DRY_RUN_SKIP = "DRY_RUN_SKIP"
+    SIMPLE_BUY = "SIMPLE_BUY"
 
 
 class WorkerState(str, Enum):

@@ -256,6 +256,59 @@ class ExecutionEngine:
     # Envoi d'une Entry
     # ------------------------------------------------------------------
 
+    def place_simple_buy(
+        self, *, symbol: str, quantity: float, client_order_id: str
+    ) -> OrderResult:
+        """Achat Market Spot Demo sans création de position ni ordre de sortie."""
+        self.settings.assert_write_allowed("simple_buy")
+        rules = self.rules(symbol)
+        qty = rules.round_qty(quantity, market=True)
+        errors = rules.check_qty(qty, market=True)
+        if errors:
+            return OrderResult(success=False, error=" ; ".join(errors))
+        existing = self.find_existing_order(symbol, client_order_id)
+        if existing is not None:
+            result = normalize_order_response(existing, client_order_id=client_order_id)
+        else:
+            try:
+                market_price = self.client.get_price(symbol)
+                errors.extend(rules.check_notional(market_price, qty))
+                if not self._dry_run():
+                    free_quote = self.client.get_free_balance(rules.quote_asset)
+                    if float(qty) * market_price > free_quote * 0.98:
+                        errors.append(f"Solde {rules.quote_asset} insuffisant avec marge de 2 %")
+            except BinanceError as exc:
+                return OrderResult(success=False, error=f"Validation du marché impossible : {exc}")
+            if errors:
+                return OrderResult(success=False, error=" ; ".join(errors))
+            if self._dry_run():
+                self._log_skip("simple_buy", symbol, "", qty=float(qty))
+                result = self._simulated_result(
+                    client_order_id=client_order_id, price=market_price, qty=float(qty)
+                )
+            elif not self._confirm(
+                "SIMPLE_BUY", {"symbol": symbol, "qty": float(qty), "quote_asset": rules.quote_asset}
+            ):
+                return OrderResult(success=False, error="Annulé par l'utilisateur")
+            else:
+                result = self._create_order_safe(
+                    symbol=symbol, side=OrderSide.BUY.value,
+                    order_type=OrderType.MARKET.value, quantity=float(qty),
+                    price=None, client_order_id=client_order_id, market=True,
+                )
+        if result.is_terminal_dead and result.executed_qty <= QTY_EPSILON:
+            result.success = False
+            result.error = f"Ordre d'achat terminé sans exécution ({result.status})"
+        if not result.dry_run:
+            self.events.append(
+                EventType.SIMPLE_BUY if result.success else EventType.ERROR,
+                f"Achat simple {symbol} : {result.status or result.error}",
+                symbol=symbol, level="INFO" if result.success else "ERROR",
+                order_id=result.order_id, qty=result.executed_qty,
+                client_order_id=client_order_id,
+            )
+        return result
+
     def place_entry(
         self,
         position: Position,
@@ -451,6 +504,68 @@ class ExecutionEngine:
     # ------------------------------------------------------------------
     # Stop Loss unique cote Binance
     # ------------------------------------------------------------------
+
+    def place_tp_limit_gtc(self, position: Position, tp: TakeProfit) -> OrderResult:
+        """Place un TP autonome GTC sur la quantité nette réellement achetée.
+
+        Le clientOrderId stable permet de reprendre après un timeout sans doubler
+        la vente. Ce mode ne doit pas coexister avec un SL sur les mêmes unités.
+        """
+        if position.environment != "DEMO" or position.oco_exit is not None:
+            return OrderResult(success=False, error="TP autonome réservé aux positions Demo sans OCO")
+        if position.stop_loss.status is not SLStatus.NONE:
+            return OrderResult(success=False, error="TP autonome interdit avec un SL actif ou prévu")
+        rules = self.rules(position.symbol)
+        qty = rules.round_qty(position.metrics.net_qty)
+        price = rules.round_price(tp.target_price or 0, mode="up")
+        errors = rules.validate_order(price, qty)
+        if errors:
+            return OrderResult(success=False, error=" ; ".join(errors))
+
+        client_order_id = tp.client_order_id or build_client_order_id(
+            symbol=position.symbol,
+            position_id=position.position_id,
+            suffix=f"TP{tp.sequence_number}GTC",
+            environment=position.environment,
+        )
+        existing = self.find_existing_order(position.symbol, client_order_id)
+        if existing is not None:
+            result = normalize_order_response(existing, client_order_id=client_order_id)
+        elif self._dry_run():
+            self._log_skip("tp_limit_gtc", position.symbol, position.position_id, qty=float(qty))
+            result = self._simulated_result(
+                client_order_id=client_order_id, price=float(price), qty=float(qty)
+            )
+        elif not self._confirm(
+            "TP_LIMIT_GTC", {"symbol": position.symbol, "qty": float(qty), "price": float(price)}
+        ):
+            return OrderResult(success=False, error="Annulé par l'utilisateur")
+        else:
+            result = self._create_order_safe(
+                symbol=position.symbol,
+                side=OrderSide.SELL.value,
+                order_type=OrderType.LIMIT.value,
+                quantity=float(qty),
+                price=float(price),
+                client_order_id=client_order_id,
+                market=False,
+                time_in_force="GTC",
+            )
+
+        tp.client_order_id = client_order_id
+        tp.order_id = result.order_id
+        if result.is_terminal_dead and result.executed_qty <= QTY_EPSILON:
+            tp.status = TPStatus.CANCELED
+            result.success = False
+            result.error = f"Ordre TP terminal sans vente ({result.status})"
+        elif result.success and not result.dry_run:
+            tp.status = TPStatus.SUBMITTED
+            tp.estimated_qty = float(qty)
+            tp.last_error = ""
+        elif not result.success:
+            tp.status = TPStatus.FAILED
+            tp.last_error = result.error
+        return result
 
     def _sl_client_order_id(self, position: Position, attempt: int = 0) -> str:
         suffix = "SL" if attempt == 0 else f"SL{attempt}"

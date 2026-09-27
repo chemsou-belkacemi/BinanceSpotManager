@@ -29,6 +29,7 @@ from .models import (
     PositionStatus,
     SLStatus,
     SyncStatus,
+    TPExecutionPolicy,
     TPStatus,
     TakeProfit,
     utcnow,
@@ -187,6 +188,10 @@ class AutomationEngine:
         sl = position.stop_loss
         remaining = position.metrics.net_qty
 
+        # Mode investissement TP seul : l'absence de SL est intentionnelle.
+        if sl.status is SLStatus.NONE:
+            return
+
         if sl.status is SLStatus.CANCELED and any(
             tp.status is TPStatus.SUBMITTED for tp in position.take_profits
         ):
@@ -325,7 +330,9 @@ class AutomationEngine:
         """Traite AU PLUS un TP par cycle, dans l'ordre des sequences."""
         next_tp = position.next_tp
         if next_tp is None or not next_tp.target_price:
-            self._finish_if_fully_sold(position, result)
+            # Une Entry non remplie n'est pas une position deja vendue.
+            if position.filled_entries and not position.open_entries:
+                self._finish_if_fully_sold(position, result)
             return
 
         if next_tp.status is TPStatus.SUBMITTED:
@@ -338,13 +345,55 @@ class AutomationEngine:
                 if status.executed_qty > QTY_EPSILON:
                     self._apply_confirmed_tp(position, next_tp, status, result)
                 else:
-                    next_tp.status = TPStatus.FAILED
-                    next_tp.attempt_count += 1
-                    next_tp.order_id = None
-                    next_tp.client_order_id = None
-                    self._restore_stop_loss(position, result)
+                    if next_tp.execution_policy is TPExecutionPolicy.LIMIT_GTC:
+                        next_tp.status = TPStatus.CANCELED
+                        result.errors.append("TP GTC annulé : aucune vente automatique de remplacement")
+                        self.events.append(
+                            EventType.ERROR,
+                            f"TP GTC annulé ({position.symbol}) : position sans sortie",
+                            position_id=position.position_id,
+                            symbol=position.symbol,
+                            level="WARNING",
+                        )
+                    else:
+                        next_tp.status = TPStatus.FAILED
+                        next_tp.attempt_count += 1
+                        next_tp.order_id = None
+                        next_tp.client_order_id = None
+                        self._restore_stop_loss(position, result)
             else:
                 result.actions.append("TP en attente de confirmation Binance")
+            return
+
+        if next_tp.execution_policy is TPExecutionPolicy.LIMIT_GTC:
+            if position.metrics.net_qty <= QTY_EPSILON or not position.filled_entries:
+                return
+            previous_error = next_tp.last_error
+            order = self.execution.place_tp_limit_gtc(position, next_tp)
+            if order.dry_run:
+                result.actions.append("TP GTC simulé (aucun ordre envoyé)")
+            elif order.success:
+                if order.is_filled:
+                    self._apply_confirmed_tp(position, next_tp, order, result)
+                else:
+                    result.actions.append(f"TP GTC déposé @ {next_tp.target_price}")
+                    self.events.append(
+                        EventType.POSITION_UPDATED,
+                        f"TP GTC placé ({position.symbol}) @ {next_tp.target_price}",
+                        position_id=position.position_id,
+                        symbol=position.symbol,
+                        order_id=order.order_id,
+                    )
+            else:
+                result.errors.append(f"TP GTC non déposé : {order.error}")
+                if order.error != previous_error:
+                    self.events.append(
+                        EventType.ERROR,
+                        f"TP GTC non déposé ({position.symbol}) : {order.error}",
+                        position_id=position.position_id,
+                        symbol=position.symbol,
+                        level="ERROR",
+                    )
             return
 
         if not self._is_triggered(next_tp, current_price):

@@ -145,6 +145,16 @@ def _apply_cancel_locally(order_id: int) -> bool:
             )
             touched = True
 
+        for tp in position.take_profits:
+            if tp.order_id == order_id:
+                tp.status = TPStatus.CANCELED
+                position.log(
+                    EventType.MANUAL_CHANGE,
+                    f"TP {tp.sequence_number} annulé depuis le Dashboard — vente automatique désactivée",
+                    order_id=order_id,
+                )
+                touched = True
+
         if touched:
             recompute_position(position)
             service.positions.save(position)
@@ -161,6 +171,10 @@ def _cancel_order(order, confirmed: bool) -> None:
 
     is_oco = any(
         p.oco_exit and order.order_id in {p.oco_exit.tp_order_id, p.oco_exit.sl_order_id}
+        for p in service.positions.list_open()
+    )
+    is_single_tp = any(
+        p.oco_exit is None and any(tp.order_id == order.order_id for tp in p.take_profits)
         for p in service.positions.list_open()
     )
     execution = ExecutionEngine(settings=settings, events=service.events)
@@ -188,6 +202,8 @@ def _cancel_order(order, confirmed: bool) -> None:
     st.success(f"Ordre #{order.order_id} annulé.")
     if is_oco:
         st.warning("OCO annulé : les deux branches sont retirées, la position n'est plus protégée.")
+    elif is_single_tp:
+        st.warning("TP autonome annulé : la position reste ouverte sans vente automatique.")
     if updated:
         st.caption("État local mis à jour.")
     else:
@@ -278,6 +294,55 @@ cols[0].metric("Risque total", fmt_price(view.total_risk_quote), f"{view.total_r
 cols[1].metric("Exposition", f"{view.exposure_percent:.1f} %")
 cols[2].metric("Réserve estimée", fmt_price(view.capital_reserved))
 cols[3].metric("Positions ouvertes", view.open_positions)
+
+st.markdown("**Tous les actifs Spot Demo**")
+try:
+    wallet = service.wallet_valuation()
+except Exception as exc:  # lecture uniquement ; ne masque pas le reste du Dashboard
+    st.warning(f"Valorisation du portefeuille indisponible : {exc}")
+else:
+    st.caption(
+        f"Soldes libres + bloqués · prix indicatifs Binance Demo · "
+        f"{wallet.valued_at.strftime('%d/%m/%Y %H:%M:%S')} UTC"
+    )
+    totals = st.columns(2)
+    totals[0].metric(
+        "Total connu en USDT" if wallet.unpriced_usdt else "Total en USDT",
+        f"{wallet.total_usdt:,.2f}",
+    )
+    totals[1].metric(
+        "Total connu en EUR" if wallet.unpriced_eur else "Total en EUR",
+        f"{wallet.total_eur:,.2f} €",
+    )
+    if wallet.unpriced_usdt or wallet.unpriced_eur:
+        st.warning(
+            "Actifs sans taux Demo : "
+            + ", ".join(sorted(set(wallet.unpriced_usdt + wallet.unpriced_eur)))
+            + ". Ils sont affichés, mais exclus des totaux correspondants."
+        )
+    if wallet.assets:
+        st.dataframe(
+            pd.DataFrame([
+                {
+                    "Actif": row.asset,
+                    "Libre": fmt_qty(row.free),
+                    "Bloqué": fmt_qty(row.locked),
+                    "Total": fmt_qty(row.total),
+                    "Cours USDT": fmt_price(row.price_usdt) if row.price_usdt is not None else "—",
+                    "Cours EUR": fmt_price(row.price_eur) if row.price_eur is not None else "—",
+                    "Valeur USDT": f"{row.value_usdt:,.2f}" if row.value_usdt is not None else "—",
+                    "Valeur EUR": f"{row.value_eur:,.2f}" if row.value_eur is not None else "—",
+                    "Part": (
+                        f"{row.value_usdt / wallet.total_usdt * 100:.1f} %"
+                        if row.value_usdt is not None and wallet.total_usdt > 0 else "—"
+                    ),
+                }
+                for row in wallet.assets
+            ]),
+            width="stretch", hide_index=True,
+        )
+    else:
+        st.info("Aucun actif Spot non nul dans ce compte Demo.")
 
 st.divider()
 

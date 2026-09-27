@@ -457,7 +457,7 @@ st.caption(
 if sl.last_error:
     st.error(sl.last_error)
 
-if position.is_open and position.metrics.net_qty > 0:
+if position.is_open and position.metrics.net_qty > 0 and sl.status is not SLStatus.NONE:
     with st.expander("Modifier / supprimer le SL", expanded=False):
         st.warning(
             "Déplacer le SL annule l'ordre existant puis en crée un nouveau. "
@@ -546,7 +546,7 @@ if position.is_open and position.metrics.net_qty > 0:
             )
             _save("SL supprimé")
 else:
-    st.caption("Le SL n'est modifiable que sur une position ouverte avec quantité.")
+    st.caption("Aucun SL configuré, ou position sans quantité ouverte.")
 
 # ==========================================================================
 # Ordres réels + réconciliation
@@ -680,9 +680,32 @@ if position.is_open:
         if st.button("Fermer la position", disabled=not confirm_close):
             for entry in position.open_entries:
                 execution.cancel_entry(position, entry)
-            if position.stop_loss.status is SLStatus.ACTIVE and position.stop_loss.order_id:
-                execution.cancel_order(position.symbol, order_id=position.stop_loss.order_id)
+            if position.oco_exit and position.oco_exit.status in {"ACTIVE", "PARTIAL"}:
+                cancelled = execution.cancel_order(
+                    position.symbol, order_id=position.oco_exit.tp_order_id
+                )
+                if not cancelled.success:
+                    st.error("OCO non annulé : fermeture locale refusée.")
+                    st.stop()
+                position.oco_exit.status = "CANCELED"
                 position.stop_loss.status = SLStatus.CANCELED
+                for tp in position.take_profits:
+                    if tp.status is TPStatus.SUBMITTED:
+                        tp.status = TPStatus.CANCELED
+            else:
+                for tp in position.take_profits:
+                    if tp.status is TPStatus.SUBMITTED and tp.order_id:
+                        cancelled = execution.cancel_order(position.symbol, order_id=tp.order_id)
+                        if not cancelled.success:
+                            st.error(f"TP #{tp.order_id} non annulé : fermeture locale refusée.")
+                            st.stop()
+                        tp.status = TPStatus.CANCELED
+                if position.stop_loss.status is SLStatus.ACTIVE and position.stop_loss.order_id:
+                    cancelled = execution.cancel_order(position.symbol, order_id=position.stop_loss.order_id)
+                    if not cancelled.success:
+                        st.error("SL non annulé : fermeture locale refusée.")
+                        st.stop()
+                    position.stop_loss.status = SLStatus.CANCELED
             finish_position(position, CloseReason.MANUAL_CLOSE)
             service.positions.save(position)
             st.success("Position fermée localement.")
