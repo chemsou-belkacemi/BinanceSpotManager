@@ -45,6 +45,7 @@ from binance_spot_manager.strategy_engine import (  # noqa: E402
     equal_split,
     percent_change,
     progressive_split,
+    recommended_split,
 )
 from ui_common import (  # noqa: E402
     banner,
@@ -178,19 +179,39 @@ else:
 st.subheader("3. Entries")
 
 entry_count = st.number_input(
-    "Nombre d'Entries", min_value=1, max_value=20, value=int(state.get("entry_count", 3))
+    "Nombre d'Entries", min_value=1, max_value=20, value=int(state.get("entry_count", 1))
 )
 
 split_preset = st.radio(
     "Répartition du capital",
-    ["Égal", "Progressif", "Dégressif", "Personnalisé"],
+    ["Recommandé", "Égal", "Progressif", "Dégressif", "Personnalisé"],
     horizontal=True,
 )
 auto_splits = {
+    "Recommandé": recommended_split(int(entry_count)),
     "Égal": equal_split(int(entry_count)),
     "Progressif": progressive_split(int(entry_count)),
     "Dégressif": degressive_split(int(entry_count)),
 }
+
+split_signature = (int(entry_count), split_preset)
+previous_signature = state.get("entry_split_signature")
+missing_allocations = any(
+    f"nt_alloc_{index}" not in st.session_state for index in range(int(entry_count))
+)
+if previous_signature != split_signature or missing_allocations:
+    if (
+        split_preset != "Personnalisé"
+        or previous_signature is None
+        or previous_signature[0] != int(entry_count)
+        or missing_allocations
+    ):
+        shares = auto_splits.get(split_preset, equal_split(int(entry_count)))
+        rounded = [round(share, 2) for share in shares[:-1]]
+        rounded.append(round(100.0 - sum(rounded), 2))
+        for index, share in enumerate(rounded):
+            st.session_state[f"nt_alloc_{index}"] = share
+    state["entry_split_signature"] = split_signature
 
 entry_specs: list[EntrySpec] = []
 allocation_total = 0.0
@@ -209,13 +230,6 @@ for index in range(int(entry_count)):
         order_type = OrderType.MARKET if order_type_label == "MARKET" else OrderType.LIMIT
 
         default_offset = [None, -2.0, -5.0][index] if index < 3 else None
-        default_alloc = auto_splits.get(split_preset, equal_split(int(entry_count)))
-        alloc_default = (
-            round(default_alloc[index], 2)
-            if split_preset != "Personnalisé"
-            else float(state.get(f"nt_alloc_{index}", 0.0))
-        )
-
         if order_type is OrderType.MARKET:
             col_mid.markdown("**Prix**")
             col_mid.info(f"Marché ≈ {fmt_price(price)}")
@@ -270,7 +284,6 @@ for index in range(int(entry_count)):
             "Allocation (%)",
             min_value=0.0,
             max_value=100.0,
-            value=float(alloc_default),
             step=1.0,
             key=f"nt_alloc_{index}",
         )

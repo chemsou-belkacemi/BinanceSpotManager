@@ -47,6 +47,7 @@ from binance_spot_manager.strategy_engine import (
     equal_split,
     percent_change,
     progressive_split,
+    recommended_split,
     resolve_entry_price,
     resolve_sl_price,
 )
@@ -225,6 +226,13 @@ def test_equal_split():
     assert equal_split(4) == [25.0, 25.0, 25.0, 25.0]
     assert sum(equal_split(3)) == pytest.approx(100.0)
     assert equal_split(0) == []
+
+
+def test_recommended_split():
+    assert recommended_split(1) == [100.0]
+    assert recommended_split(2) == [70.0, 30.0]
+    assert recommended_split(3) == [50.0, 30.0, 20.0]
+    assert sum(recommended_split(4)) == pytest.approx(100.0)
 
 
 def test_progressive_and_degressive_splits():

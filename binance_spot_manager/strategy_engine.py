@@ -229,6 +229,19 @@ def degressive_split(count: int) -> list[float]:
     return [float((w / total) * 100) for w in weights]
 
 
+def recommended_split(count: int) -> list[float]:
+    """Repartition initiale des Entries selon leur nombre."""
+    if count <= 0:
+        return []
+    if count == 1:
+        return [100.0]
+    if count == 2:
+        return [70.0, 30.0]
+    if count == 3:
+        return [50.0, 30.0, 20.0]
+    return degressive_split(count)
+
+
 def normalize_split(percents: list[float]) -> list[float]:
     """Remet une repartition a 100 % en conservant les proportions."""
     total = sum(percents)
