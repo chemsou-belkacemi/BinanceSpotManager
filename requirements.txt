@@ -1,6 +1,7 @@
 streamlit>=1.37,<2
 pydantic>=2.7,<3
 requests>=2.31,<3
+websockets>=12,<17
 python-dotenv>=1.0,<2
 pandas>=2.2,<3
 psutil>=5.9,<7

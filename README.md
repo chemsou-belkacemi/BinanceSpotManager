@@ -90,7 +90,15 @@ python scripts/bot_worker.py
 ```
 
 Le worker écrit son PID, son heartbeat et son état dans `data/bot_runtime.json`,
-tourne toutes les 5 secondes, et reste vivant même sans aucune position.
+tourne à l'intervalle choisi dans Settings (1 seconde dans les préférences
+locales actuelles), et reste vivant même sans aucune position.
+
+Les prix des paires suivies utilisent, quand il est disponible, le flux public
+`miniTicker` du Spot Testnet. Un prix WebSocket de plus de 5 secondes est ignoré
+et le client revient automatiquement à REST ; les statuts d'ordres restent
+vérifiés séparément sur Binance. Ce flux n'est activé que pour `testnet.binance.vision` et
+requiert le paquet `websockets` indiqué dans `requirements.txt`. Sans ce paquet,
+le fonctionnement REST antérieur est conservé.
 
 **Arrêt :** bouton *Arrêter proprement* du Dashboard, ou suppression de `data/bot_stop.flag`.
 L'*Arrêt forcé* tue le processus — à réserver à un worker bloqué.
@@ -220,9 +228,11 @@ un résultat incertain sont signalés comme désynchronisation, sans nouvelle
 vente automatique. Cette fonction reste limitée à Binance Demo et à un TP.
 
 **Idempotence.** Chaque ordre porte un `clientOrderId` du type `BSM-D-BTC-<position>-E3`,
-construit pour rester sous les 36 caractères. Avant tout envoi ou retry, le bot demande à
-Binance si cet identifiant existe déjà : si oui, il adopte l'ordre existant au lieu d'en
-créer un second. C'est ce qui permet de redémarrer le bot sans doubler les ordres.
+construit pour rester sous les 36 caractères. Avant un envoi, le bot vérifie si
+l'ordre existe déjà et l'adopte si nécessaire. Après un timeout ou un `5xx`,
+il cherche l'ordre côté Binance, mais ne renvoie pas automatiquement une
+écriture dont le résultat reste incertain : une vérification/réconciliation
+est nécessaire. En cas de `429` ou `418`, le client respecte `Retry-After`.
 
 **Confirmation obligatoire des TP.** Un TP n'est jamais considéré exécuté parce que le prix
 a touché le niveau. Il faut un fill confirmé par Binance ; un TP partiellement exécuté

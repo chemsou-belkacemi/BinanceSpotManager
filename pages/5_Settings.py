@@ -169,7 +169,8 @@ with tabs[1]:
         st.success(
             "Réglages enregistrés dans data/settings.json. "
             "L'intervalle de boucle s'applique au worker au prochain cycle. "
-            "Les autres réglages de risque ne sont pas appliqués au worker par ce bouton."
+            "Les limites de risque s'appliquent aux prochaines simulations et validations "
+            "de nouveaux trades ; elles ne modifient pas les positions déjà ouvertes."
         )
 
     st.divider()

@@ -741,6 +741,101 @@ def test_filter_failure_is_not_retried(engine):
     assert len(fake.created) == 0
 
 
+@pytest.mark.parametrize("error", [
+    BinanceError("Account has insufficient balance", code=-2010, status=400),
+    BinanceError("Too many requests", code=-1003, status=429, retry_after=30),
+])
+def test_business_error_or_rate_limit_never_retries_or_looks_up(engine, error):
+    execution, fake, _ = engine
+    attempts = []
+
+    def refuse(**kwargs):
+        attempts.append(kwargs)
+        raise error
+
+    fake.create_order = refuse
+    fake.find_order = lambda *args, **kwargs: pytest.fail("unexpected lookup")
+    result = execution._create_order_safe(
+        symbol="BTCUSDT", side="BUY", order_type="MARKET",
+        quantity=0.001, price=None, client_order_id="BSM-D-BTC-REFUSE",
+        market=True,
+    )
+
+    assert not result.success
+    assert result.status != "UNKNOWN"
+    assert len(attempts) == 1
+
+
+def test_ambiguous_order_without_confirmation_is_not_resent(engine):
+    execution, fake, rules = engine
+    position = make_position(rules, entry_status=EntryStatus.PLANNED)
+    entry = position.sorted_entries[0]
+    entry.order_type = OrderType.MARKET
+    entry.client_order_id = "BSM-D-BTC-UNKNOWN-E1"
+    attempts = []
+
+    def timeout(**kwargs):
+        attempts.append(kwargs)
+        raise BinanceError("Echec reseau simule")
+
+    fake.create_order = timeout
+    result = execution.place_entry(position, entry, current_price=84000)
+
+    assert result.status == "UNKNOWN"
+    assert not result.success
+    assert entry.status is EntryStatus.SUBMITTED
+    assert entry.client_order_id == "BSM-D-BTC-UNKNOWN-E1"
+    assert len(attempts) == 1
+
+
+def test_ambiguous_stop_loss_is_not_duplicated_next_cycle(engine):
+    execution, fake, rules = engine
+    position = make_position(rules)
+    position.stop_loss.status = SLStatus.PLANNED
+    position.stop_loss.order_id = None
+    position.stop_loss.client_order_id = None
+    attempts = []
+
+    def timeout(**kwargs):
+        attempts.append(kwargs)
+        raise BinanceError("Echec reseau simule")
+
+    fake.create_order = timeout
+    result = execution.place_stop_loss(
+        position, stop_price=80640.0, quantity=0.006
+    )
+    assert result.status == "UNKNOWN"
+    assert position.stop_loss.status is SLStatus.REPLACING
+    assert position.stop_loss.client_order_id
+
+    build_automation(execution, rules, execution.events).run_cycle(position, 84000)
+
+    assert len(attempts) == 1
+
+
+def test_ambiguous_tp_does_not_restore_stop_or_send_second_sell(engine):
+    execution, fake, rules = engine
+    fake.seed_stop_loss()
+    position = make_position(rules)
+    attempts = []
+
+    def timeout(**kwargs):
+        attempts.append(kwargs)
+        raise BinanceError("Echec reseau simule")
+
+    fake.create_order = timeout
+    automation = build_automation(execution, rules, execution.events)
+    automation.run_cycle(position, 86600)
+
+    assert position.take_profits[0].status is TPStatus.SUBMITTED
+    assert position.stop_loss.status is SLStatus.CANCELED
+    assert position.sync_status.value == "DESYNC_DETECTED"
+    assert len(attempts) == 1
+
+    automation.run_cycle(position, 86600)
+    assert len(attempts) == 1
+
+
 def test_transport_failure_checks_before_retry(engine):
     """Un echec transport ne doit jamais aboutir a deux ordres.
 

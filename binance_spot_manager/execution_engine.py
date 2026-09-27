@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 import re
-import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -381,6 +380,10 @@ class ExecutionEngine:
                 entry.status = EntryStatus.SUBMITTED
             elif result.is_terminal_dead:
                 entry.status = EntryStatus.REJECTED
+        elif result.status == "UNKNOWN":
+            entry.status = EntryStatus.SUBMITTED
+            entry.submitted_at = utcnow()
+            entry.last_error = result.error
         else:
             entry.status = EntryStatus.REJECTED
             entry.last_error = result.error
@@ -487,6 +490,9 @@ class ExecutionEngine:
                 if result.is_open
                 else TPStatus.FAILED
             )
+        elif result.status == "UNKNOWN":
+            tp.status = TPStatus.SUBMITTED
+            tp.last_error = result.error
         else:
             tp.status = TPStatus.FAILED
             tp.last_error = result.error
@@ -562,6 +568,9 @@ class ExecutionEngine:
             tp.status = TPStatus.SUBMITTED
             tp.estimated_qty = float(qty)
             tp.last_error = ""
+        elif result.status == "UNKNOWN":
+            tp.status = TPStatus.SUBMITTED
+            tp.last_error = result.error
         elif not result.success:
             tp.status = TPStatus.FAILED
             tp.last_error = result.error
@@ -634,7 +643,22 @@ class ExecutionEngine:
             )
             result = normalize_order_response(raw, client_order_id=client_order_id)
         except BinanceError as exc:
-            result = OrderResult(success=False, error=str(exc))
+            if exc.is_duplicate_client_order_id or exc.is_ambiguous_write:
+                try:
+                    existing = self.client.find_order(
+                        position.symbol, client_order_id=client_order_id
+                    )
+                except BinanceError:
+                    existing = None
+                result = (
+                    normalize_order_response(existing, client_order_id=client_order_id)
+                    if existing else OrderResult(
+                        success=False, status="UNKNOWN", client_order_id=client_order_id,
+                        error=f"Statut du SL incertain, verifier sur Binance Demo : {exc}",
+                    )
+                )
+            else:
+                result = OrderResult(success=False, error=str(exc))
 
         if result.success:
             position.stop_loss.order_id = result.order_id
@@ -651,6 +675,20 @@ class ExecutionEngine:
                 symbol=position.symbol,
                 stop=stop,
                 qty=qty,
+            )
+        elif result.status == "UNKNOWN":
+            position.stop_loss.order_id = None
+            position.stop_loss.client_order_id = client_order_id
+            position.stop_loss.resolved_price = stop
+            position.stop_loss.quantity = qty
+            position.stop_loss.status = SLStatus.REPLACING
+            position.stop_loss.last_error = result.error
+            self.events.append(
+                EventType.ERROR,
+                f"Creation SL incertaine {position.symbol} : verification Binance requise",
+                position_id=position.position_id,
+                symbol=position.symbol,
+                level="CRITICAL",
             )
         else:
             position.stop_loss.status = SLStatus.FAILED
@@ -866,70 +904,48 @@ class ExecutionEngine:
         client_order_id: str,
         market: bool,
         time_in_force: Optional[str] = None,
-        max_attempts: int = 2,
     ) -> OrderResult:
-        """Envoie un ordre avec retry SANS jamais risquer de doublon.
+        """Envoie une seule fois ; une issue ambiguë exige une réconciliation.
 
-        Sequence imposee (section 80) :
-          1. si la reponse est un echec transport/5xx, on ne renvoie rien
-             avant d'avoir demande a Binance si l'ordre a ete accepte ;
-          2. si l'ordre existe deja, on l'adopte au lieu d'en creer un second ;
-          3. si l'erreur est un filtre ou une erreur metier, aucun retry.
+        Un clientOrderId stable ne suffit pas à garantir qu'un renvoi après
+        timeout ne créera jamais une seconde exécution. En cas de doute, on
+        interroge Binance puis on bloque tout renvoi automatique.
         """
         rules = self.rules(symbol)
         qty_str = rules.qty_str(quantity, market=market)
         price_str = None if price is None else rules.price_str(price)
 
-        last_error = ""
-        for attempt in range(1, max_attempts + 1):
-            try:
-                raw = self.client.create_order(
-                    symbol=symbol,
-                    side=side,
-                    order_type=order_type,
-                    quantity=qty_str,
-                    price=price_str,
-                    time_in_force=None if market else (time_in_force or "GTC"),
-                    client_order_id=client_order_id,
+        try:
+            raw = self.client.create_order(
+                symbol=symbol,
+                side=side,
+                order_type=order_type,
+                quantity=qty_str,
+                price=price_str,
+                time_in_force=None if market else (time_in_force or "GTC"),
+                client_order_id=client_order_id,
+            )
+            return normalize_order_response(raw, client_order_id=client_order_id)
+        except BinanceError as exc:
+            if exc.is_duplicate_client_order_id or exc.is_ambiguous_write:
+                try:
+                    existing = self.client.find_order(
+                        symbol, client_order_id=client_order_id
+                    )
+                except BinanceError as lookup_error:
+                    logger.warning(
+                        "Statut incertain pour %s : %s", client_order_id, lookup_error
+                    )
+                    existing = None
+                if existing:
+                    return normalize_order_response(existing, client_order_id=client_order_id)
+                return OrderResult(
+                    success=False, status="UNKNOWN", client_order_id=client_order_id,
+                    error=f"Statut de l'ordre incertain, verifier sur Binance Demo avant toute nouvelle tentative : {exc}",
                 )
-                return normalize_order_response(raw, client_order_id=client_order_id)
-
-            except BinanceError as exc:
-                last_error = str(exc)
-
-                # Une erreur de filtre ne se retente jamais : elle se corrige.
-                if exc.is_filter_failure:
-                    return OrderResult(success=False, error=last_error)
-
-                # Doublon : l'ordre existe deja, on l'adopte.
-                if exc.is_duplicate_client_order_id:
-                    existing = self.client.find_order(
-                        symbol, client_order_id=client_order_id
-                    )
-                    if existing:
-                        return normalize_order_response(
-                            existing, client_order_id=client_order_id
-                        )
-                    return OrderResult(success=False, error=last_error)
-
-                # 5xx / transport : on verifie AVANT tout retry.
-                if attempt < max_attempts:
-                    time.sleep(0.5)
-                    existing = self.client.find_order(
-                        symbol, client_order_id=client_order_id
-                    )
-                    if existing:
-                        logger.warning(
-                            "Ordre retrouve apres echec transport : %s", client_order_id
-                        )
-                        return normalize_order_response(
-                            existing, client_order_id=client_order_id
-                        )
-                    continue
-
-                return OrderResult(success=False, error=last_error)
-
-        return OrderResult(success=False, error=last_error or "Echec inconnu")
+            return OrderResult(
+                success=False, client_order_id=client_order_id, error=str(exc)
+            )
 
     # ------------------------------------------------------------------
     # Application du resultat d'un ordre sur la position

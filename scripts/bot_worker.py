@@ -53,6 +53,7 @@ from binance_spot_manager.models import (  # noqa: E402
     utcnow,
 )
 from binance_spot_manager.notification_engine import NotificationEngine  # noqa: E402
+from binance_spot_manager.market_price_stream import DemoMarketPriceStream  # noqa: E402
 from binance_spot_manager.position_engine import PositionEngine, finish_position, recompute_position  # noqa: E402
 from binance_spot_manager.position_store import PositionStore, RuntimeStore, get_settings_store  # noqa: E402
 from binance_spot_manager.reconciliation_engine import ReconciliationEngine  # noqa: E402
@@ -90,6 +91,7 @@ class Worker:
         )
         self.reconciliation = ReconciliationEngine(self.execution, events=self.events)
         self.notifications = NotificationEngine(self.settings)
+        self.market_prices = DemoMarketPriceStream(self.settings)
 
         self._running = True
         self._loop = 0
@@ -439,15 +441,19 @@ class Worker:
         ne peut partir, et l'API publique ne demande pas de cle.
         """
         unique = sorted({s for s in symbols if s})
+        streamed = self.market_prices.prices(unique)
         now = time.time()
-        if unique and now - self._price_fetched_at > max(self._worker_interval() - 1, 1):
+        missing = [symbol for symbol in unique if symbol not in streamed]
+        if missing and now - self._price_fetched_at > max(self._worker_interval() - 1, 1):
             try:
-                self._price_cache = self.client.get_prices(unique)
+                self._price_cache = self.client.get_prices(missing)
                 self._price_fetched_at = now
             except BinanceError as exc:
                 logging.getLogger("bsm.worker").warning("Prix indisponibles : %s", exc)
 
-        cache = self._price_cache
+        # Un ancien prix REST ne doit jamais declencher un TP apres une panne.
+        rest_prices = self._price_cache if now - self._price_fetched_at <= 5 else {}
+        cache = {**rest_prices, **streamed}
 
         def provider(symbol: str) -> Optional[float]:
             return cache.get(symbol)

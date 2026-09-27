@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
+import math
 import time
 from typing import Any, Mapping, Optional
 from urllib.parse import urlencode
@@ -36,12 +38,14 @@ class BinanceError(RuntimeError):
         code: Optional[int] = None,
         status: Optional[int] = None,
         endpoint: str = "",
+        retry_after: Optional[float] = None,
     ) -> None:
         super().__init__(message)
         self.message = message
         self.code = code
         self.status = status
         self.endpoint = endpoint
+        self.retry_after = retry_after
 
     def __str__(self) -> str:  # pragma: no cover - affichage
         parts = [self.message]
@@ -67,6 +71,16 @@ class BinanceError(RuntimeError):
     def is_filter_failure(self) -> bool:
         return "filter failure" in self.message.lower()
 
+    @property
+    def is_ambiguous_write(self) -> bool:
+        """La requete a pu atteindre Binance sans reponse exploitable."""
+        return (
+            self.code == -1007
+            or self.status is not None and self.status >= 500
+            or self.status is None and self.code is None
+            and self.message.lower().startswith("echec reseau")
+        )
+
 
 def _clean_params(params: Optional[Mapping[str, Any]]) -> dict[str, Any]:
     """Retire les None — Binance rejette les parametres vides."""
@@ -84,6 +98,7 @@ class BinanceSpotClient:
         self._session.headers.update({"User-Agent": "BinanceSpotManager/2.0"})
         self._time_offset_ms: int = 0
         self._time_synced_at: float = 0.0
+        self._cooldown_until: float = 0.0
 
     # ------------------------------------------------------------------
     # Transport
@@ -110,6 +125,13 @@ class BinanceSpotClient:
         if method in _WRITE_METHODS:
             # Garde-fou : refuse toute ecriture hors Demo whitelistee.
             self.settings.assert_write_allowed(f"{method} {endpoint}")
+
+        remaining = self._cooldown_until - time.monotonic()
+        if remaining > 0:
+            raise BinanceError(
+                "Limite Binance active : attendre avant une nouvelle requete",
+                status=429, endpoint=endpoint, retry_after=remaining,
+            )
 
         headers: dict[str, str] = {}
         if signed:
@@ -147,6 +169,21 @@ class BinanceSpotClient:
         if response.status_code >= 400:
             code = None
             message = response.text[:400]
+            retry_after = None
+            if response.status_code in (418, 429):
+                try:
+                    parsed_retry_after = float(response.headers.get("Retry-After", ""))
+                    retry_after = (
+                        max(parsed_retry_after, 1.0)
+                        if math.isfinite(parsed_retry_after) else None
+                    )
+                except (TypeError, ValueError):
+                    pass
+                if retry_after is None:
+                    retry_after = 120.0 if response.status_code == 418 else 60.0
+                self._cooldown_until = max(
+                    self._cooldown_until, time.monotonic() + retry_after
+                )
             if isinstance(body, dict):
                 code = body.get("code")
                 message = str(body.get("msg") or message)
@@ -162,6 +199,7 @@ class BinanceSpotClient:
                 code=code if isinstance(code, int) else None,
                 status=response.status_code,
                 endpoint=endpoint,
+                retry_after=retry_after,
             )
 
         return body
@@ -228,11 +266,17 @@ class BinanceSpotClient:
 
     def get_prices(self, symbols: Optional[list[str]] = None) -> dict[str, float]:
         """Prix de plusieurs paires en un appel."""
-        data = self._request("GET", "/api/v3/ticker/price")
+        wanted = sorted({symbol.upper() for symbol in symbols or [] if symbol})
+        if symbols is not None and not wanted:
+            return {}
+        if len(wanted) == 1:
+            symbol = wanted[0]
+            return {symbol: self.get_price(symbol)}
+        params = {"symbols": json.dumps(wanted, separators=(",", ":"))} if wanted else None
+        data = self._request("GET", "/api/v3/ticker/price", params=params)
         prices = {row["symbol"]: float(row["price"]) for row in data or []}
         if symbols is None:
             return prices
-        wanted = {s.upper() for s in symbols}
         return {k: v for k, v in prices.items() if k in wanted}
 
     def get_ticker_24h(self, symbol: str) -> dict[str, Any]:

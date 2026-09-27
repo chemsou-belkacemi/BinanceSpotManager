@@ -5,8 +5,12 @@ Aucun appel reseau.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
+from binance_spot_manager.config import Settings
+from binance_spot_manager.dashboard_service import DashboardService
 from binance_spot_manager.models import Entry, Position, PositionStatus, utcnow
 from binance_spot_manager.position_store import PositionStore
 from binance_spot_manager.risk_engine import PortfolioSnapshot, RiskEngine, RiskLimits
@@ -18,6 +22,41 @@ from binance_spot_manager.strategy_engine import (
 )
 
 pytestmark = pytest.mark.unit
+
+
+def test_saved_risk_limits_are_used_for_new_trades(monkeypatch):
+    saved = {
+        "max_risk_per_position_percent": 0.5,
+        "max_total_risk_percent": 2.0,
+        "max_open_positions": 3,
+        "max_exposure_per_symbol_percent": 10.0,
+        "capital_reserve_percent": 30.0,
+    }
+    monkeypatch.setattr(
+        "binance_spot_manager.dashboard_service.get_settings_store",
+        lambda: SimpleNamespace(load=lambda: saved),
+    )
+    service = DashboardService.__new__(DashboardService)
+    service.settings = Settings()
+
+    limits = service.risk_limits()
+
+    assert limits.max_risk_per_position_percent == 0.5
+    assert limits.max_total_risk_percent == 2.0
+    assert limits.max_open_positions == 3
+    assert limits.max_exposure_per_symbol_percent == 10.0
+    assert limits.min_reserve_percent == 30.0
+
+
+def test_invalid_saved_risk_limit_falls_back_to_configuration(monkeypatch):
+    monkeypatch.setattr(
+        "binance_spot_manager.dashboard_service.get_settings_store",
+        lambda: SimpleNamespace(load=lambda: {"max_open_positions": "invalid"}),
+    )
+    service = DashboardService.__new__(DashboardService)
+    service.settings = Settings(max_open_positions=7)
+
+    assert service.risk_limits().max_open_positions == 7
 
 
 def make_plan(capital: float = 500.0, loss: float = -20.0) -> StrategyPlan:

@@ -1,10 +1,12 @@
 """Le heartbeat du worker doit refléter les positions réellement suivies."""
 
 from types import SimpleNamespace
+import time
 
 import pytest
 
 from binance_spot_manager.execution_engine import OrderResult
+from binance_spot_manager.binance_client import BinanceError
 from binance_spot_manager.models import (
     Commission, Entry, EntryStatus, OcoExit, Position, PositionStatus,
     SLStatus, SyncStatus, TakeProfit, TPStatus, WorkerState,
@@ -61,6 +63,31 @@ def test_worker_interval_uses_saved_preference(monkeypatch, saved, expected):
     )
 
     assert worker._worker_interval() == expected
+
+
+def test_worker_uses_stream_price_before_rest():
+    worker = Worker.__new__(Worker)
+    worker.market_prices = SimpleNamespace(prices=lambda symbols: {"BTCUSDT": 85000.0})
+    worker.client = SimpleNamespace(
+        get_prices=lambda symbols: pytest.fail("REST should not be called")
+    )
+    worker._price_cache = {}
+    worker._price_fetched_at = 0.0
+
+    assert worker._price_provider(["BTCUSDT"])("BTCUSDT") == 85000.0
+
+
+def test_worker_never_trades_on_stale_rest_price_after_failure():
+    worker = Worker.__new__(Worker)
+    worker.market_prices = SimpleNamespace(prices=lambda symbols: {})
+    worker.client = SimpleNamespace(
+        get_prices=lambda symbols: (_ for _ in ()).throw(BinanceError("offline"))
+    )
+    worker._price_cache = {"BTCUSDT": 84000.0}
+    worker._price_fetched_at = time.time() - 10
+    worker._worker_interval = lambda: 1
+
+    assert worker._price_provider(["BTCUSDT"])("BTCUSDT") is None
 
 
 def test_reconciliation_persists_recovered_sync_status():

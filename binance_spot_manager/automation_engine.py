@@ -203,6 +203,38 @@ class AutomationEngine:
         if remaining <= QTY_EPSILON and not sl.order_id:
             return
 
+        # Une creation de SL a pu etre acceptee malgre un timeout. Tant que
+        # Binance ne tranche pas, ne jamais envoyer un second ordre de vente.
+        if sl.status is SLStatus.REPLACING and sl.client_order_id:
+            status = self._fetch_status_safe(
+                position, order_id=sl.order_id, client_order_id=sl.client_order_id
+            )
+            if status is None:
+                position.sync_status = SyncStatus.DESYNC_DETECTED
+                result.actions.append("SL incertain : verification Binance requise")
+                return
+            if status.executed_qty > QTY_EPSILON:
+                self.position_engine.apply_sl_fill(
+                    position,
+                    executed_qty=status.executed_qty,
+                    average_price=status.average_price,
+                    quote_received=status.cummulative_quote_qty,
+                    commissions=status.commissions,
+                )
+                result.position_finished = True
+                return
+            if status.is_open:
+                sl.order_id = status.order_id
+                sl.status = SLStatus.ACTIVE
+                sl.last_error = ""
+                result.actions.append("SL existant retrouve sur Binance")
+                return
+            if status.is_terminal_dead:
+                sl.status = SLStatus.FAILED
+                sl.replace_count += 1
+                result.actions.append("SL confirme non actif : nouvelle protection au prochain cycle")
+                return
+
         # 1. Un SL existe cote Binance : on verifie son etat, puis on sort.
         if sl.order_id and sl.status is SLStatus.ACTIVE:
             status = self._fetch_status_safe(
@@ -470,6 +502,20 @@ class AutomationEngine:
             return
 
         if not order.success:
+            if order.status == "UNKNOWN":
+                position.sync_status = SyncStatus.DESYNC_DETECTED
+                result.errors.append(
+                    f"TP {next_tp.sequence_number} : issue incertaine ; "
+                    "vente et restauration du SL suspendues jusqu'a confirmation Binance"
+                )
+                self.events.append(
+                    EventType.ERROR,
+                    f"TP {next_tp.sequence_number} incertain ({position.symbol}) : verifier sur Binance Demo",
+                    position_id=position.position_id,
+                    symbol=position.symbol,
+                    level="CRITICAL",
+                )
+                return
             next_tp.status = TPStatus.FAILED
             next_tp.last_error = order.error
             result.errors.append(f"TP {next_tp.sequence_number} : {order.error}")

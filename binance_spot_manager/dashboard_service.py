@@ -24,6 +24,7 @@ from .models import (
     utcnow,
 )
 from .notification_engine import NotificationEngine
+from .market_price_stream import DemoMarketPriceStream
 from .wallet_valuation import WalletValuation, conversion_rate, value_wallet
 from .position_engine import recompute_position
 from .position_store import PositionStore, get_presets_store, get_settings_store, summarize
@@ -140,6 +141,7 @@ class DashboardService:
         self.process_manager = process_manager or BotProcessManager(self.settings)
         self.events = events or EventStore()
         self.notifications = NotificationEngine(self.settings)
+        self.market_prices = DemoMarketPriceStream(self.settings)
 
     # ------------------------------------------------------------------
     # Worker
@@ -263,12 +265,32 @@ class DashboardService:
         return RiskEngine.snapshot(positions, quote_free, quote_rates=rates)
 
     def risk_limits(self) -> RiskLimits:
+        saved = get_settings_store().load()
+        saved = saved if isinstance(saved, dict) else {}
+
+        def number(key: str, default: float, minimum: float, maximum: float) -> float:
+            try:
+                value = float(saved.get(key, default))
+            except (TypeError, ValueError):
+                return default
+            return value if minimum <= value <= maximum else default
+
         return RiskLimits(
-            max_risk_per_position_percent=self.settings.max_risk_per_position_percent,
-            max_total_risk_percent=self.settings.max_total_risk_percent,
-            max_open_positions=self.settings.max_open_positions,
-            max_exposure_per_symbol_percent=self.settings.max_exposure_per_symbol_percent,
-            min_reserve_percent=self.settings.capital_reserve_percent,
+            max_risk_per_position_percent=number(
+                "max_risk_per_position_percent", self.settings.max_risk_per_position_percent, 0.1, 100
+            ),
+            max_total_risk_percent=number(
+                "max_total_risk_percent", self.settings.max_total_risk_percent, 0.1, 100
+            ),
+            max_open_positions=int(number(
+                "max_open_positions", self.settings.max_open_positions, 1, 50
+            )),
+            max_exposure_per_symbol_percent=number(
+                "max_exposure_per_symbol_percent", self.settings.max_exposure_per_symbol_percent, 1, 100
+            ),
+            min_reserve_percent=number(
+                "capital_reserve_percent", self.settings.capital_reserve_percent, 0, 90
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -336,6 +358,9 @@ class DashboardService:
     # ------------------------------------------------------------------
 
     def current_price(self, symbol: str) -> Optional[float]:
+        streamed = self.market_prices.prices([symbol]).get(symbol.upper())
+        if streamed is not None:
+            return streamed
         if self.settings.dry_run or not self.settings.has_credentials:
             # DRY_RUN : le prix public reste accessible sans cle.
             pass
@@ -348,11 +373,15 @@ class DashboardService:
     def prices(self, symbols: list[str]) -> dict[str, float]:
         if not symbols:
             return {}
+        streamed = self.market_prices.prices(symbols)
+        missing = [symbol for symbol in symbols if symbol.upper() not in streamed]
+        if not missing:
+            return streamed
         try:
-            return self.client.get_prices(symbols)
+            return {**streamed, **self.client.get_prices(missing)}
         except BinanceError as exc:
             logger.warning("Prix indisponibles : %s", exc)
-            return {}
+            return streamed
 
     # ------------------------------------------------------------------
     # Ordres Binance reels
