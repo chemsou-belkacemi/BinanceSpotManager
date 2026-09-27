@@ -238,9 +238,9 @@ class PositionEngine:
         entry.executed_qty = executed_qty
         entry.average_fill_price = average_price
         entry.quote_spent = quote_spent
-        entry.net_qty = executed_qty
         if commissions:
             entry.commissions = list(commissions)
+        entry.net_qty = max(executed_qty - entry.commission_total(position.base_asset), 0.0)
         if order_id is not None:
             entry.order_id = order_id
 
@@ -272,8 +272,8 @@ class PositionEngine:
         if position.status is PositionStatus.PENDING_ENTRIES and position.filled_entries:
             position.status = PositionStatus.ACTIVE
 
-        self.refresh_tp_estimates(position)
         recompute_position(position)
+        self.refresh_tp_estimates(position)
         return entry
 
     def apply_tp_fill(
@@ -310,6 +310,9 @@ class PositionEngine:
             tp.status = TPStatus.PARTIALLY_EXECUTED
         else:
             tp.status = TPStatus.EXECUTED
+
+        if executed_qty > 0:
+            tp.last_error = ""
 
         tp.executed_at = utcnow()
         position.log(
@@ -479,6 +482,10 @@ def recompute_position(position: Position) -> Position:
     metrics = position.metrics
 
     filled = position.filled_entries
+    for entry in filled:
+        entry.net_qty = max(
+            entry.executed_qty - entry.commission_total(position.base_asset), 0.0
+        )
     total_bought = sum(e.executed_qty for e in filled)
     spent = sum((e.executed_qty * e.average_fill_price) or e.quote_spent for e in filled)
 
@@ -490,9 +497,13 @@ def recompute_position(position: Position) -> Position:
 
     metrics.total_bought_qty = total_bought
     metrics.total_sold_qty = sold
-    metrics.net_qty = max(total_bought - sold, 0.0)
+    base_fees_on_buys = sum(e.commission_total(position.base_asset) for e in position.entries)
+    base_fees_on_sells = sum(tp.commission_total(position.base_asset) for tp in position.take_profits)
+    base_fees_on_sells += position.stop_loss.commission_total(position.base_asset)
+    metrics.net_qty = max(total_bought - sold - base_fees_on_buys - base_fees_on_sells, 0.0)
 
-    metrics.average_price = (spent / total_bought) if total_bought > 0 else 0.0
+    net_bought = max(total_bought - base_fees_on_buys, 0.0)
+    metrics.average_price = (spent / net_bought) if net_bought > 0 else 0.0
     metrics.capital_committed = spent
 
     planned = sum(e.quote_amount for e in position.entries)
@@ -512,8 +523,8 @@ def recompute_position(position: Position) -> Position:
 
     average = metrics.average_price
     metrics.break_even_price = average
-    if total_bought > 0 and quote_fees > 0:
-        metrics.break_even_with_fees = average + (quote_fees / total_bought)
+    if net_bought > 0 and quote_fees > 0:
+        metrics.break_even_with_fees = average + (quote_fees / net_bought)
     else:
         metrics.break_even_with_fees = average
 

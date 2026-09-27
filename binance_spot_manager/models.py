@@ -321,6 +321,7 @@ class TakeProfit(BSMModel):
 
     order_id: Optional[int] = None
     client_order_id: Optional[str] = None
+    attempt_count: int = 0
 
     gain_estimated: float = 0.0
     gain_realized: float = 0.0
@@ -341,7 +342,12 @@ class TakeProfit(BSMModel):
 
     @property
     def is_pending(self) -> bool:
-        return self.status == TPStatus.PENDING
+        return self.status in {
+            TPStatus.PENDING,
+            TPStatus.TRIGGERED,
+            TPStatus.SUBMITTED,
+            TPStatus.FAILED,
+        }
 
     def commission_total(self, asset: str = "") -> float:
         return sum(c.amount for c in self.commissions if not asset or c.asset == asset)

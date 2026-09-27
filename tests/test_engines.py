@@ -469,6 +469,34 @@ def test_entry_fill_updates_average_and_status(rules):
     assert position.metrics.break_even_with_fees > position.metrics.average_price
 
 
+def test_base_asset_buy_fee_reduces_sellable_quantity(rules):
+    position = make_position(rules)
+    entry = position.sorted_entries[0]
+    gross_qty = 0.00035
+    base_fee = 0.00000035
+
+    PositionEngine(rules).apply_entry_fill(
+        position,
+        entry.entry_id,
+        executed_qty=gross_qty,
+        average_price=84000.0,
+        quote_spent=gross_qty * 84000.0,
+        commissions=[Commission(asset="BTC", amount=base_fee)],
+    )
+
+    assert entry.net_qty == pytest.approx(gross_qty - base_fee)
+    assert position.metrics.net_qty == pytest.approx(gross_qty - base_fee)
+    assert position.metrics.average_price == pytest.approx(
+        gross_qty * 84000.0 / (gross_qty - base_fee)
+    )
+    assert position.metrics.commissions_base == pytest.approx(base_fee)
+    assert position.sorted_tps[0].estimated_qty == pytest.approx(
+        (gross_qty - base_fee) * position.sorted_tps[0].sell_percent / 100.0
+    )
+    recompute_position(position)
+    assert position.metrics.net_qty == pytest.approx(gross_qty - base_fee)
+
+
 def test_partial_fill_is_detected(rules):
     position = make_position(rules)
     engine = PositionEngine(rules)

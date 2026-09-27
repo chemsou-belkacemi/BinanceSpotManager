@@ -15,6 +15,7 @@ from binance_spot_manager.automation_engine import (
     AutomationConfig,
     AutomationEngine,
     CycleResult,
+    planned_tp_quantity,
 )
 from binance_spot_manager.binance_client import BinanceError
 from binance_spot_manager.config import RunMode, Settings
@@ -344,6 +345,23 @@ def test_tp_not_triggered_below_target(engine):
     assert not outcome.errors
 
 
+def test_active_stop_is_adjusted_after_base_asset_buy_fee(engine):
+    execution, fake, rules = engine
+    position = make_position(rules)
+    position.entries[0].commissions = [Commission(asset="BTC", amount=0.00001)]
+    recompute_position(position)
+
+    outcome = build_automation(execution, rules, execution.events).run_cycle(
+        position, 85000.0
+    )
+
+    assert not outcome.errors
+    assert fake.cancelled == [SL_ORDER_ID]
+    assert position.stop_loss.status is SLStatus.ACTIVE
+    assert position.stop_loss.quantity == pytest.approx(0.00599)
+    assert not any(order["type"] == "MARKET" for order in fake.created)
+
+
 def test_tp_triggers_and_sells(engine):
     execution, fake, rules = engine
     automation = build_automation(execution, rules, execution.events)
@@ -358,6 +376,129 @@ def test_tp_triggers_and_sells(engine):
     assert tp.gain_realized != 0
     assert position.metrics.net_qty < 0.006
     assert any(o["type"] == "MARKET" for o in fake.created)
+
+
+def test_tp_sells_net_quantity_after_releasing_locked_stop(settings, rules, events):
+    fake = FakeClient(rules)
+    fake.seed_stop_loss(qty=0.00035)
+    position = make_position(rules)
+    entry = position.entries[0]
+    entry.executed_qty = 0.00035
+    entry.commissions = [Commission(asset="BTC", amount=0.00000035)]
+    position.take_profits = position.take_profits[:1]
+    position.take_profits[0].sell_percent = 100.0
+    position.take_profits[0].status = TPStatus.FAILED
+    position.take_profits[0].last_error = "Account has insufficient balance | code=-2010"
+    position.stop_loss.quantity = 0.00035
+    recompute_position(position)
+    assert planned_tp_quantity(position, position.take_profits[0], rules) == 0.00034
+
+    wallet_free = 0.0
+    original_cancel = fake.cancel_order
+    original_create = fake.create_order
+
+    def cancel_with_balance(*args, **kwargs):
+        nonlocal wallet_free
+        cancelled = original_cancel(*args, **kwargs)
+        wallet_free += float(cancelled["origQty"])
+        return cancelled
+
+    def create_with_balance(*args, **kwargs):
+        nonlocal wallet_free
+        quantity = float(kwargs.get("quantity") or 0)
+        if kwargs["side"] == "SELL" and quantity > wallet_free + 1e-12:
+            raise BinanceError("Account has insufficient balance", code=-2010)
+        if kwargs["side"] == "SELL":
+            wallet_free -= quantity
+        return original_create(*args, **kwargs)
+
+    fake.cancel_order = cancel_with_balance
+    fake.create_order = create_with_balance
+    fake.get_free_balance = lambda asset: wallet_free if asset == "BTC" else 5000.0
+
+    execution = build_execution(settings, rules, events, fake)
+    outcome = build_automation(execution, rules, events).run_cycle(position, 86600.0)
+
+    assert not outcome.errors
+    assert outcome.tp_executed == 1
+    assert fake.cancelled == [SL_ORDER_ID]
+    assert fake.created[0]["type"] == "MARKET"
+    assert fake.created[0]["qty"] == 0.00034
+    assert position.metrics.net_qty == pytest.approx(0.00000965)
+    assert position.status is PositionStatus.CLOSED
+
+
+def test_failed_tp_restores_stop_on_net_quantity(settings, rules, events):
+    fake = FakeClient(rules)
+    fake.seed_stop_loss(qty=0.006)
+    position = make_position(rules)
+    position.entries[0].commissions = [Commission(asset="BTC", amount=0.00001)]
+    recompute_position(position)
+    original_create = fake.create_order
+
+    def fail_tp_only(*args, **kwargs):
+        if kwargs["order_type"] == "MARKET":
+            raise BinanceError("Account has insufficient balance", code=-2010)
+        return original_create(*args, **kwargs)
+
+    fake.create_order = fail_tp_only
+    execution = build_execution(settings, rules, events, fake)
+    outcome = build_automation(execution, rules, events).run_cycle(position, 86600.0)
+
+    assert outcome.tp_executed is None
+    assert outcome.errors
+    assert position.stop_loss.status is SLStatus.ACTIVE
+    assert position.stop_loss.quantity == pytest.approx(0.00599)
+    assert any(order["type"] == "STOP_LOSS_LIMIT" for order in fake.created)
+
+
+def test_wallet_shortfall_does_not_send_partial_tp(settings, rules, events):
+    fake = FakeClient(rules)
+    fake.seed_stop_loss()
+    fake.get_free_balance = lambda asset: 0.001 if asset == "BTC" else 5000.0
+    position = make_position(rules)
+    execution = build_execution(settings, rules, events, fake)
+
+    outcome = build_automation(execution, rules, events).run_cycle(position, 86600.0)
+
+    assert outcome.tp_executed is None
+    assert any("Solde libre BTC insuffisant" in error for error in outcome.errors)
+    assert position.stop_loss.status is SLStatus.ACTIVE
+    assert not any(order["type"] == "MARKET" for order in fake.created)
+
+
+def test_limit_tp_expires_and_retries_with_stop_restored(settings, rules, events):
+    fake = FakeClient(rules)
+    fake.seed_stop_loss()
+    position = make_position(rules)
+    position.take_profits[0].execution_policy = TPExecutionPolicy.LIMIT_ON_TRIGGER
+    original_create = fake.create_order
+    time_in_force_values = []
+
+    def expire_limit(*args, **kwargs):
+        if kwargs["order_type"] == "LIMIT":
+            time_in_force_values.append(kwargs["time_in_force"])
+        order = original_create(*args, **kwargs)
+        if kwargs["order_type"] == "LIMIT":
+            order["status"] = "EXPIRED"
+        return order
+
+    fake.create_order = expire_limit
+    execution = build_execution(settings, rules, events, fake)
+    automation = build_automation(execution, rules, events)
+
+    first = automation.run_cycle(position, 86600.0)
+    assert first.tp_executed is None
+    assert position.stop_loss.status is SLStatus.ACTIVE
+    assert position.take_profits[0].attempt_count == 1
+
+    second = automation.run_cycle(position, 86600.0)
+    assert second.tp_executed is None
+    assert position.stop_loss.status is SLStatus.ACTIVE
+    assert position.take_profits[0].attempt_count == 2
+    assert time_in_force_values == ["FOK", "FOK"]
+    limit_orders = [order for order in fake.created if order["type"] == "LIMIT"]
+    assert limit_orders[0]["client_order_id"] != limit_orders[1]["client_order_id"]
 
 
 def test_second_tp_only_after_first(engine):

@@ -416,7 +416,11 @@ execution_policy = st.radio(
     "Exécution des TP",
     ["MARKET_ON_TRIGGER", "LIMIT_ON_TRIGGER"],
     horizontal=True,
-    help="MARKET_ON_TRIGGER : vente au marché dès que la cible est atteinte.",
+    help=(
+        "MARKET_ON_TRIGGER : vente au marché dès la cible. "
+        "LIMIT_ON_TRIGGER : vente limitée immédiate (FOK) ; si elle ne remplit pas, "
+        "le SL est restauré et le worker réessaie au prochain cycle."
+    ),
 )
 
 # ==========================================================================

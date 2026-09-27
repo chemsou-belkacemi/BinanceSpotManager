@@ -379,7 +379,10 @@ class ExecutionEngine:
         client_order_id = tp.client_order_id or build_client_order_id(
             symbol=position.symbol,
             position_id=position.position_id,
-            suffix=f"TP{tp.sequence_number}",
+            suffix=(
+                f"TP{tp.sequence_number}R{tp.attempt_count}"
+                if tp.attempt_count else f"TP{tp.sequence_number}"
+            ),
             environment=position.environment,
         )
 
@@ -418,6 +421,7 @@ class ExecutionEngine:
             price=None if market else tp.target_price,
             client_order_id=client_order_id,
             market=market,
+            time_in_force=None if market else "FOK",
         )
 
         tp.client_order_id = client_order_id
@@ -727,6 +731,11 @@ class ExecutionEngine:
             return 0.0
         return self.client.get_free_balance(asset)
 
+    def get_free_balance(self, asset: str) -> float:
+        if self._dry_run():
+            return 0.0
+        return self.client.get_free_balance(asset)
+
     # ------------------------------------------------------------------
     # Cœur : creation d'ordre avec un seul retry controle
     # ------------------------------------------------------------------
@@ -741,6 +750,7 @@ class ExecutionEngine:
         price: Optional[float],
         client_order_id: str,
         market: bool,
+        time_in_force: Optional[str] = None,
         max_attempts: int = 2,
     ) -> OrderResult:
         """Envoie un ordre avec retry SANS jamais risquer de doublon.
@@ -764,7 +774,7 @@ class ExecutionEngine:
                     order_type=order_type,
                     quantity=qty_str,
                     price=price_str,
-                    time_in_force=None if market else "GTC",
+                    time_in_force=None if market else (time_in_force or "GTC"),
                     client_order_id=client_order_id,
                 )
                 return normalize_order_response(raw, client_order_id=client_order_id)

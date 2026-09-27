@@ -28,6 +28,7 @@ from .models import (
     Position,
     PositionStatus,
     SLStatus,
+    SyncStatus,
     TPStatus,
     TakeProfit,
     utcnow,
@@ -71,6 +72,24 @@ class AutomationConfig:
     tp_trigger_tolerance_percent: float = 0.0
     #: annuler les Entries restantes quand le premier TP est atteint
     cancel_entries_on_first_tp: bool = False
+
+
+def planned_tp_quantity(position: Position, tp: TakeProfit, rules: SymbolRules) -> float:
+    """Quantite d'un TP apres frais et arrondi, sans appel reseau."""
+    remaining = position.metrics.net_qty
+    if remaining <= QTY_EPSILON:
+        return 0.0
+
+    raw = remaining * tp.sell_percent / 100.0
+    qty = float(rules.round_qty(raw, market=True))
+    remaining_rounded = float(rules.round_qty(remaining, market=True))
+    is_last = tp.sequence_number == max(
+        (item.sequence_number for item in position.take_profits),
+        default=tp.sequence_number,
+    )
+    if is_last and tp.sell_percent >= 99.99:
+        return remaining_rounded
+    return min(qty, remaining_rounded)
 
 
 class AutomationEngine:
@@ -168,6 +187,11 @@ class AutomationEngine:
         sl = position.stop_loss
         remaining = position.metrics.net_qty
 
+        if sl.status is SLStatus.CANCELED and any(
+            tp.status is TPStatus.SUBMITTED for tp in position.take_profits
+        ):
+            return
+
         # Aucune quantite nette : il n'y a rien a proteger et aucun ordre a
         # interroger. Sans ce garde, on demande a Binance le statut d'un ordre
         # inexistant a chaque cycle (-2013 dans le journal).
@@ -196,6 +220,26 @@ class AutomationEngine:
                 result.actions.append(f"SL execute @ {status.average_price}")
                 result.position_finished = True
                 return
+            next_tp = position.next_tp
+            tp_due = bool(
+                next_tp and next_tp.target_price
+                and self._is_triggered(next_tp, current_price)
+            )
+            if status is not None and sl.resolved_price and not tp_due:
+                rules = self._rules(position)
+                desired_qty = float(rules.round_qty(remaining))
+                active_qty = float(status.raw.get("origQty") or sl.quantity or 0)
+                if desired_qty >= float(rules.min_qty) and abs(active_qty - desired_qty) >= float(rules.step_size) / 2:
+                    adjusted = self.execution.move_stop_loss(
+                        position,
+                        new_stop_price=sl.resolved_price,
+                        quantity=desired_qty,
+                    )
+                    if adjusted.success:
+                        result.actions.append(f"SL ajuste a {desired_qty} {position.base_asset}")
+                    else:
+                        result.errors.append(f"SL non ajuste : {adjusted.error}")
+                    return
             # L'ordre vit toujours et n'est pas rempli : la protection est en
             # place. On sort ici — sans ce retour, le bloc suivant recreerait un
             # SL a chaque cycle et empilerait les ordres.
@@ -231,7 +275,10 @@ class AutomationEngine:
             and sl.resolved_price
         ):
             created = self.execution.place_stop_loss(
-                position, stop_price=sl.resolved_price, quantity=remaining
+                position,
+                stop_price=sl.resolved_price,
+                quantity=remaining,
+                attempt=sl.replace_count,
             )
             if created.success:
                 result.actions.append(f"SL recree @ {sl.resolved_price}")
@@ -281,6 +328,25 @@ class AutomationEngine:
             self._finish_if_fully_sold(position, result)
             return
 
+        if next_tp.status is TPStatus.SUBMITTED:
+            status = self._fetch_status_safe(
+                position,
+                order_id=next_tp.order_id,
+                client_order_id=next_tp.client_order_id,
+            )
+            if status is not None and (status.is_filled or status.is_terminal_dead):
+                if status.executed_qty > QTY_EPSILON:
+                    self._apply_confirmed_tp(position, next_tp, status, result)
+                else:
+                    next_tp.status = TPStatus.FAILED
+                    next_tp.attempt_count += 1
+                    next_tp.order_id = None
+                    next_tp.client_order_id = None
+                    self._restore_stop_loss(position, result)
+            else:
+                result.actions.append("TP en attente de confirmation Binance")
+            return
+
         if not self._is_triggered(next_tp, current_price):
             return
 
@@ -316,9 +382,36 @@ class AutomationEngine:
             )
             return
 
-        order = self.execution.place_tp_sell(
-            position, next_tp, quantity=quantity, current_price=current_price
-        )
+        if not self.execution.settings.dry_run:
+            if position.stop_loss.status is SLStatus.ACTIVE:
+                if not self._release_stop_loss(position, result):
+                    return
+            try:
+                available = self.execution.get_free_balance(position.base_asset)
+            except Exception as exc:  # noqa: BLE001
+                result.errors.append(f"Solde {position.base_asset} illisible : {exc}")
+                self._restore_stop_loss(position, result)
+                return
+            available_rounded = float(
+                self._rules(position).round_qty(available, market=True)
+            )
+            if available_rounded + QTY_EPSILON < quantity:
+                position.sync_status = SyncStatus.DESYNC_DETECTED
+                result.errors.append(
+                    f"Solde libre {position.base_asset} insuffisant apres annulation "
+                    f"du SL ({available_rounded} < {quantity})"
+                )
+                self._restore_stop_loss(position, result)
+                return
+
+        try:
+            order = self.execution.place_tp_sell(
+                position, next_tp, quantity=quantity, current_price=current_price
+            )
+        except Exception as exc:  # noqa: BLE001
+            result.errors.append(f"TP {next_tp.sequence_number} : {exc}")
+            self._restore_stop_loss(position, result)
+            return
 
         if order.dry_run:
             next_tp.status = TPStatus.TRIGGERED
@@ -331,38 +424,105 @@ class AutomationEngine:
             next_tp.status = TPStatus.FAILED
             next_tp.last_error = order.error
             result.errors.append(f"TP {next_tp.sequence_number} : {order.error}")
+            self._restore_stop_loss(position, result)
+            return
+
+        if order.is_terminal_dead and order.executed_qty <= QTY_EPSILON:
+            next_tp.status = TPStatus.FAILED
+            next_tp.attempt_count += 1
+            next_tp.order_id = None
+            next_tp.client_order_id = None
+            self._restore_stop_loss(position, result)
             return
 
         # Confirmation Binance obligatoire avant de valider le TP.
         confirmed = self._confirm_tp_fill(position, next_tp, order)
         if not confirmed:
+            next_tp.status = TPStatus.SUBMITTED
             result.actions.append(
                 f"TP {next_tp.sequence_number} envoye, fill en attente de confirmation"
             )
             return
 
+        self._apply_confirmed_tp(position, next_tp, confirmed, result)
+
+    def _apply_confirmed_tp(
+        self, position: Position, tp: TakeProfit, confirmed, result: CycleResult
+    ) -> None:
         self.position_engine.apply_tp_fill(
             position,
-            next_tp.tp_id,
+            tp.tp_id,
             executed_qty=confirmed.executed_qty,
             average_price=confirmed.average_price,
             quote_received=confirmed.cummulative_quote_qty,
             commissions=confirmed.commissions,
             order_id=confirmed.order_id,
         )
-        result.tp_executed = next_tp.sequence_number
+        result.tp_executed = tp.sequence_number
         result.actions.append(
-            f"TP {next_tp.sequence_number} execute @ {confirmed.average_price} "
+            f"TP {tp.sequence_number} execute @ {confirmed.average_price} "
             f"({confirmed.executed_qty})"
         )
 
-        if next_tp.sequence_number == 1 and self.config.cancel_entries_on_first_tp:
+        if tp.sequence_number == 1 and self.config.cancel_entries_on_first_tp:
             cancels = self.execution.cancel_open_entries(position)
             if cancels:
                 result.actions.append(f"{len(cancels)} entry(ies) restantes annulees")
 
-        self._apply_sl_rule(position, next_tp, result)
+        self._apply_sl_rule(position, tp, result)
         self._finish_if_fully_sold(position, result)
+        self._restore_stop_loss(position, result)
+
+    def _release_stop_loss(self, position: Position, result: CycleResult) -> bool:
+        sl = position.stop_loss
+        if not sl.order_id and not sl.client_order_id:
+            result.errors.append("SL actif sans identifiant : vente TP suspendue")
+            return False
+        cancelled = self.execution.cancel_order(
+            position.symbol,
+            order_id=sl.order_id,
+            client_order_id=sl.client_order_id,
+        )
+        if not cancelled.success or cancelled.status != "CANCELED" or cancelled.executed_qty > 0:
+            position.sync_status = SyncStatus.DESYNC_DETECTED
+            result.errors.append(
+                "Annulation du SL non confirmee : vente TP suspendue "
+                f"({cancelled.error or cancelled.status})"
+            )
+            return False
+        sl.status = SLStatus.CANCELED
+        sl.order_id = None
+        sl.replace_count += 1
+        result.actions.append("SL annule avant vente TP")
+        return True
+
+    def _restore_stop_loss(self, position: Position, result: CycleResult) -> None:
+        sl = position.stop_loss
+        if not position.is_open or sl.status is not SLStatus.CANCELED:
+            return
+        quantity = float(self._rules(position).round_qty(position.metrics.net_qty))
+        if quantity <= 0:
+            return
+        if not sl.resolved_price:
+            result.errors.append("SL non recree : prix de protection absent")
+            return
+        restored = self.execution.place_stop_loss(
+            position,
+            stop_price=sl.resolved_price,
+            quantity=quantity,
+            attempt=sl.replace_count,
+        )
+        if restored.success:
+            result.actions.append("SL restaure apres tentative de TP")
+        else:
+            result.errors.append(f"SL non restaure apres TP : {restored.error}")
+            self.events.append(
+                EventType.ERROR,
+                f"SL non restaure apres TP {position.symbol} : {restored.error}",
+                position_id=position.position_id,
+                symbol=position.symbol,
+                level="CRITICAL",
+            )
 
     def _is_triggered(self, tp: TakeProfit, current_price: float) -> bool:
         tolerance = tp.target_price * (self.config.tp_trigger_tolerance_percent / 100.0)
@@ -370,23 +530,7 @@ class AutomationEngine:
 
     def _sell_quantity(self, position: Position, tp: TakeProfit) -> float:
         """Quantite reellement vendable pour ce TP, bornee par le restant."""
-        rules = self._rules(position)
-        remaining = position.metrics.net_qty
-        if remaining <= QTY_EPSILON:
-            return 0.0
-
-        raw = remaining * tp.sell_percent / 100.0
-        qty = float(rules.round_qty(raw, market=True))
-
-        # Dernier TP (ou quantite quasi totale) : on solde le restant arrondi.
-        remaining_rounded = float(rules.round_qty(remaining, market=True))
-        is_last = tp.sequence_number == max(
-            (t.sequence_number for t in position.take_profits), default=tp.sequence_number
-        )
-        if is_last and tp.sell_percent >= 99.99:
-            return remaining_rounded
-
-        return min(qty, remaining_rounded)
+        return planned_tp_quantity(position, tp, self._rules(position))
 
     def _confirm_tp_fill(
         self, position: Position, tp: TakeProfit, order
@@ -411,7 +555,7 @@ class AutomationEngine:
             return None
         if status.is_filled:
             return status
-        if status.is_partially_filled and status.executed_qty > QTY_EPSILON:
+        if status.is_terminal_dead and status.executed_qty > QTY_EPSILON:
             # Vente partielle : on enregistre ce qui a vraiment ete vendu.
             return status
         return None
@@ -470,6 +614,11 @@ class AutomationEngine:
                 symbol=position.symbol,
                 level="CRITICAL",
             )
+            return
+
+        if position.stop_loss.status is not SLStatus.ACTIVE:
+            position.stop_loss.resolved_price = new_price
+            result.sl_moved_to = new_price
             return
 
         order = self.execution.move_stop_loss(

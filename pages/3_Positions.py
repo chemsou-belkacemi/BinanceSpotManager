@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from binance_spot_manager.config import get_settings  # noqa: E402
+from binance_spot_manager.automation_engine import planned_tp_quantity  # noqa: E402
 from binance_spot_manager.execution_engine import ExecutionEngine  # noqa: E402
 from binance_spot_manager.models import (  # noqa: E402
     CloseReason,
@@ -20,6 +21,7 @@ from binance_spot_manager.models import (  # noqa: E402
     EventType,
     SLRuleAfterTP,
     SLStatus,
+    TPExecutionPolicy,
     TPStatus,
     utcnow,
 )
@@ -148,6 +150,48 @@ progress_cols[3].metric(
 
 if position.take_profits:
     st.progress(len(position.executed_tps) / len(position.take_profits))
+
+with st.expander("Tester le prochain TP sans attendre le prix cible"):
+    st.caption(
+        "Aperçu au prix cible simulé : aucun ordre Binance n'est envoyé et "
+        "la position reste inchangée."
+    )
+    if next_tp is None:
+        st.info("Aucun TP à tester sur cette position.")
+    elif st.button("Simuler la vente du prochain TP", key=f"preview_tp_{position.position_id}"):
+        quantity = planned_tp_quantity(position, next_tp, rules)
+        target_price = float(next_tp.target_price or 0.0)
+        market = next_tp.execution_policy is TPExecutionPolicy.MARKET_ON_TRIGGER
+        errors = rules.check_qty(quantity, market=market)
+        if target_price <= 0:
+            errors.append("prix cible invalide")
+        else:
+            errors.extend(rules.check_notional(target_price, quantity))
+
+        st.write(
+            f"TP {next_tp.sequence_number} · cible simulée : "
+            f"{fmt_price(target_price)} {position.quote_asset}"
+        )
+        st.write(
+            f"Quantité nette locale : "
+            f"{fmt_qty(position.metrics.net_qty)} {position.base_asset}"
+        )
+        st.write(f"Quantité arrondie à vendre : {fmt_qty(quantity)} {position.base_asset}")
+        st.write(f"Notionnel estimé : {fmt_quote(quantity * target_price, position.quote_asset)}")
+        if position.stop_loss.status is SLStatus.ACTIVE:
+            st.info(
+                "Le worker annulerait le SL pour libérer le solde, "
+                "puis le restaurerait si nécessaire."
+            )
+        if errors:
+            for error in errors:
+                st.error(error)
+        else:
+            st.success("Quantité et filtres Binance cohérents pour ce scénario.")
+        st.caption(
+            "L'acceptation et le prix d'exécution réels restent à vérifier "
+            "lorsque le TP sera déclenché sur Binance Demo."
+        )
 
 # ==========================================================================
 # Entries

@@ -177,6 +177,11 @@ BinanceSpotManager/
 **Un seul SL côté Binance.** Le projet ne crée jamais un OCO par TP : c'est le worker qui
 surveille les TP et déclenche les ventes. Cela évite `Filter failure: MAX_NUM_ALGO_ORDERS`.
 Il n'y a qu'un `STOP_LOSS_LIMIT` pour la quantité restante, recalculé après chaque TP.
+Avant une vente TP, le worker annule ce SL pour libérer le solde BTC réservé, puis
+le recrée sur le reliquat si la position reste ouverte. La quantité vendable retire
+les commissions d'achat prélevées dans l'actif de base et reste bornée par le
+solde libre Binance. Une vente limitée au déclenchement utilise `FOK` : elle
+s'exécute immédiatement en entier ou expire, permettant de restaurer le SL.
 
 **Idempotence.** Chaque ordre porte un `clientOrderId` du type `BSM-D-BTC-<position>-E3`,
 construit pour rester sous les 36 caractères. Avant tout envoi ou retry, le bot demande à
