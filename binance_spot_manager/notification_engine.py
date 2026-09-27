@@ -285,6 +285,21 @@ class NotificationEngine:
             symbol=position.symbol,
         )
 
+    def sl_executed(self, position: Position) -> Notification:
+        sl = position.stop_loss
+        return Notification(
+            event="SL_EXECUTED",
+            title=f"SL exécuté — {position.symbol}",
+            body=(
+                f"Prix moyen : {sl.average_fill_price}\n"
+                f"Quantité vendue : {sl.executed_qty}\n"
+                f"Position : {position.status.value}"
+            ),
+            level="WARNING",
+            position_id=position.position_id,
+            symbol=position.symbol,
+        )
+
     def position_finished(self, position: Position) -> Notification:
         return Notification(
             event="POSITION_FINISHED",

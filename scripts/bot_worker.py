@@ -323,7 +323,17 @@ class Worker:
                         commissions=commissions,
                         order_id=filled.order_id,
                     )
-                position.stop_loss.status = SLStatus.CANCELED
+                    self.events.append(
+                        EventType.TP_EXECUTED,
+                        f"TP OCO {tp.sequence_number} exécuté @ {filled.average_price}",
+                        position_id=position.position_id, symbol=position.symbol,
+                        order_id=filled.order_id, qty=filled.executed_qty,
+                    )
+                    # L'autre branche de cet OCO a ete annulee par Binance.
+                    position.stop_loss.status = SLStatus.CANCELED
+                    self.notifications.notify_position_event(
+                        position, self.notifications.tp_executed(position, tp)
+                    )
                 rules = self.rules_cache.get(position.symbol)
                 if float(rules.round_qty(position.metrics.net_qty)) <= 0:
                     finish_position(position, CloseReason.ALL_TP_HIT)
@@ -338,6 +348,15 @@ class Worker:
                         quote_received=filled.cummulative_quote_qty,
                         commissions=commissions,
                     )
+                    self.events.append(
+                        EventType.SL_EXECUTED,
+                        f"SL OCO exécuté @ {filled.average_price}",
+                        position_id=position.position_id, symbol=position.symbol,
+                        order_id=filled.order_id, qty=filled.executed_qty,
+                    )
+                    self.notifications.notify_position_event(
+                        position, self.notifications.sl_executed(position)
+                    )
                 else:
                     position.stop_loss.executed_qty = filled.executed_qty
                     position.stop_loss.average_fill_price = filled.average_price
@@ -345,6 +364,15 @@ class Worker:
                     position.stop_loss.commissions = commissions
                     recompute_position(position)
             oco.status = "FILLED" if position.status.value == "CLOSED" else "PARTIAL_TERMINAL"
+            if oco.status == "FILLED":
+                self.events.append(
+                    EventType.POSITION_FINISHED,
+                    f"Position {position.symbol} terminée par OCO",
+                    position_id=position.position_id, symbol=position.symbol,
+                )
+                self.notifications.notify_position_event(
+                    position, self.notifications.position_finished(position)
+                )
             if oco.status == "PARTIAL_TERMINAL":
                 position.sync_status = SyncStatus.DESYNC_DETECTED
             return
