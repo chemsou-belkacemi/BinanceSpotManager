@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import uuid
 from pathlib import Path
 
 import streamlit as st
@@ -17,7 +18,11 @@ from binance_spot_manager.config import (  # noqa: E402
     reload_settings,
 )
 from binance_spot_manager.notification_engine import channel_summary  # noqa: E402
+from binance_spot_manager.browser_notifications import (  # noqa: E402
+    PERMISSION_HTML, browser_alert_preferences, notification_html,
+)
 from ui_common import (  # noqa: E402
+    alert_tone,
     banner,
     fmt_price,
     get_service,
@@ -226,6 +231,58 @@ with tabs[2]:
 # ==========================================================================
 
 with tabs[3]:
+    st.subheader("Notifications Windows / navigateur")
+    st.caption(
+        "Elles peuvent s'afficher lorsque tu consultes un autre onglet ou une autre "
+        "application. L'onglet du bot doit rester ouvert."
+    )
+    browser_saved = service.user_settings()
+    browser_prefs = browser_alert_preferences(browser_saved)
+    browser_sound = st.checkbox(
+        "Bip pour les nouveaux événements",
+        value=browser_prefs.sound,
+        key="settings_browser_alert_sound",
+    )
+    browser_mode = st.radio(
+        "Fermeture demandée au navigateur",
+        ["Après délai", "Manuellement"],
+        index=1 if browser_prefs.manual else 0,
+        key="settings_browser_alert_mode",
+    )
+    browser_duration = st.number_input(
+        "Durée (secondes)", min_value=1, max_value=120,
+        value=browser_prefs.duration_seconds, step=1,
+        disabled=browser_mode == "Manuellement",
+        key="settings_browser_alert_duration",
+    )
+    if st.button("Enregistrer les notifications du navigateur"):
+        service.save_user_settings({
+            "browser_alert_sound": bool(browser_sound),
+            "browser_alert_mode": "manual" if browser_mode == "Manuellement" else "auto",
+            "browser_alert_duration": int(browser_duration),
+        })
+        st.success("Préférences enregistrées dans data/settings.json.")
+
+    st.markdown("**Autorisation du navigateur**")
+    st.html(PERMISSION_HTML, unsafe_allow_javascript=True)
+    st.caption(
+        "Clique sur « Activer les notifications du navigateur », puis accepte "
+        "la demande. Windows peut décider de la durée réelle d'affichage."
+    )
+    if st.button("Tester la notification Windows et le bip"):
+        st.html(
+            notification_html(
+                {"ts": uuid.uuid4().hex, "event": "TEST", "symbol": "Bot",
+                 "message": "Notification de test · aucun ordre envoyé"},
+                duration_seconds=int(browser_duration),
+                manual=browser_mode == "Manuellement",
+            ),
+            unsafe_allow_javascript=True,
+        )
+        st.audio(alert_tone(), autoplay=True)
+        st.info("Si aucune notification système n'apparaît, vérifie l'autorisation du navigateur.")
+
+    st.divider()
     st.subheader("Canaux")
     st.markdown(f"**{channel_summary(service.notifications)}**")
 

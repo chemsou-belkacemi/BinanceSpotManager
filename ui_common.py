@@ -14,6 +14,9 @@ from binance_spot_manager.config import Settings, get_settings
 from binance_spot_manager.dashboard_service import DashboardService
 from binance_spot_manager.symbol_rules import SymbolRules, SymbolRulesError, SymbolRulesCache
 from binance_spot_manager.binance_client import BinanceSpotClient
+from binance_spot_manager.browser_notifications import (
+    browser_alert_preferences, notification_html,
+)
 from binance_spot_manager.ui_alerts import unseen_alerts
 
 MODE_COLORS = {
@@ -90,7 +93,7 @@ def sidebar_status(settings: Optional[Settings] = None) -> None:
     global_alerts()
 
 
-def _alert_tone() -> bytes:
+def alert_tone() -> bytes:
     """Petit bip WAV genere localement, sans fichier ni service externe."""
     sample_rate = 16000
     frames = b"".join(
@@ -106,59 +109,32 @@ def _alert_tone() -> bytes:
     return output.getvalue()
 
 
-def _remember_alert_sound() -> None:
-    st.session_state["alert_sound_preference"] = bool(
-        st.session_state["alert_sound_enabled"]
-    )
-
-
-@st.fragment(run_every="3s")
+@st.fragment(run_every="1s")
 def global_alerts() -> None:
     """Surveille les evenements depuis chaque page, sans rejouer l'historique."""
-    records = get_service().events.tail(limit=100)
+    service = get_service()
+    preferences = browser_alert_preferences(service.user_settings())
+    records = service.events.tail(limit=100)
     if "alert_last_seen" not in st.session_state:
         st.session_state.alert_last_seen = max(
             (str(record.get("ts") or "") for record in records), default=""
         )
 
-    with st.sidebar:
-        st.divider()
-        st.markdown("### Alertes")
-        sound_enabled = st.checkbox(
-            "Bip pour les nouveaux événements",
-            value=bool(st.session_state.get("alert_sound_preference", False)),
-            key="alert_sound_enabled",
-            on_change=_remember_alert_sound,
+    alerts, last_seen = unseen_alerts(records, st.session_state.alert_last_seen)
+    st.session_state.alert_last_seen = last_seen
+    if alerts:
+        newest = alerts[-1]
+        st.session_state.alert_latest = newest
+        if preferences.sound:
+            with st.sidebar:
+                st.audio(alert_tone(), autoplay=True)
+        st.html(
+            notification_html(
+                newest, duration_seconds=preferences.duration_seconds,
+                manual=preferences.manual,
+            ),
+            unsafe_allow_javascript=True,
         )
-        if st.button("Tester le bip et la notification", key="alert_sound_test"):
-            st.toast("Notification de test", icon="🔔")
-            st.audio(_alert_tone(), autoplay=True)
-
-        alerts, last_seen = unseen_alerts(records, st.session_state.alert_last_seen)
-        st.session_state.alert_last_seen = last_seen
-        if alerts:
-            newest = alerts[-1]
-            st.session_state.alert_latest = newest
-            st.toast(
-                f"{newest.get('symbol') or 'Bot'} · "
-                f"{newest.get('message') or newest.get('event')}",
-                icon="🚨" if newest.get("level") in {"ERROR", "CRITICAL"} else "🔔",
-            )
-            if sound_enabled:
-                st.audio(_alert_tone(), autoplay=True)
-
-        latest = st.session_state.get("alert_latest")
-        if latest:
-            message = (
-                f"{latest.get('ts', '')} · {latest.get('symbol') or 'Bot'} · "
-                f"{latest.get('message') or latest.get('event')}"
-            )
-            if latest.get("level") in {"ERROR", "CRITICAL"}:
-                st.error(message)
-            else:
-                st.info(message)
-        else:
-            st.caption("Alertes locales actives : TP, SL, erreurs et fin de position.")
 
 
 def fmt_price(value: Optional[float], decimals: int = 2) -> str:
