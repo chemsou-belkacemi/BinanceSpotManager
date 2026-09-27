@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -335,6 +336,55 @@ Erreur Binance · Worker offline · Capital insuffisant · Désynchronisation
 # ==========================================================================
 
 with tabs[4]:
+    @st.fragment(run_every="1s")
+    def market_diagnostics_panel():
+        st.subheader("Flux des prix — Binance Demo")
+        st.caption("Lecture seule, actualisée chaque seconde. Un prix WebSocket de plus de 5 s n'est plus utilisé ; REST prend le relais.")
+        runtime = service.runtime()
+        snapshots = [
+            ("Interface", service.market_prices.snapshot()),
+            ("Worker", runtime.price_diagnostics),
+        ]
+        labels = {
+            "IDLE": "En veille", "DISABLED": "Désactivé",
+            "CONNECTING": "Connexion", "CONNECTED": "Connecté",
+            "RECONNECTING": "Reconnexion",
+        }
+        for title, diagnostic in snapshots:
+            st.markdown(f"**{title}**")
+            if not diagnostic:
+                st.info("Diagnostic non disponible : redémarrer le worker pour l'activer.")
+                continue
+            elapsed = max(0.0, time.time() - diagnostic["captured_at"])
+            cols = st.columns(3)
+            cols[0].metric("Flux", labels.get(diagnostic["state"], diagnostic["state"]))
+            cols[1].metric("Reconnexions", diagnostic["reconnects"])
+            cols[2].metric("Âge du diagnostic", f"{elapsed:.0f} s")
+            if title == "Worker" and not runtime.is_alive():
+                st.warning("Worker arrêté ou sans heartbeat récent : dernier diagnostic enregistré, pas un état en direct.")
+            if diagnostic.get("disabled_reason"):
+                st.info(diagnostic["disabled_reason"])
+            if diagnostic.get("last_error"):
+                st.caption(f"Dernière erreur du flux : {diagnostic['last_error']}")
+            rows = []
+            for item in diagnostic["symbols"]:
+                age = item["age_seconds"]
+                age = age + elapsed if age is not None else None
+                row = {
+                    "Paire": item["symbol"],
+                    "Âge du prix WS": f"{age:.1f} s" if age is not None else "Non reçu",
+                    "Prix WS frais": age is not None and age <= 5,
+                }
+                if title == "Worker":
+                    row["Source à la dernière consultation"] = diagnostic.get("sources", {}).get(item["symbol"], "—")
+                rows.append(row)
+            if rows:
+                st.dataframe(rows, hide_index=True, width="stretch")
+            else:
+                st.caption("Aucune paire suivie pour l'instant.")
+
+    market_diagnostics_panel()
+    st.divider()
     st.subheader("Diagnostic du worker")
     worker_status = service.worker_status()
     worker_cols = st.columns(4)

@@ -156,6 +156,9 @@ class Worker:
         runtime.base_url = self.settings.base_url
         runtime.last_message = message or runtime.last_message
         runtime.heartbeat_at = utcnow()
+        if hasattr(self, "market_prices"):
+            runtime.price_diagnostics = self.market_prices.snapshot()
+            runtime.price_diagnostics["sources"] = getattr(self, "_price_sources", {})
         if runtime.started_at is None:
             runtime.started_at = utcnow()
         for key, value in fields.items():
@@ -230,12 +233,12 @@ class Worker:
 
         for position in positions:
             price = price_provider(position.symbol)
-            if price is None:
-                continue
-
             if position.oco_exit is not None:
                 self._monitor_oco(position, price)
                 self.positions.save(position)
+                continue
+
+            if price is None:
                 continue
 
             outcome = self.automation.run_cycle(position, price)
@@ -276,11 +279,13 @@ class Worker:
 
         return len(positions)
 
-    def _monitor_oco(self, position, price: float) -> None:
+    def _monitor_oco(self, position, price: Optional[float]) -> None:
         """Lecture seule des deux branches : jamais de deuxième vente locale."""
         oco = position.oco_exit
-        position.metrics.current_price = price
-        recompute_position(position)
+        # Les executions Binance restent consultables meme sans prix public frais.
+        if price is not None:
+            position.metrics.current_price = price
+            recompute_position(position)
         if oco.status not in {"ACTIVE", "PARTIAL"}:
             return
 
@@ -454,6 +459,10 @@ class Worker:
         # Un ancien prix REST ne doit jamais declencher un TP apres une panne.
         rest_prices = self._price_cache if now - self._price_fetched_at <= 5 else {}
         cache = {**rest_prices, **streamed}
+        self._price_sources = {
+            symbol: "WebSocket" if symbol in streamed else "REST" if symbol in rest_prices else "Indisponible"
+            for symbol in unique
+        }
 
         def provider(symbol: str) -> Optional[float]:
             return cache.get(symbol)

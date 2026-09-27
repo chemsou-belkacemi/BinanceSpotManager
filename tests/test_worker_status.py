@@ -8,15 +8,62 @@ import pytest
 from binance_spot_manager.execution_engine import OrderResult
 from binance_spot_manager.binance_client import BinanceError
 from binance_spot_manager.models import (
-    Commission, Entry, EntryStatus, OcoExit, Position, PositionStatus,
+    BotRuntime, Commission, Entry, EntryStatus, OcoExit, Position, PositionStatus,
     SLStatus, SyncStatus, TakeProfit, TPStatus, WorkerState,
 )
 from binance_spot_manager.position_engine import PositionEngine, recompute_position
 from binance_spot_manager.symbol_rules import parse_symbol_rules
 from binance_spot_manager.reconciliation_engine import ReconciliationReport
 from scripts.bot_worker import Worker
+from binance_spot_manager.config import Settings
 
 pytestmark = pytest.mark.unit
+
+
+def test_tick_checks_oco_without_price_but_skips_local_automation():
+    oco_position = Position(symbol="BTCUSDT", base_asset="BTC", quote_asset="USDT")
+    oco_position.oco_exit = OcoExit(
+        order_list_id=1, list_client_order_id="oco", tp_order_id=10,
+        sl_order_id=11, quantity=0.00035,
+    )
+    oco_position.metrics.current_price = 84000
+    local_position = Position(symbol="ETHUSDT", base_asset="ETH", quote_asset="USDT")
+    saved = []
+    monitored = []
+    worker = Worker.__new__(Worker)
+    worker.positions = SimpleNamespace(
+        list_open=lambda: [oco_position, local_position], save=saved.append,
+    )
+    worker._price_provider = lambda symbols: lambda symbol: None
+    worker._monitor_oco = lambda position, price: monitored.append((position, price))
+    worker.automation = SimpleNamespace(
+        run_cycle=lambda *a: pytest.fail("Local automation requires a fresh price"),
+    )
+    worker._loop = 1
+    assert worker._tick() == 2
+    assert monitored == [(oco_position, None)]
+    assert saved == [oco_position]
+    assert oco_position.metrics.current_price == 84000
+
+
+def test_oco_without_price_keeps_last_valuation_and_checks_branches():
+    position = Position(symbol="BTCUSDT", base_asset="BTC", quote_asset="USDT")
+    position.oco_exit = OcoExit(
+        order_list_id=1, list_client_order_id="oco", tp_order_id=10,
+        sl_order_id=11, quantity=0.00035,
+    )
+    position.metrics.current_price = 84000
+    previous_metrics = position.metrics.model_dump()
+    queried = []
+    worker = Worker.__new__(Worker)
+    worker.execution = SimpleNamespace(
+        fetch_order_status=lambda symbol, order_id: queried.append(order_id) or
+        OrderResult(success=True, order_id=order_id, status="NEW"),
+    )
+    worker._monitor_oco(position, None)
+    assert queried == [10, 11]
+    assert position.metrics.model_dump() == previous_metrics
+    assert position.oco_exit.status == "ACTIVE"
 
 
 @pytest.mark.parametrize(
@@ -75,6 +122,7 @@ def test_worker_uses_stream_price_before_rest():
     worker._price_fetched_at = 0.0
 
     assert worker._price_provider(["BTCUSDT"])("BTCUSDT") == 85000.0
+    assert worker._price_sources == {"BTCUSDT": "WebSocket"}
 
 
 def test_worker_never_trades_on_stale_rest_price_after_failure():
@@ -88,6 +136,20 @@ def test_worker_never_trades_on_stale_rest_price_after_failure():
     worker._worker_interval = lambda: 1
 
     assert worker._price_provider(["BTCUSDT"])("BTCUSDT") is None
+    assert worker._price_sources == {"BTCUSDT": "Indisponible"}
+
+
+def test_worker_persists_read_only_market_diagnostic():
+    worker = Worker.__new__(Worker)
+    worker.settings = Settings()
+    saved = []
+    worker.runtime_store = SimpleNamespace(load=BotRuntime, save=saved.append)
+    worker.market_prices = SimpleNamespace(snapshot=lambda: {"state": "CONNECTED"})
+    worker._price_sources = {"BTCUSDT": "REST"}
+    worker._set_state(WorkerState.MONITORING)
+    assert saved[0].price_diagnostics == {
+        "state": "CONNECTED", "sources": {"BTCUSDT": "REST"},
+    }
 
 
 def test_reconciliation_persists_recovered_sync_status():
@@ -109,7 +171,8 @@ def test_reconciliation_persists_recovered_sync_status():
     assert position.sync_status is SyncStatus.RECONCILED
 
 
-def test_oco_monitor_records_confirmed_tp_without_second_sell():
+@pytest.mark.parametrize("price", [85000, None])
+def test_oco_monitor_records_confirmed_tp_without_second_sell(price):
     rules = parse_symbol_rules({
         "symbol": "BTCUSDT", "baseAsset": "BTC", "quoteAsset": "USDT",
         "status": "TRADING", "filters": [
@@ -151,7 +214,7 @@ def test_oco_monitor_records_confirmed_tp_without_second_sell():
         notify_position_event=lambda position, notice: {},
     )
 
-    worker._monitor_oco(position, 85000)
+    worker._monitor_oco(position, price)
 
     assert position.status is PositionStatus.CLOSED
     assert position.take_profits[0].executed_qty == pytest.approx(0.00034)
@@ -160,7 +223,8 @@ def test_oco_monitor_records_confirmed_tp_without_second_sell():
     assert len(emitted) == 2
 
 
-def test_oco_monitor_records_confirmed_stop_and_sends_notice():
+@pytest.mark.parametrize("price", [80880, None])
+def test_oco_monitor_records_confirmed_stop_and_sends_notice(price):
     position = Position(symbol="BTCUSDT", base_asset="BTC", quote_asset="USDT")
     position.status = PositionStatus.ACTIVE
     position.entries.append(Entry(
@@ -194,7 +258,7 @@ def test_oco_monitor_records_confirmed_stop_and_sends_notice():
         notify_position_event=lambda current, notice: notices.append(notice),
     )
 
-    worker._monitor_oco(position, 80880)
+    worker._monitor_oco(position, price)
 
     assert position.status is PositionStatus.CLOSED
     assert position.stop_loss.status is SLStatus.EXECUTED

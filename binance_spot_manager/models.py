@@ -612,6 +612,7 @@ class BotRuntime(BSMModel):
     base_url: str = ""
     last_error: str = ""
     last_message: str = ""
+    price_diagnostics: dict[str, Any] = Field(default_factory=dict)
 
     def is_alive(self, stale_after_seconds: int = 20) -> bool:
         if self.state in {WorkerState.STOPPED, WorkerState.ERROR}:
