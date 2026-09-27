@@ -317,12 +317,20 @@ class ReconciliationEngine:
         apply: bool,
     ) -> None:
         for tp in position.take_profits:
-            if tp.status is not TPStatus.SUBMITTED or not tp.order_id:
+            if tp.status is not TPStatus.SUBMITTED or not (tp.order_id or tp.client_order_id):
                 continue
             order = by_order_id.get(tp.order_id) or (
                 by_client_id.get(tp.client_order_id or "") 
             )
             if order is not None:
+                if apply and not tp.order_id and order.get("orderId"):
+                    tp.order_id = order["orderId"]
+                    report.add(
+                        "ORDER_ADOPTED",
+                        f"TP {tp.sequence_number} : identifiant Binance retrouve",
+                        target_type="TP", target_id=tp.tp_id,
+                        order_id=tp.order_id, auto_applied=True,
+                    )
                 continue
 
             status = self.execution.fetch_order_status(
@@ -338,7 +346,18 @@ class ReconciliationEngine:
                 )
                 continue
 
-            if status.executed_qty > QTY_EPSILON and apply:
+            if status.is_open:
+                if status.executed_qty > QTY_EPSILON:
+                    report.add(
+                        "PARTIAL_FILL",
+                        f"TP {tp.sequence_number} : vente partielle encore ouverte",
+                        severity="CRITICAL", target_type="TP", target_id=tp.tp_id,
+                        suggested_action="Attendre la confirmation Binance avant toute nouvelle vente",
+                    )
+                continue
+
+            if status.executed_qty > QTY_EPSILON and apply and self.auto_apply_fills:
+                tp.order_id = status.order_id or tp.order_id
                 tp.executed_qty = status.executed_qty
                 tp.average_fill_price = status.average_price
                 tp.quote_received = status.cummulative_quote_qty
@@ -358,6 +377,22 @@ class ReconciliationEngine:
                     target_type="TP",
                     target_id=tp.tp_id,
                     auto_applied=True,
+                )
+            elif status.executed_qty > QTY_EPSILON:
+                report.add(
+                    "FILL_DETECTED",
+                    f"TP {tp.sequence_number} : vente confirmee non appliquee localement",
+                    severity="CRITICAL", target_type="TP", target_id=tp.tp_id,
+                    suggested_action="Resynchroniser la position",
+                )
+            elif status.is_terminal_dead and status.executed_qty <= QTY_EPSILON:
+                if apply:
+                    tp.status = TPStatus.CANCELED
+                report.add(
+                    "MANUAL_CHANGE",
+                    f"TP {tp.sequence_number} termine sans vente sur Binance",
+                    target_type="TP", target_id=tp.tp_id,
+                    suggested_action="Verifier la protection restante ; aucun ordre de remplacement automatique",
                 )
 
     # ------------------------------------------------------------------

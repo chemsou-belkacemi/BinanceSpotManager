@@ -200,3 +200,42 @@ def test_oco_monitor_records_confirmed_stop_and_sends_notice():
     assert position.stop_loss.status is SLStatus.EXECUTED
     assert notices == ["sl", "finished"]
     assert [event.value for event in events] == ["SL_EXECUTED", "POSITION_FINISHED"]
+
+
+@pytest.mark.parametrize("tp_status, tp_qty, expected", [
+    ("PARTIALLY_FILLED", 0.0001, "PARTIAL"),
+    ("CANCELED", 0.0, "FAILED"),
+])
+def test_oco_partial_or_manual_cancellation_never_sends_second_sell(tp_status, tp_qty, expected):
+    position = Position(symbol="BTCUSDT", base_asset="BTC", quote_asset="USDT")
+    position.status = PositionStatus.ACTIVE
+    position.entries = [Entry(
+        status=EntryStatus.FILLED, executed_qty=0.00035,
+        average_fill_price=84000, quote_spent=29.4,
+    )]
+    position.take_profits = [TakeProfit(
+        target_price=85000, sell_percent=100, status=TPStatus.SUBMITTED,
+    )]
+    position.oco_exit = OcoExit(
+        order_list_id=1, list_client_order_id="oco", tp_order_id=10,
+        sl_order_id=11, quantity=0.00035,
+    )
+    worker = Worker.__new__(Worker)
+    orders = {
+        10: OrderResult(success=True, order_id=10, status=tp_status, executed_qty=tp_qty),
+        11: OrderResult(success=True, order_id=11, status="CANCELED"),
+    }
+    worker.execution = SimpleNamespace(
+        fetch_order_status=lambda symbol, order_id: orders[order_id],
+    )  # aucune methode permettant une nouvelle vente
+    emitted = []
+    worker.events = SimpleNamespace(append=lambda *a, **k: emitted.append((a, k)))
+
+    worker._monitor_oco(position, 85000)
+    worker._monitor_oco(position, 85000)
+
+    assert position.oco_exit.status == expected
+    assert position.sync_status is SyncStatus.DESYNC_DETECTED
+    assert position.take_profits[0].executed_qty == 0
+    assert len(emitted) == 1
+    assert emitted[0][1]["level"] == "CRITICAL"
