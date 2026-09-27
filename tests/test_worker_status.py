@@ -4,7 +4,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from binance_spot_manager.models import Position, SyncStatus, WorkerState
+from binance_spot_manager.execution_engine import OrderResult
+from binance_spot_manager.models import (
+    Commission, Entry, EntryStatus, OcoExit, Position, PositionStatus,
+    SLStatus, SyncStatus, TakeProfit, TPStatus, WorkerState,
+)
+from binance_spot_manager.position_engine import PositionEngine, recompute_position
+from binance_spot_manager.symbol_rules import parse_symbol_rules
 from binance_spot_manager.reconciliation_engine import ReconciliationReport
 from scripts.bot_worker import Worker
 
@@ -57,3 +63,46 @@ def test_reconciliation_persists_recovered_sync_status():
 
     assert saved == [position]
     assert position.sync_status is SyncStatus.RECONCILED
+
+
+def test_oco_monitor_records_confirmed_tp_without_second_sell():
+    rules = parse_symbol_rules({
+        "symbol": "BTCUSDT", "baseAsset": "BTC", "quoteAsset": "USDT",
+        "status": "TRADING", "filters": [
+            {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
+            {"filterType": "LOT_SIZE", "stepSize": "0.00001", "minQty": "0.00001"},
+        ],
+    })
+    position = Position(symbol="BTCUSDT", base_asset="BTC", quote_asset="USDT")
+    position.status = PositionStatus.ACTIVE
+    position.entries.append(Entry(
+        status=EntryStatus.FILLED, executed_qty=0.00035,
+        average_fill_price=84000, quote_spent=29.4,
+        commissions=[Commission(asset="BTC", amount=0.00000035)],
+    ))
+    position.take_profits.append(TakeProfit(target_price=85000, sell_percent=100, status=TPStatus.SUBMITTED))
+    position.stop_loss.status = SLStatus.ACTIVE
+    position.oco_exit = OcoExit(
+        order_list_id=1, list_client_order_id="oco", tp_order_id=10,
+        sl_order_id=11, quantity=0.00034,
+    )
+    recompute_position(position)
+    orders = {
+        10: OrderResult(success=True, order_id=10, status="FILLED", executed_qty=0.00034,
+                        cummulative_quote_qty=28.9, average_price=85000),
+        11: OrderResult(success=True, order_id=11, status="CANCELED"),
+    }
+    worker = Worker.__new__(Worker)
+    worker.execution = SimpleNamespace(
+        fetch_order_status=lambda symbol, order_id: orders[order_id],
+        fetch_my_trades=lambda symbol, order_id: [],
+    )
+    worker.position_engine = PositionEngine(rules)
+    worker.rules_cache = SimpleNamespace(get=lambda symbol: rules)
+
+    worker._monitor_oco(position, 85000)
+
+    assert position.status is PositionStatus.CLOSED
+    assert position.take_profits[0].executed_qty == pytest.approx(0.00034)
+    assert position.stop_loss.status is SLStatus.CANCELED
+    assert position.oco_exit.status == "FILLED"

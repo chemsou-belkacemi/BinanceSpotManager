@@ -14,7 +14,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from binance_spot_manager.config import get_settings  # noqa: E402
 from binance_spot_manager.execution_engine import ExecutionEngine  # noqa: E402
-from binance_spot_manager.models import EntryStatus, EventType, SLStatus  # noqa: E402
+from binance_spot_manager.models import EntryStatus, EventType, SLStatus, SyncStatus, TPStatus  # noqa: E402
+from binance_spot_manager.oco_preview import preview_oco_sell  # noqa: E402
 from binance_spot_manager.position_engine import recompute_position  # noqa: E402
 from ui_common import (  # noqa: E402
     banner,
@@ -51,6 +52,22 @@ def _apply_cancel_locally(order_id: int) -> bool:
     for position in service.positions.list_open():
         touched = False
 
+        if position.oco_exit and order_id in {
+            position.oco_exit.tp_order_id, position.oco_exit.sl_order_id,
+        }:
+            position.oco_exit.status = "FAILED"
+            position.stop_loss.status = SLStatus.CANCELED
+            position.take_profits[0].status = TPStatus.FAILED
+            position.sync_status = SyncStatus.DESYNC_DETECTED
+            position.log(
+                EventType.MANUAL_CHANGE,
+                "OCO annulé depuis le Dashboard — position non protégée",
+                order_id=order_id,
+            )
+            recompute_position(position)
+            service.positions.save(position)
+            return True
+
         for entry in position.entries:
             if entry.order_id == order_id:
                 entry.status = EntryStatus.CANCELED
@@ -84,6 +101,10 @@ def _cancel_order(order, confirmed: bool) -> None:
         st.warning("Coche la confirmation pour annuler cet ordre.")
         return
 
+    is_oco = any(
+        p.oco_exit and order.order_id in {p.oco_exit.tp_order_id, p.oco_exit.sl_order_id}
+        for p in service.positions.list_open()
+    )
     execution = ExecutionEngine(settings=settings, events=service.events)
     result = execution.cancel_order(
         order.symbol,
@@ -107,6 +128,8 @@ def _cancel_order(order, confirmed: bool) -> None:
     )
 
     st.success(f"Ordre #{order.order_id} annulé.")
+    if is_oco:
+        st.warning("OCO annulé : les deux branches sont retirées, la position n'est plus protégée.")
     if updated:
         st.caption("État local mis à jour.")
     else:
@@ -240,6 +263,14 @@ else:
     )
     st.dataframe(table, width="stretch", hide_index=True)
 
+    for position in service.positions.list_open():
+        if position.oco_exit is not None:
+            oco = position.oco_exit
+            st.caption(
+                f"OCO Demo {position.symbol} · {oco.status} · "
+                f"liste #{oco.order_list_id} · TP #{oco.tp_order_id} · SL #{oco.sl_order_id}"
+            )
+
     desync = [r for r in rows if r.has_desync]
     if desync:
         st.warning(
@@ -247,6 +278,39 @@ else:
             + ", ".join(f"{r.symbol} ({r.sync_status})" for r in desync)
             + " — voir la page Positions pour le détail."
         )
+
+    with st.expander("Prototype OCO Demo — aperçu uniquement"):
+        st.caption(
+            "Aucun ordre n'est envoyé. Le worker garde sa stratégie TP/SL actuelle. "
+            "Une position avec SL indépendant actif ne peut pas être convertie ici."
+        )
+        selected = st.selectbox(
+            "Position à examiner",
+            options=service.positions.list_open(),
+            format_func=lambda p: f"{p.symbol} · {p.position_id}",
+            key="oco_preview_position",
+        )
+        if selected and st.button("Calculer l'aperçu OCO", key="oco_preview_button"):
+            try:
+                rules = service.rules_cache.get(selected.symbol)
+                price = selected.metrics.current_price
+                if price <= 0:
+                    st.warning("Prix actuel indisponible : aperçu impossible.")
+                else:
+                    preview = preview_oco_sell(selected, rules, price)
+                    st.write(
+                        f"Vente {preview.quantity} {selected.base_asset} · "
+                        f"TP limite {preview.take_profit_price} · "
+                        f"SL {preview.stop_price} / limite {preview.stop_limit_price}"
+                    )
+                    if preview.blockers:
+                        for blocker in preview.blockers:
+                            st.warning(blocker)
+                    else:
+                        st.success("Paramètres cohérents pour une expérimentation Demo séparée.")
+                    st.info("Aucune vérification du solde libre ni création d'ordre à cette étape.")
+            except Exception as exc:  # noqa: BLE001 — aperçu non critique
+                st.error(f"Aperçu OCO indisponible : {exc}")
 
 st.divider()
 

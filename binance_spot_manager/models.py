@@ -468,6 +468,17 @@ class AutomationSettings(BSMModel):
     last_run_at: Optional[datetime] = None
 
 
+class OcoExit(BSMModel):
+    """Identifiants persistés des deux branches d'une sortie OCO Demo."""
+
+    order_list_id: int
+    list_client_order_id: str
+    tp_order_id: int
+    sl_order_id: int
+    quantity: float
+    status: str = "ACTIVE"
+
+
 # ==========================================================================
 # Position
 # ==========================================================================
@@ -497,6 +508,7 @@ class Position(BSMModel):
     pnl: PositionPnL = Field(default_factory=PositionPnL)
     notifications: NotificationSettings = Field(default_factory=NotificationSettings)
     automation: AutomationSettings = Field(default_factory=AutomationSettings)
+    oco_exit: Optional[OcoExit] = None
     history: list[HistoryEvent] = Field(default_factory=list)
 
     #: prix courant au moment de la creation (reference CURRENT_PRICE_AT_CREATION)

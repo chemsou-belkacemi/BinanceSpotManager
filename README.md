@@ -174,7 +174,7 @@ BinanceSpotManager/
 
 ## 9. Choix techniques importants
 
-**Un seul SL côté Binance.** Le projet ne crée jamais un OCO par TP : c'est le worker qui
+**Un seul SL côté Binance dans le mode historique.** Le worker
 surveille les TP et déclenche les ventes. Cela évite `Filter failure: MAX_NUM_ALGO_ORDERS`.
 Il n'y a qu'un `STOP_LOSS_LIMIT` pour la quantité restante, recalculé après chaque TP.
 Avant une vente TP, le worker annule ce SL pour libérer le solde BTC réservé, puis
@@ -182,6 +182,17 @@ le recrée sur le reliquat si la position reste ouverte. La quantité vendable r
 les commissions d'achat prélevées dans l'actif de base et reste bornée par le
 solde libre Binance. Une vente limitée au déclenchement utilise `FOK` : elle
 s'exécute immédiatement en entier ou expire, permettant de restaurer le SL.
+
+**OCO Demo expérimental (un TP à 100 %).** Le Dashboard peut calculer les paramètres
+d'un OCO de vente pour une position à un seul TP (100 %), en tenant compte des
+commissions d'achat et des filtres Binance. L'aperçu seul ne place aucun ordre.
+La migration explicite `scripts/migrate_oco_demo.py --position-id ID --execute`
+arrête le worker, annule le SL indépendant, crée l'OCO, vérifie ses deux
+branches, enregistre les identifiants et relance le worker. En cas de refus
+confirmé de l'OCO, elle tente de restaurer le SL. Le worker lit ensuite les
+deux branches sans envoyer de deuxième vente. Les exécutions partielles ou
+un résultat incertain sont signalés comme désynchronisation, sans nouvelle
+vente automatique. Cette fonction reste limitée à Binance Demo et à un TP.
 
 **Idempotence.** Chaque ordre porte un `clientOrderId` du type `BSM-D-BTC-<position>-E3`,
 construit pour rester sous les 36 caractères. Avant tout envoi ou retry, le bot demande à

@@ -43,12 +43,17 @@ from binance_spot_manager.event_store import EventStore, configure_logging, log_
 from binance_spot_manager.execution_engine import ExecutionEngine  # noqa: E402
 from binance_spot_manager.models import (  # noqa: E402
     BotRuntime,
+    CloseReason,
+    Commission,
     EventType,
+    SLStatus,
+    SyncStatus,
+    TPStatus,
     WorkerState,
     utcnow,
 )
 from binance_spot_manager.notification_engine import NotificationEngine  # noqa: E402
-from binance_spot_manager.position_engine import PositionEngine  # noqa: E402
+from binance_spot_manager.position_engine import PositionEngine, finish_position, recompute_position  # noqa: E402
 from binance_spot_manager.position_store import PositionStore, RuntimeStore  # noqa: E402
 from binance_spot_manager.reconciliation_engine import ReconciliationEngine  # noqa: E402
 from binance_spot_manager.symbol_rules import SymbolRulesCache  # noqa: E402
@@ -216,6 +221,11 @@ class Worker:
             if price is None:
                 continue
 
+            if position.oco_exit is not None:
+                self._monitor_oco(position, price)
+                self.positions.save(position)
+                continue
+
             outcome = self.automation.run_cycle(position, price)
 
             if outcome.tp_executed is not None:
@@ -254,8 +264,103 @@ class Worker:
 
         return len(positions)
 
+    def _monitor_oco(self, position, price: float) -> None:
+        """Lecture seule des deux branches : jamais de deuxième vente locale."""
+        oco = position.oco_exit
+        position.metrics.current_price = price
+        recompute_position(position)
+        if oco.status not in {"ACTIVE", "PARTIAL"}:
+            return
+
+        tp_order = self.execution.fetch_order_status(position.symbol, order_id=oco.tp_order_id)
+        sl_order = self.execution.fetch_order_status(position.symbol, order_id=oco.sl_order_id)
+        if tp_order is None or sl_order is None:
+            position.sync_status = SyncStatus.DESYNC_DETECTED
+            self.events.append(
+                EventType.ERROR, "Branche OCO introuvable côté Binance",
+                position_id=position.position_id, symbol=position.symbol, level="ERROR",
+            )
+            return
+
+        tp_qty = tp_order.executed_qty
+        sl_qty = sl_order.executed_qty
+        if tp_qty > 0 and sl_qty > 0:
+            position.sync_status = SyncStatus.DESYNC_DETECTED
+            oco.status = "ERROR"
+            return
+
+        if tp_qty > 0 or sl_qty > 0:
+            filled = tp_order if tp_qty > 0 else sl_order
+            if filled.is_open:
+                # Une vente partielle ouverte peut laisser du BTC non protégé.
+                if oco.status != "PARTIAL":
+                    oco.status = "PARTIAL"
+                    position.sync_status = SyncStatus.DESYNC_DETECTED
+                    self.events.append(
+                        EventType.ERROR, "OCO partiellement exécuté : contrôle requis",
+                        position_id=position.position_id, symbol=position.symbol,
+                        level="CRITICAL",
+                    )
+                return
+
+            trades = self.execution.fetch_my_trades(
+                position.symbol, order_id=filled.order_id
+            )
+            commissions = [
+                Commission(asset=trade["commissionAsset"], amount=float(trade["commission"]))
+                for trade in trades
+                if trade.get("commissionAsset") and float(trade.get("commission") or 0) > 0
+            ]
+
+            if tp_qty > 0:
+                tp = position.next_tp
+                if tp is not None:
+                    tp.estimated_qty = oco.quantity
+                    self.position_engine.apply_tp_fill(
+                        position, tp.tp_id, executed_qty=filled.executed_qty,
+                        average_price=filled.average_price,
+                        quote_received=filled.cummulative_quote_qty,
+                        commissions=commissions,
+                        order_id=filled.order_id,
+                    )
+                position.stop_loss.status = SLStatus.CANCELED
+                rules = self.rules_cache.get(position.symbol)
+                if float(rules.round_qty(position.metrics.net_qty)) <= 0:
+                    finish_position(position, CloseReason.ALL_TP_HIT)
+            else:
+                for tp in position.take_profits:
+                    if tp.status is TPStatus.SUBMITTED:
+                        tp.status = TPStatus.CANCELED
+                if sl_qty >= oco.quantity - 1e-12:
+                    self.position_engine.apply_sl_fill(
+                        position, executed_qty=filled.executed_qty,
+                        average_price=filled.average_price,
+                        quote_received=filled.cummulative_quote_qty,
+                        commissions=commissions,
+                    )
+                else:
+                    position.stop_loss.executed_qty = filled.executed_qty
+                    position.stop_loss.average_fill_price = filled.average_price
+                    position.stop_loss.quote_received = filled.cummulative_quote_qty
+                    position.stop_loss.commissions = commissions
+                    recompute_position(position)
+            oco.status = "FILLED" if position.status.value == "CLOSED" else "PARTIAL_TERMINAL"
+            if oco.status == "PARTIAL_TERMINAL":
+                position.sync_status = SyncStatus.DESYNC_DETECTED
+            return
+
+        if not tp_order.is_open and not sl_order.is_open:
+            oco.status = "FAILED"
+            position.sync_status = SyncStatus.DESYNC_DETECTED
+            self.events.append(
+                EventType.ERROR, "OCO terminé sans vente : position non protégée",
+                position_id=position.position_id, symbol=position.symbol, level="CRITICAL",
+            )
+
     def _reconcile(self, positions) -> None:
         for position in positions:
+            if position.oco_exit is not None:
+                continue  # La réconciliation legacy ne connaît pas les listes OCO.
             previous_sync_status = position.sync_status
             try:
                 report = self.reconciliation.reconcile(position)

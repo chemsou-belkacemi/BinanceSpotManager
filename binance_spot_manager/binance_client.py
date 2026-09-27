@@ -285,6 +285,18 @@ class BinanceSpotClient:
             signed=True,
         )
 
+    def get_order_list(
+        self, *, order_list_id: Optional[int] = None,
+        list_client_order_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        if order_list_id is None and list_client_order_id is None:
+            raise ValueError("order_list_id ou list_client_order_id requis")
+        return self._request(
+            "GET", "/api/v3/orderList",
+            params={"orderListId": order_list_id, "origClientOrderId": list_client_order_id},
+            signed=True,
+        )
+
     def find_order(
         self,
         symbol: str,
@@ -357,6 +369,22 @@ class BinanceSpotClient:
             "newOrderRespType": "FULL",
         }
         return self._request("POST", endpoint, params=params, signed=True)
+
+    def create_oco_sell(
+        self, params: Mapping[str, str], *, experimental_confirmation: bool = False
+    ) -> dict[str, Any]:
+        """Transport OCO Spot Demo, non utilisé par le worker V2.
+
+        L'appelant doit d'abord gérer la migration du SL, la réservation du
+        solde et la persistance des deux ordres. Aucun appel automatique ici.
+        """
+        if not experimental_confirmation:
+            raise ValueError("OCO expérimental : confirmation explicite requise")
+        if params.get("side") != "SELL":
+            raise ValueError("Seul un OCO de vente est pris en charge")
+        return self._request(
+            "POST", "/api/v3/orderList/oco", params=params, signed=True
+        )
 
     def cancel_order(
         self,
