@@ -120,14 +120,16 @@ def global_alerts() -> None:
             (str(record.get("ts") or "") for record in records), default=""
         )
 
+    # Reserve un emplacement dans le fragment lui-meme : ecrire directement
+    # dans st.sidebar lors d'un rafraichissement du fragment leve une erreur.
+    audio_slot = st.empty()
     alerts, last_seen = unseen_alerts(records, st.session_state.alert_last_seen)
     st.session_state.alert_last_seen = last_seen
     if alerts:
         newest = alerts[-1]
         st.session_state.alert_latest = newest
         if preferences.sound:
-            with st.sidebar:
-                st.audio(alert_tone(), autoplay=True)
+            audio_slot.audio(alert_tone(), autoplay=True)
         st.html(
             notification_html(
                 newest, duration_seconds=preferences.duration_seconds,

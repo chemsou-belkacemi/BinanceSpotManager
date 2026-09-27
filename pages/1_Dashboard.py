@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -164,50 +165,81 @@ def _cancel_order(order, confirmed: bool) -> None:
 
 st.subheader("Worker")
 
-status = service.worker_status()
-cols = st.columns(5)
-cols[0].metric("État", status.label)
-cols[1].metric("PID", status.pid or "—")
-cols[2].metric(
-    "Heartbeat",
-    f"{status.heartbeat_age:.0f} s" if status.heartbeat_age is not None else "—",
-)
-cols[3].metric("Boucles", status.loop_count)
-cols[4].metric("Positions suivies", status.positions_monitored)
+@st.fragment(run_every="1s")
+def worker_panel() -> None:
+    """Actualise l'etat du worker sans exiger un second clic sur Arreter."""
+    status = service.worker_status()
+    pending = bool(st.session_state.get("worker_stop_pending"))
+    if pending and not status.running:
+        st.session_state.worker_stop_pending = False
+        st.session_state.worker_flash = (
+            ("success", "Worker arrêté proprement.")
+            if status.state == "STOPPED"
+            else ("error", "Worker terminé sans confirmation d'arrêt propre : vérifie le journal.")
+        )
+        st.rerun(scope="app")  # actualise aussi l'etat dans la barre laterale
 
-if status.last_message:
-    st.caption(f"Dernier message : {status.last_message}")
-if status.last_error:
-    st.error(f"Dernière erreur : {status.last_error}")
-if status.is_stale:
-    st.warning(
-        "Le heartbeat n'est plus rafraîchi. Le worker est peut-être bloqué : "
-        "utiliser l'arrêt forcé ci-dessous, puis relancer."
+    cols = st.columns(5)
+    cols[0].metric("État", status.label)
+    cols[1].metric("PID", status.pid or "—")
+    cols[2].metric(
+        "Heartbeat",
+        f"{status.heartbeat_age:.0f} s" if status.heartbeat_age is not None else "—",
     )
+    cols[3].metric("Boucles", status.loop_count)
+    cols[4].metric("Positions suivies", status.positions_monitored)
 
-actions = st.columns(5)
-if actions[0].button("▶️ Démarrer le worker", width="stretch"):
-    ok, message = service.process_manager.start()
-    (st.success if ok else st.error)(message)
-    st.rerun()
+    if status.last_message:
+        st.caption(f"Dernier message : {status.last_message}")
+    if status.last_error:
+        st.error(f"Dernière erreur : {status.last_error}")
+    if status.is_stale:
+        st.warning(
+            "Le heartbeat n'est plus rafraîchi. Le worker est peut-être bloqué : "
+            "utiliser l'arrêt forcé ci-dessous, puis relancer."
+        )
+    flash = st.session_state.get("worker_flash")
+    if flash:
+        (st.success if flash[0] == "success" else st.error)(flash[1])
+    if pending:
+        elapsed = time.monotonic() - st.session_state.get("worker_stop_requested_at", time.monotonic())
+        if elapsed >= 30:
+            st.warning("Arrêt demandé depuis plus de 30 s. Vérifie le worker avant un arrêt forcé.")
+        else:
+            st.info("Arrêt en cours : le worker termine sa boucle. La page se met à jour automatiquement.")
 
-if actions[1].button("⏹️ Arrêter proprement", width="stretch"):
-    ok, message = service.process_manager.request_stop()
-    (st.success if ok else st.warning)(message)
-    st.rerun()
+    actions = st.columns(5)
+    if actions[0].button("▶️ Démarrer le worker", width="stretch", disabled=status.running or pending):
+        ok, message = service.process_manager.start()
+        st.session_state.worker_flash = ("success" if ok else "error", message)
+        st.rerun(scope="app")
 
-if actions[2].button("🛑 Arrêt forcé", width="stretch"):
-    ok, message = service.process_manager.stop(force=True, timeout_seconds=5)
-    (st.success if ok else st.error)(message)
-    st.rerun()
+    if actions[1].button("⏹️ Arrêter proprement", width="stretch", disabled=not status.running or pending):
+        ok, message = service.process_manager.request_stop()
+        if ok:
+            st.session_state.worker_stop_pending = True
+            st.session_state.worker_stop_requested_at = time.monotonic()
+            st.session_state.pop("worker_flash", None)
+            st.info(message)
+        else:
+            st.session_state.worker_flash = ("error", message)
 
-if actions[3].button("🧹 Nettoyer l'état", width="stretch"):
-    st.info(service.process_manager.clear_orphan_state())
-    st.rerun()
+    if actions[2].button("🛑 Arrêt forcé", width="stretch", disabled=not status.running):
+        ok, message = service.process_manager.stop(force=True, timeout_seconds=5)
+        st.session_state.worker_stop_pending = False
+        st.session_state.worker_flash = ("success" if ok else "error", message)
+        st.rerun(scope="app")
 
-if actions[4].button("🔄 Rafraîchir", width="stretch"):
-    st.cache_resource.clear()
-    st.rerun()
+    if actions[3].button("🧹 Nettoyer l'état", width="stretch"):
+        st.session_state.worker_flash = ("success", service.process_manager.clear_orphan_state())
+        st.rerun(scope="app")
+
+    if actions[4].button("🔄 Rafraîchir", width="stretch"):
+        st.cache_resource.clear()
+        st.rerun(scope="app")
+
+
+worker_panel()
 
 st.divider()
 

@@ -40,6 +40,16 @@ logger = logging.getLogger("bsm.process")
 WORKER_SCRIPT = PROJECT_ROOT / "scripts" / "bot_worker.py"
 
 
+def worker_command(executable: str, script: Path, *, windows: bool) -> list[str]:
+    """Utilise pythonw sous Windows pour eviter toute console visible."""
+    interpreter = Path(executable)
+    if windows and interpreter.name.lower() == "python.exe":
+        windowless = interpreter.with_name("pythonw.exe")
+        if windowless.is_file():
+            interpreter = windowless
+    return [str(interpreter), str(script)]
+
+
 # ==========================================================================
 # Verification de process
 # ==========================================================================
@@ -96,6 +106,8 @@ class WorkerStatus:
 
     @property
     def label(self) -> str:
+        if self.stop_flag_present and self.running:
+            return "Worker en arrêt"
         if self.running and self.pid_alive:
             return "Worker actif"
         if self.stop_flag_present:
@@ -236,7 +248,9 @@ class BotProcessManager:
 
         BOT_STOP_FLAG.unlink(missing_ok=True)
 
-        command = [sys.executable, str(self.worker_script)]
+        command = worker_command(
+            sys.executable, self.worker_script, windows=os.name == "nt"
+        )
         kwargs: dict[str, Any] = {
             "cwd": str(PROJECT_ROOT),
             "stdout": subprocess.DEVNULL,
@@ -244,12 +258,16 @@ class BotProcessManager:
             "stdin": subprocess.DEVNULL,
         }
         if os.name == "nt":
-            # Process totalement detache, sans console visible.
+            # pythonw n'ouvre pas de console ; le fallback python.exe est cache.
             kwargs["creationflags"] = (
                 getattr(subprocess, "DETACHED_PROCESS", 0)
                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                 | getattr(subprocess, "CREATE_NO_WINDOW", 0)
             )
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0  # SW_HIDE
+            kwargs["startupinfo"] = startupinfo
         else:
             kwargs["start_new_session"] = True
 
