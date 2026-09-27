@@ -174,11 +174,12 @@ class Worker:
                         EventType.WORKER_STOPPED, "Drapeau d'arret detecte"
                     )
                     break
-                self._tick()
+                positions_monitored = self._tick()
                 self._set_state(
                     WorkerState.MONITORING if self._has_open_positions() else WorkerState.IDLE,
                     f"Boucle {self._loop}",
                     loop_count=self._loop,
+                    positions_monitored=positions_monitored,
                     last_error="",
                 )
             except BinanceError as exc:
@@ -206,7 +207,7 @@ class Worker:
     # Un tour de boucle
     # ------------------------------------------------------------------
 
-    def _tick(self) -> None:
+    def _tick(self) -> int:
         positions = self.positions.list_open()
         price_provider = self._price_provider([p.symbol for p in positions])
 
@@ -251,8 +252,11 @@ class Worker:
             self._reconcile(positions)
             self._sync_quote_balance()
 
+        return len(positions)
+
     def _reconcile(self, positions) -> None:
         for position in positions:
+            previous_sync_status = position.sync_status
             try:
                 report = self.reconciliation.reconcile(position)
             except Exception as exc:  # noqa: BLE001
@@ -266,6 +270,7 @@ class Worker:
                         position, [f.message for f in report.findings]
                     ),
                 )
+            if report.has_desync or position.sync_status != previous_sync_status:
                 self.positions.save(position)
 
     def _sync_quote_balance(self) -> None:

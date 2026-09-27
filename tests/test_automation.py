@@ -38,6 +38,7 @@ from binance_spot_manager.models import (
     TakeProfit,
 )
 from binance_spot_manager.position_engine import PositionEngine, recompute_position
+from binance_spot_manager.reconciliation_engine import ReconciliationEngine
 from binance_spot_manager.symbol_rules import SymbolRules, parse_symbol_rules
 
 pytestmark = pytest.mark.unit
@@ -379,17 +380,18 @@ def test_tp_triggers_and_sells(engine):
 
 
 def test_tp_sells_net_quantity_after_releasing_locked_stop(settings, rules, events):
-    fake = FakeClient(rules)
-    fake.seed_stop_loss(qty=0.00035)
+    fake = FakeClient(rules, price=85000.0)
+    fake.seed_stop_loss(qty=0.00034)
     position = make_position(rules)
     entry = position.entries[0]
     entry.executed_qty = 0.00035
     entry.commissions = [Commission(asset="BTC", amount=0.00000035)]
     position.take_profits = position.take_profits[:1]
     position.take_profits[0].sell_percent = 100.0
+    position.take_profits[0].target_price = 85000.0
     position.take_profits[0].status = TPStatus.FAILED
     position.take_profits[0].last_error = "Account has insufficient balance | code=-2010"
-    position.stop_loss.quantity = 0.00035
+    position.stop_loss.quantity = 0.00034
     recompute_position(position)
     assert planned_tp_quantity(position, position.take_profits[0], rules) == 0.00034
 
@@ -417,7 +419,12 @@ def test_tp_sells_net_quantity_after_releasing_locked_stop(settings, rules, even
     fake.get_free_balance = lambda asset: wallet_free if asset == "BTC" else 5000.0
 
     execution = build_execution(settings, rules, events, fake)
-    outcome = build_automation(execution, rules, events).run_cycle(position, 86600.0)
+    automation = build_automation(execution, rules, events)
+    before_target = automation.run_cycle(position, 84999.0)
+    assert before_target.tp_executed is None
+    assert fake.created == []
+
+    outcome = automation.run_cycle(position, 85000.0)
 
     assert not outcome.errors
     assert outcome.tp_executed == 1
@@ -426,6 +433,32 @@ def test_tp_sells_net_quantity_after_releasing_locked_stop(settings, rules, even
     assert fake.created[0]["qty"] == 0.00034
     assert position.metrics.net_qty == pytest.approx(0.00000965)
     assert position.status is PositionStatus.CLOSED
+
+
+def test_reconciliation_accepts_stop_rounded_to_sellable_quantity(engine):
+    execution, fake, rules = engine
+    position = make_position(rules)
+    position.entries[0].executed_qty = 0.00035
+    position.entries[0].commissions = [Commission(asset="BTC", amount=0.00000035)]
+    recompute_position(position)
+    assert position.metrics.net_qty == pytest.approx(0.00034965)
+
+    fake.orders[SL_CLIENT_ID]["origQty"] = "0.00034"
+    position.stop_loss.quantity = 0.00034
+    report = ReconciliationEngine(execution, events=execution.events).reconcile(position)
+
+    assert not any(f.kind == "SL_QTY_MISMATCH" for f in report.findings)
+
+
+def test_reconciliation_detects_real_stop_quantity_gap(engine):
+    execution, fake, rules = engine
+    position = make_position(rules)
+    fake.orders[SL_CLIENT_ID]["origQty"] = "0.005"
+    position.stop_loss.quantity = 0.005
+
+    report = ReconciliationEngine(execution, events=execution.events).reconcile(position)
+
+    assert any(f.kind == "SL_QTY_MISMATCH" for f in report.findings)
 
 
 def test_failed_tp_restores_stop_on_net_quantity(settings, rules, events):

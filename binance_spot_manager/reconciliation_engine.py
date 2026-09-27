@@ -404,18 +404,21 @@ class ReconciliationEngine:
                         suggested_action="Recréer un SL depuis le Dashboard",
                     )
 
-        # Quantite protegee differente du restant
+        # Le SL ne peut proteger que la quantite vendable au pas LOT_SIZE.
+        # Le reliquat inferieur a un pas n'est pas une desynchronisation.
         if sl.status is SLStatus.ACTIVE and sl.quantity > 0 and remaining > QTY_EPSILON:
-            gap = abs(sl.quantity - remaining) / remaining if remaining else 0.0
-            if gap > QTY_TOLERANCE_RATIO:
+            expected_qty = float(self.execution.rules(position.symbol).round_qty(remaining))
+            gap = abs(sl.quantity - expected_qty)
+            if gap > max(QTY_EPSILON, expected_qty * QTY_TOLERANCE_RATIO):
                 report.add(
                     "SL_QTY_MISMATCH",
-                    f"SL protege {sl.quantity} alors que le restant est {remaining}",
+                    f"SL protege {sl.quantity} alors que la quantite vendable est {expected_qty}",
                     severity="WARNING",
                     target_type="SL",
                     suggested_action="Remplacer le SL pour la quantite restante",
                     sl_qty=sl.quantity,
                     remaining=remaining,
+                    expected_qty=expected_qty,
                 )
 
     # ------------------------------------------------------------------
