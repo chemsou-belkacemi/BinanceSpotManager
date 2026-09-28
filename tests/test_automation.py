@@ -37,6 +37,7 @@ from binance_spot_manager.models import (
     TPStatus,
     TakeProfit,
 )
+from binance_spot_manager.order_journal import OrderJournal
 from binance_spot_manager.position_engine import PositionEngine, recompute_position
 from binance_spot_manager.reconciliation_engine import ReconciliationEngine
 from binance_spot_manager.symbol_rules import SymbolRules, parse_symbol_rules
@@ -928,6 +929,116 @@ def test_ambiguous_tp_does_not_restore_stop_or_send_second_sell(engine):
 
     automation.run_cycle(position, 86600)
     assert len(attempts) == 1
+
+
+class JournaledFakeClient(FakeClient):
+    """FakeClient qui reserve chaque identifiant avant l'envoi, comme le vrai client.
+
+    `reject` : refus definitifs Binance a lever, par type d'ordre, avant creation.
+    """
+
+    def __init__(self, rules: SymbolRules, journal_path, **kwargs) -> None:
+        super().__init__(rules, **kwargs)
+        self.journal = OrderJournal(journal_path)
+        self.reject: dict[str, list[BinanceError]] = {}
+        self.posted: list[str] = []
+
+    def create_order(self, **kwargs):
+        cid = kwargs["client_order_id"]
+        if not self.journal.claim("test", kwargs["symbol"], cid, {}):
+            raise BinanceError("Intention deja enregistree", code=-1007)
+        self.posted.append(cid)
+        pending = self.reject.get(kwargs["order_type"].upper())
+        if pending:
+            raise pending.pop(0)
+        return super().create_order(**kwargs)
+
+
+def _rejection(message: str) -> BinanceError:
+    return BinanceError(message, code=-2010, status=400)
+
+
+@pytest.fixture
+def journaled(settings, rules, events, tmp_path):
+    fake = JournaledFakeClient(rules, tmp_path / "order_intents.sqlite3")
+    fake.seed_stop_loss()
+    return build_execution(settings, rules, events, fake), fake
+
+
+def test_rejected_stop_loss_is_retried_with_new_client_id(journaled, rules, events):
+    execution, fake = journaled
+    position = make_position(rules)
+    position.stop_loss.status = SLStatus.PLANNED
+    position.stop_loss.order_id = None
+    position.stop_loss.client_order_id = None
+    fake.reject["STOP_LOSS_LIMIT"] = [_rejection("Stop price would trigger immediately.")]
+    automation = build_automation(execution, rules, events)
+
+    automation.run_cycle(position, 80500)
+    assert position.stop_loss.status is SLStatus.FAILED
+
+    result = automation.run_cycle(position, 84000)
+
+    assert not result.exits_blocked
+    assert position.sync_status.value != "DESYNC_DETECTED"
+    assert position.stop_loss.status is SLStatus.ACTIVE
+    assert len(fake.posted) == len(set(fake.posted)) == 2
+    assert fake.orders[position.stop_loss.client_order_id]["status"] == "NEW"
+
+
+def test_rejected_tp_sell_keeps_stop_and_retries_with_new_client_id(journaled, rules, events):
+    execution, fake = journaled
+    position = make_position(rules)
+    fake.reject["MARKET"] = [_rejection("Account has insufficient balance for requested action.")]
+    automation = build_automation(execution, rules, events)
+
+    automation.run_cycle(position, 87000)
+    tp = position.take_profits[0]
+    assert tp.status is TPStatus.FAILED
+    assert tp.client_order_id is None
+    assert position.stop_loss.status is SLStatus.ACTIVE  # SL restaure apres le refus
+
+    automation.run_cycle(position, 87000)
+
+    assert tp.status is TPStatus.EXECUTED
+    assert position.sync_status.value != "DESYNC_DETECTED"
+    assert position.stop_loss.status is SLStatus.ACTIVE
+    assert len(fake.posted) == len(set(fake.posted))
+
+
+def test_rejected_gtc_tp_is_retried_with_new_client_id(journaled, rules, events):
+    execution, fake = journaled
+    position = make_position(rules)
+    position.stop_loss.status = SLStatus.NONE
+    position.stop_loss.order_id = None
+    position.stop_loss.client_order_id = None
+    position.take_profits[0].execution_policy = TPExecutionPolicy.LIMIT_GTC
+    fake.reject["LIMIT"] = [_rejection("Account has insufficient balance for requested action.")]
+    automation = build_automation(execution, rules, events)
+
+    automation.run_cycle(position, 84000)
+    tp = position.take_profits[0]
+    assert tp.status is TPStatus.FAILED
+
+    automation.run_cycle(position, 84000)
+
+    assert tp.status is TPStatus.SUBMITTED
+    assert fake.orders[tp.client_order_id]["status"] == "NEW"
+    assert len(fake.posted) == len(set(fake.posted)) == 2
+
+
+def test_reused_client_id_still_blocks_as_uncertain(journaled, rules):
+    """Le journal reste strict : un identifiant deja envoye n'est jamais renvoye."""
+    execution, fake = journaled
+    fake.journal.claim("test", "BTCUSDT", "BSM-D-BTC-SEEN", {})
+
+    result = execution._create_order_safe(
+        symbol="BTCUSDT", side="SELL", order_type="MARKET",
+        quantity=0.001, price=None, client_order_id="BSM-D-BTC-SEEN", market=True,
+    )
+
+    assert result.status == "UNKNOWN"
+    assert fake.posted == []
 
 
 def test_transport_failure_checks_before_retry(engine):

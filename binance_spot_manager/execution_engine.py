@@ -503,6 +503,7 @@ class ExecutionEngine:
         else:
             tp.status = TPStatus.FAILED
             tp.last_error = result.error
+            self._retire_tp_client_id(tp)
 
         self.events.append(
             EventType.TP_EXECUTED if result.success else EventType.ERROR,
@@ -538,7 +539,10 @@ class ExecutionEngine:
         client_order_id = tp.client_order_id or build_client_order_id(
             symbol=position.symbol,
             position_id=position.position_id,
-            suffix=f"TP{tp.sequence_number}GTC",
+            suffix=(
+                f"TP{tp.sequence_number}GTC{tp.attempt_count}"
+                if tp.attempt_count else f"TP{tp.sequence_number}GTC"
+            ),
             environment=position.environment,
             identity_version=position.order_identity_version,
         )
@@ -582,7 +586,19 @@ class ExecutionEngine:
         elif not result.success:
             tp.status = TPStatus.FAILED
             tp.last_error = result.error
+            self._retire_tp_client_id(tp)
         return result
+
+    @staticmethod
+    def _retire_tp_client_id(tp: TakeProfit) -> None:
+        """Apres un refus definitif, la prochaine tentative prend un nouvel identifiant.
+
+        Binance n'a cree aucun ordre, mais le journal d'intentions interdit de
+        renvoyer cet identifiant : le reutiliser bloquerait le TP comme incertain.
+        """
+        tp.order_id = None
+        tp.client_order_id = None
+        tp.attempt_count += 1
 
     def _sl_client_order_id(self, position: Position, attempt: int = 0) -> str:
         suffix = "SL" if attempt == 0 else f"SL{attempt}"
@@ -711,6 +727,11 @@ class ExecutionEngine:
         else:
             position.stop_loss.status = SLStatus.FAILED
             position.stop_loss.last_error = result.error
+            # Refus definitif : l'identifiant est consomme par le journal
+            # d'intentions, la prochaine creation doit en utiliser un nouveau.
+            position.stop_loss.replace_count = max(
+                position.stop_loss.replace_count, attempt + 1
+            )
             self.events.append(
                 EventType.ERROR,
                 f"Echec creation SL {position.symbol} : {result.error}",
