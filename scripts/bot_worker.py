@@ -70,12 +70,15 @@ RECONCILE_EVERY = 12
 class Worker:
     """Boucle principale, minimale et resiliente."""
 
+    #: Vrai pendant la veille Docker (arret demande, process maintenu).
+    _in_standby = False
+
     def __init__(self) -> None:
         self.settings = get_settings()
         self.events = EventStore()
         self.positions = PositionStore()
         self.runtime_store = RuntimeStore()
-        self.lock = WorkerLock()
+        self.lock = WorkerLock(pid_checks=not self.settings.worker_managed_by_docker)
 
         self.client = BinanceSpotClient(self.settings)
         self.rules_cache = SymbolRulesCache(self.client)
@@ -158,7 +161,9 @@ class Worker:
         self._set_state(WorkerState.STOPPED, "Worker arrete")
         self.events.append(EventType.WORKER_STOPPED, "Worker arrete")
         self.lock.release()
-        BOT_STOP_FLAG.unlink(missing_ok=True)
+        if not self.settings.worker_managed_by_docker:
+            # Sous Docker, une veille demandee survit au redemarrage du conteneur.
+            BOT_STOP_FLAG.unlink(missing_ok=True)
         self.notifications.close()
 
     def _set_state(self, state: WorkerState, message: str = "", **fields) -> None:
@@ -195,10 +200,17 @@ class Worker:
 
             try:
                 if self._stop_requested():
-                    self.events.append(
-                        EventType.WORKER_STOPPED, "Drapeau d'arret detecte"
-                    )
-                    break
+                    if not self.settings.worker_managed_by_docker:
+                        self.events.append(
+                            EventType.WORKER_STOPPED, "Drapeau d'arret detecte"
+                        )
+                        break
+                    self._standby()
+                    time.sleep(1)
+                    continue
+                if self._in_standby:
+                    self._in_standby = False
+                    self.events.append(EventType.WORKER_STARTED, "Worker relance depuis le Dashboard")
                 positions_monitored = self._tick()
                 self._set_state(
                     WorkerState.MONITORING if self._has_open_positions() else WorkerState.IDLE,
@@ -222,6 +234,17 @@ class Worker:
             elapsed = time.time() - started
             interval = self._worker_interval()
             time.sleep(max(interval - elapsed, 0.2))
+
+    def _standby(self) -> None:
+        """Sous Docker, un arret propre met en veille : aucun suivi ni ordre.
+
+        Le process reste vivant pour que la politique de redemarrage de Docker
+        ne relance pas un worker arrete volontairement. Le heartbeat continue.
+        """
+        if not self._in_standby:
+            self._in_standby = True
+            self.events.append(EventType.WORKER_STOPPED, "Worker en veille (arret demande)")
+        self._set_state(WorkerState.PAUSED, "En veille : arret demande depuis le Dashboard")
 
     def _worker_interval(self) -> int:
         """Cadence sauvegardee dans Settings, avec repli sur la configuration."""

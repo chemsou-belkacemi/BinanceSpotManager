@@ -66,29 +66,32 @@ st.subheader("Worker")
 def worker_panel() -> None:
     """Actualise l'etat du worker sans exiger un second clic sur Arreter."""
     status = service.worker_status()
+    docker = service.process_manager.docker
     pending = bool(st.session_state.get("worker_stop_pending"))
     if pending and not status.running:
         st.session_state.worker_stop_pending = False
         st.session_state.worker_flash = (
-            ("success", "Worker arrêté proprement.")
-            if status.state == "STOPPED"
+            ("success", "Worker en veille : aucun suivi ni ordre." if docker else "Worker arrêté proprement.")
+            if status.state in ("STOPPED", "PAUSED")
             else ("error", "Worker terminé sans confirmation d'arrêt propre : vérifie le journal.")
         )
         st.rerun(scope="app")  # actualise aussi l'etat dans la barre laterale
 
     cols = st.columns(3)
     cols[0].metric("État", status.label)
-    cols[1].metric("PID", status.pid or "—")
+    cols[1].metric("PID", "Docker" if docker else status.pid or "—")
     cols[2].metric("Positions suivies", status.positions_monitored)
 
     if status.last_message:
         st.caption(f"Dernier message : {status.last_message}")
     if status.last_error:
         st.error(f"Dernière erreur : {status.last_error}")
-    if status.is_stale:
+    if docker and not status.pid_alive:
+        st.warning("Aucun heartbeat du conteneur worker : lancer `make worker-start`, puis `make logs`.")
+    elif status.is_stale:
         st.warning(
             "Le worker ne répond plus. Il est peut-être bloqué : "
-            "utiliser l'arrêt forcé ci-dessous, puis relancer."
+            + ("lancer `make worker-restart`." if docker else "utiliser l'arrêt forcé ci-dessous, puis relancer.")
         )
     flash = st.session_state.get("worker_flash")
     if flash:
@@ -116,19 +119,24 @@ def worker_panel() -> None:
         else:
             st.session_state.worker_flash = ("error", message)
 
-    if actions[2].button("🛑 Arrêt forcé", width="stretch", disabled=not status.running):
+    if actions[2].button("🛑 Arrêt forcé", width="stretch", disabled=docker or not status.running):
         ok, message = service.process_manager.stop(force=True, timeout_seconds=5)
         st.session_state.worker_stop_pending = False
         st.session_state.worker_flash = ("success" if ok else "error", message)
         st.rerun(scope="app")
 
-    if actions[3].button("🧹 Nettoyer l'état", width="stretch"):
+    if actions[3].button("🧹 Nettoyer l'état", width="stretch", disabled=docker):
         st.session_state.worker_flash = ("success", service.process_manager.clear_orphan_state())
         st.rerun(scope="app")
 
     if actions[4].button("🔄 Rafraîchir", width="stretch"):
         st.cache_resource.clear()
         st.rerun(scope="app")
+    if docker:
+        st.caption(
+            "Worker géré par Docker : « Arrêter proprement » le met en veille, « Démarrer » le relance. "
+            "Conteneur : `make worker-restart`, `make logs`."
+        )
 
 
 worker_panel()

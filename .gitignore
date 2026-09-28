@@ -6,6 +6,7 @@
 # Donnees & logs runtime
 data/
 logs/
+backups/
 
 # Python
 .venv/

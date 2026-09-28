@@ -34,11 +34,15 @@ from .config import (
 from .event_store import EventStore, log_error
 from .file_mutex import FileMutex
 from .models import BotRuntime, EventType, WorkerState, utcnow
-from .position_store import RuntimeStore, atomic_write_json, read_json
+from .position_store import RuntimeStore, atomic_write_json, get_settings_store, read_json
 
 logger = logging.getLogger("bsm.process")
 
 WORKER_SCRIPT = PROJECT_ROOT / "scripts" / "bot_worker.py"
+
+DOCKER_FORCE_STOP_MESSAGE = (
+    "Arret force indisponible sous Docker : lancer `make worker-restart`"
+)
 
 
 def worker_command(executable: str, script: Path, *, windows: bool) -> list[str]:
@@ -111,6 +115,8 @@ class WorkerStatus:
             return "Worker en arrêt"
         if self.running and self.pid_alive:
             return "Worker actif"
+        if self.pid_alive and self.state == WorkerState.PAUSED.value:
+            return "Worker en veille"
         if self.stop_flag_present:
             return "Worker en arret"
         if self.state == WorkerState.ERROR.value:
@@ -126,9 +132,12 @@ class WorkerStatus:
 class WorkerLock:
     """Verrou simple et robuste base sur un fichier + PID."""
 
-    def __init__(self, path: Optional[Path] = None) -> None:
+    def __init__(self, path: Optional[Path] = None, *, pid_checks: bool = True) -> None:
         self.path = Path(path) if path else BOT_LOCK_FILE
         self._lease = FileMutex(self.path.with_suffix(self.path.suffix + ".lease"))
+        #: Sous Docker, un PID d'un autre conteneur n'a pas de sens : seul le
+        #: verrou systeme (partage par le noyau) fait foi.
+        self.pid_checks = pid_checks
 
     def read_owner(self) -> Optional[int]:
         payload = read_json(self.path)
@@ -150,7 +159,7 @@ class WorkerLock:
         my_pid = pid or os.getpid()
         if not self._lease.acquire():
             return False
-        if self.is_held_by_other(my_pid):
+        if self.pid_checks and self.is_held_by_other(my_pid):
             self._lease.release()
             return False
         try:
@@ -208,13 +217,35 @@ class BotProcessManager:
     # Etat
     # ------------------------------------------------------------------
 
+    @property
+    def docker(self) -> bool:
+        return self.settings.worker_managed_by_docker
+
+    def _heartbeat_limit(self) -> float:
+        """Age maximal d'un heartbeat vivant, compatible avec l'intervalle choisi."""
+        saved = get_settings_store().load()
+        try:
+            interval = int(saved.get("worker_interval", self.settings.worker_interval))
+        except (AttributeError, TypeError, ValueError):
+            interval = self.settings.worker_interval
+        return float(max(self.settings.heartbeat_stale_after, 3 * interval + 5))
+
     def status(self) -> WorkerStatus:
         runtime = self.runtime_store.load()
-        pid_alive = pid_is_alive(runtime.pid)
         age = runtime.heartbeat_age()
+        if self.docker:
+            # Le PID vient d'un autre conteneur : seul le heartbeat renseigne.
+            pid_alive = (
+                age is not None and age <= self._heartbeat_limit()
+                and runtime.state is not WorkerState.STOPPED
+            )
+            running = pid_alive and runtime.state is not WorkerState.PAUSED
+        else:
+            pid_alive = pid_is_alive(runtime.pid)
+            running = bool(runtime.pid and pid_alive)
 
         return WorkerStatus(
-            running=bool(runtime.pid and pid_alive),
+            running=running,
             state=runtime.state.value,
             pid=runtime.pid,
             pid_alive=pid_alive,
@@ -240,6 +271,8 @@ class BotProcessManager:
 
     def start(self, *, wait_seconds: float = 3.0) -> tuple[bool, str]:
         """Demarre le worker en process detache. Retourne (succes, message)."""
+        if self.docker:
+            return self._resume_docker_worker(wait_seconds)
         if not self.worker_script.exists():
             return False, f"Script worker introuvable : {self.worker_script}"
 
@@ -339,6 +372,13 @@ class BotProcessManager:
 
         `force=True` tue le process — a n'utiliser que sur un worker bloque.
         """
+        if self.docker:
+            if force:
+                return False, DOCKER_FORCE_STOP_MESSAGE
+            ok, message = self.request_stop()
+            if ok and self.wait_for_stop(timeout_seconds):
+                return True, "Worker en veille"
+            return ok, message
         status = self.status()
         if not status.running:
             self.lock.force_release() if not pid_is_alive(self.lock.read_owner()) else None
@@ -405,6 +445,9 @@ class BotProcessManager:
 
     def clear_orphan_state(self) -> str:
         """Nettoie un etat incoherent apres un crash (PID mort, verrou orphelin)."""
+        if self.docker:
+            # Supprimer le drapeau ici relancerait un worker mis en veille.
+            return "Worker gere par Docker : aucun nettoyage local (voir `make ps`)"
         actions: list[str] = []
 
         runtime = self.runtime_store.load()
@@ -425,6 +468,22 @@ class BotProcessManager:
             actions.append("Drapeau d'arret obsolete supprime")
 
         return " ; ".join(actions) if actions else "Aucun nettoyage necessaire"
+
+    def _resume_docker_worker(self, wait_seconds: float) -> tuple[bool, str]:
+        status = self.status()
+        if status.running:
+            return False, "Worker deja actif"
+        if not status.pid_alive:
+            return False, (
+                "Conteneur worker arrete ou sans heartbeat : lancer `make worker-start`"
+            )
+        BOT_STOP_FLAG.unlink(missing_ok=True)
+        deadline = time.time() + max(wait_seconds, 0.0)
+        while time.time() < deadline:
+            if self.is_running():
+                return True, "Worker relance"
+            time.sleep(0.25)
+        return True, "Reprise demandee : le worker reprend a sa prochaine boucle"
 
     def runtime_snapshot(self) -> BotRuntime:
         return self.runtime_store.load()

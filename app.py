@@ -1,7 +1,7 @@
 """BinanceSpotManager — point d'entree Streamlit.
 
-Lance :
-    streamlit run app.py
+Lance (dans le conteneur `ui`) :
+    make up
 
 Le package doit etre importable : le projet est concu pour etre execute depuis
 sa racine (les scripts ajoutent la racine au sys.path automatiquement).
@@ -61,10 +61,10 @@ with col1:
     st.subheader("Avant de commencer")
     st.markdown(
         """
-1. Copier `.env.example` en `.env` et renseigner les clés Demo.
-2. Vérifier la connexion : `python scripts/check_connection.py`
-3. Lancer cette interface : `streamlit run app.py`
-4. Démarrer le worker depuis **Dashboard** (ou `python scripts/bot_worker.py`).
+1. `make init`, puis renseigner les clés Demo dans `.env`.
+2. Vérifier la connexion : `make check`
+3. Lancer l'interface et le worker : `make up`
+4. Suivre le worker depuis **Dashboard** (`make logs` pour les journaux).
 """
     )
 
