@@ -56,6 +56,45 @@ def test_persistent_alert_delivery_ack_and_recurrence(tmp_path):
     assert len(inbox.recent(unread=True)) == 1
 
 
+def test_bulk_actions_cover_alerts_beyond_visible_page(tmp_path):
+    inbox = AlertInbox(tmp_path / "alerts.db")
+    for i in range(105):
+        inbox.ingest({"event": "ERROR", "level": "ERROR", "message": f"Erreur {i}", "ts": "2026-01-01T00:00:00Z"})
+    assert len(inbox.recent()) == 100
+    assert inbox.acknowledge_all() == 105
+    assert inbox.recent(unread=True) == []
+    assert inbox.acknowledge_all() == 0
+    assert inbox.delete_all() == 105
+    assert AlertInbox(inbox.path).recent() == []
+    assert inbox.delete_all() == 0
+
+
+@pytest.mark.parametrize("delete_all", [False, True])
+def test_deleted_alert_is_not_replayed_but_new_occurrence_is_delivered(tmp_path, delete_all):
+    inbox = AlertInbox(tmp_path / "alerts.db")
+    record = {"event": "ERROR", "level": "ERROR", "message": "Protection absente", "ts": "2026-01-01T00:00:00Z"}
+    other = dict(record, message="Autre alerte")
+    inbox.ingest(record)
+    inbox.ingest(other)
+    if delete_all:
+        assert inbox.delete_all() == 2
+    else:
+        assert inbox.delete(inbox.key(record)) == 1
+        assert inbox.recent()[0]["record"]["message"] == "Autre alerte"
+    reopened = AlertInbox(inbox.path)
+    assert not reopened.claim_delivery(record)
+    assert reopened.claim_delivery(dict(record, ts="2026-01-01T00:00:01Z"))
+
+
+def test_mark_all_read_suppresses_pending_delivery_but_allows_recurrence(tmp_path):
+    inbox = AlertInbox(tmp_path / "alerts.db")
+    record = {"event": "ERROR", "level": "ERROR", "message": "Erreur", "ts": "2026-01-01T00:00:00Z"}
+    inbox.ingest(record)
+    inbox.acknowledge_all()
+    assert not inbox.claim_delivery(record)
+    assert inbox.claim_delivery(dict(record, ts="2026-01-01T00:00:01Z"))
+
+
 def test_backup_excludes_env_and_checks_json_and_sqlite(tmp_path):
     # Secrets factices dans un repertoire de test, jamais le .env du projet.
     data = tmp_path / "data"
@@ -117,3 +156,16 @@ def test_operations_page_renders_without_network(monkeypatch, tmp_path):
     app.switch_page("pages/7_Operations.py").run()
     assert not app.exception
     assert any("Demandes" in heading.value for heading in app.subheader)
+    inbox = service.events.alert_inbox()
+    for i in range(2):
+        inbox.ingest({"event": "ERROR", "level": "ERROR", "message": f"Test {i}", "ts": "2026-01-01T00:00:00Z"})
+    app.run()
+    next(b for b in app.button if b.label == "Tout marquer comme lu").click().run()
+    assert not app.exception
+    assert not inbox.recent(unread=True)
+    next(b for b in app.button if b.label == "Supprimer cette alerte").click().run()
+    assert not app.exception
+    assert len(inbox.recent()) == 1
+    next(b for b in app.button if b.label == "Tout supprimer").click().run()
+    assert not app.exception
+    assert inbox.recent() == []

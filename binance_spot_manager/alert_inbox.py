@@ -22,6 +22,8 @@ class AlertInbox:
             id TEXT PRIMARY KEY, record TEXT NOT NULL, first_seen TEXT NOT NULL,
             last_seen TEXT NOT NULL, occurrences INTEGER NOT NULL, acknowledged_at REAL,
             delivered INTEGER NOT NULL DEFAULT 0)""")
+        db.execute("""CREATE TABLE IF NOT EXISTS deleted_alerts (
+            id TEXT PRIMARY KEY, last_seen TEXT NOT NULL)""")
         db.commit()
         return db
 
@@ -38,12 +40,14 @@ class AlertInbox:
             return
         key, stamp = self.key(record), str(record.get("ts", ""))
         with closing(self.connect()) as db, db:
-            db.execute("""INSERT INTO alerts VALUES (?, ?, ?, ?, 1, NULL, 0)
+            db.execute("""INSERT INTO alerts
+                SELECT ?, ?, ?, ?, 1, NULL, 0
+                WHERE NOT EXISTS (SELECT 1 FROM deleted_alerts WHERE id=? AND last_seen>=?)
                 ON CONFLICT(id) DO UPDATE SET record=excluded.record, last_seen=excluded.last_seen,
                 occurrences=alerts.occurrences+1,
                 delivered=CASE WHEN alerts.acknowledged_at IS NOT NULL THEN 0 ELSE alerts.delivered END,
                 acknowledged_at=NULL WHERE excluded.last_seen>last_seen""",
-                       (key, json.dumps(record, default=str), stamp, stamp))
+                       (key, json.dumps(record, default=str), stamp, stamp, key, stamp))
 
     def recent(self, limit=100, *, unread=False):
         with closing(self.connect()) as db:
@@ -54,9 +58,33 @@ class AlertInbox:
 
     def acknowledge(self, alert_id):
         with closing(self.connect()) as db, db:
-            db.execute("UPDATE alerts SET acknowledged_at=? WHERE id=?", (time.time(), alert_id))
+            db.execute("UPDATE alerts SET acknowledged_at=?, delivered=1 WHERE id=?", (time.time(), alert_id))
+
+    def acknowledge_all(self):
+        with closing(self.connect()) as db, db:
+            return db.execute(
+                "UPDATE alerts SET acknowledged_at=?, delivered=1 WHERE acknowledged_at IS NULL",
+                (time.time(),),
+            ).rowcount
+
+    def delete(self, alert_id):
+        """Retire l'alerte sans qu'un autre onglet puisse rejouer son ancien evenement."""
+        with closing(self.connect()) as db, db:
+            db.execute("""INSERT INTO deleted_alerts SELECT id, last_seen FROM alerts WHERE id=?
+                ON CONFLICT(id) DO UPDATE SET last_seen=MAX(deleted_alerts.last_seen, excluded.last_seen)""",
+                       (alert_id,))
+            return db.execute("DELETE FROM alerts WHERE id=?", (alert_id,)).rowcount
+
+    def delete_all(self):
+        with closing(self.connect()) as db, db:
+            db.execute("""INSERT INTO deleted_alerts SELECT id, last_seen FROM alerts WHERE 1
+                ON CONFLICT(id) DO UPDATE SET last_seen=MAX(deleted_alerts.last_seen, excluded.last_seen)""")
+            return db.execute("DELETE FROM alerts").rowcount
 
     def claim_delivery(self, record):
         self.ingest(record)
         with closing(self.connect()) as db, db:
-            return db.execute("UPDATE alerts SET delivered=1 WHERE id=? AND delivered=0", (self.key(record),)).rowcount == 1
+            return db.execute(
+                "UPDATE alerts SET delivered=1 WHERE id=? AND delivered=0 AND acknowledged_at IS NULL AND last_seen=?",
+                (self.key(record), str(record.get("ts", ""))),
+            ).rowcount == 1
