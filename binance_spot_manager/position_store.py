@@ -33,6 +33,9 @@ from .file_mutex import FileMutex
 
 logger = logging.getLogger("bsm.store")
 
+ATOMIC_REPLACE_ATTEMPTS = 7
+ATOMIC_REPLACE_INITIAL_DELAY = 0.02
+
 
 class ConcurrentPositionUpdate(RuntimeError):
     """Une version plus recente existe : recharger, ne jamais ecraser."""
@@ -55,7 +58,18 @@ def atomic_write_text(path: Path, content: str) -> None:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp_path, path)
+        # Windows can briefly deny os.replace while antivirus/indexing or a
+        # reader still holds the destination. The temporary file is complete
+        # and fsynced, so retry only this atomic replace; never rewrite or
+        # delete the previous valid JSON.
+        for attempt in range(ATOMIC_REPLACE_ATTEMPTS):
+            try:
+                os.replace(tmp_path, path)
+                break
+            except PermissionError:
+                if attempt + 1 >= ATOMIC_REPLACE_ATTEMPTS:
+                    raise
+                time.sleep(ATOMIC_REPLACE_INITIAL_DELAY * (2 ** attempt))
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise

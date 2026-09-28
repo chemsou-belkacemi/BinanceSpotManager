@@ -5,6 +5,7 @@ Aucun appel reseau.
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -201,7 +202,7 @@ def store(tmp_path) -> PositionStore:
 
 def test_store_roundtrip(store):
     position = make_open_position("BTCUSDT")
-    store.save(position)
+    path = store.save(position)
     loaded = store.load(position.position_id)
     assert loaded is not None
     assert loaded.symbol == "BTCUSDT"
@@ -299,3 +300,27 @@ def test_failed_atomic_replace_preserves_previous_position(tmp_path, monkeypatch
     assert path.read_bytes() == before
     assert list(tmp_path.glob("*.tmp")) == []
     assert store.load(position.position_id).tags == []
+
+
+def test_atomic_replace_retries_transient_windows_access_denied(tmp_path, monkeypatch):
+    store = PositionStore(tmp_path)
+    position = make_open_position("BTCUSDT")
+    path = store.save(position)
+    real_replace = os.replace
+    calls = []
+
+    def transient_replace(source, target):
+        if target != path:
+            return real_replace(source, target)
+        calls.append((source, target))
+        if len(calls) < 3:
+            raise PermissionError(13, "temporary Windows lock")
+        return real_replace(source, target)
+
+    monkeypatch.setattr("binance_spot_manager.position_store.os.replace", transient_replace)
+    monkeypatch.setattr("binance_spot_manager.position_store.time.sleep", lambda _: None)
+    position.tags.append("persisted-after-retry")
+    store.save(position)
+    assert len(calls) == 3
+    assert store.load(position.position_id).tags == ["persisted-after-retry"]
+    assert not list(tmp_path.glob("*.tmp"))

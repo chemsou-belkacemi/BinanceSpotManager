@@ -60,6 +60,8 @@ class PortfolioView:
     total_risk_percent: float = 0.0
 
     errors: list[str] = field(default_factory=list)
+    estimated_fee_assets: set[str] = field(default_factory=set)
+    unpriced_fee_assets: set[str] = field(default_factory=set)
     source: str = "local"
 
     @property
@@ -213,7 +215,11 @@ class DashboardService:
             for position in positions:
                 if position.is_open and prices.get(position.symbol):
                     position.metrics.current_price = prices[position.symbol]
-                    recompute_position(position)
+                fee_rates = self.fee_rates(position)
+                recompute_position(position, fee_rates=fee_rates)
+                fee_assets = self._external_fee_assets(position)
+                view.estimated_fee_assets.update(fee_rates)
+                view.unpriced_fee_assets.update(fee_assets - fee_rates.keys())
 
         if live and self.settings.has_credentials and not self.settings.dry_run:
             try:
@@ -362,7 +368,7 @@ class DashboardService:
             current = prices.get(position.symbol) or position.metrics.current_price
             if current:
                 position.metrics.current_price = current
-                recompute_position(position)
+            recompute_position(position, fee_rates=self.fee_rates(position) if with_prices else None)
 
             next_tp = position.next_tp
             rows.append(
@@ -419,6 +425,39 @@ class DashboardService:
         except BinanceError as exc:
             logger.warning("Prix %s indisponible : %s", symbol, exc)
             return None
+
+    @staticmethod
+    def _external_fee_assets(position: Position) -> set[str]:
+        items = [*position.entries, *position.take_profits, position.stop_loss,
+                 *position.manual_exits]
+        return {
+            fee.asset.upper() for item in items for fee in item.commissions
+            if fee.amount > 0 and fee.asset.upper() not in {
+                position.base_asset.upper(), position.quote_asset.upper()
+            }
+        }
+
+    def fee_rates(self, position: Position) -> dict[str, float]:
+        """Current Binance rates for third-asset commissions, in position quote."""
+        quote = position.quote_asset.upper()
+        rates: dict[str, float] = {}
+        for asset in self._external_fee_assets(position):
+            try:
+                direct = self.current_price(f"{asset}{quote}")
+            except Exception as exc:  # advisory display must not break the page
+                logger.warning("Taux de frais %s/%s indisponible : %s", asset, quote, exc)
+                direct = None
+            if direct is not None and direct > 0:
+                rates[asset] = direct
+                continue
+            try:
+                inverse = self.current_price(f"{quote}{asset}")
+            except Exception as exc:
+                logger.warning("Taux de frais %s/%s indisponible : %s", quote, asset, exc)
+                inverse = None
+            if inverse is not None and inverse > 0:
+                rates[asset] = 1.0 / inverse
+        return rates
 
     def prices(self, symbols: list[str]) -> dict[str, float]:
         if not symbols:

@@ -96,7 +96,7 @@ st.subheader(f"{len(filtered)} position(s)")
 
 rows = []
 for position in filtered:
-    recompute_position(position)
+    recompute_position(position, fee_rates=service.fee_rates(position))
     rows.append(
         {
             "Symbole": position.symbol,
@@ -122,6 +122,8 @@ pnl_dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 # ==========================================================================
 
 st.subheader("Statistiques")
+if any(service.fee_rates(position) for position in filtered):
+    st.caption("Les frais payés en BNB/autre actif sont valorisés au cours Binance actuel ; les statistiques correspondantes sont estimatives.")
 
 gains = [p.pnl.realized for p in filtered if p.pnl.realized > 0]
 pertes = [p.pnl.realized for p in filtered if p.pnl.realized <= 0]

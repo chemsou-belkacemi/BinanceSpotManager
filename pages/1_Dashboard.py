@@ -165,8 +165,12 @@ st.subheader("Portefeuille")
 @st.fragment(run_every="1s")
 def live_portfolio_summary():
     view = service.portfolio()
-    if any(not p.pnl.complete for p in service.positions.list_all()):
-        st.warning("Certains frais ne sont pas convertis : PnL incomplet. Voir la comptabilite detaillee dans Operations.")
+    if view.unpriced_fee_assets:
+        st.warning("Frais non convertis : " + ", ".join(sorted(view.unpriced_fee_assets))
+                   + ". Voir la comptabilité détaillée dans Operations.")
+    elif view.estimated_fee_assets:
+        st.caption("Frais " + ", ".join(sorted(view.estimated_fee_assets))
+                   + " déduits au cours Binance actuel.")
     if view.errors:
         for error in view.errors:
             st.warning(error)

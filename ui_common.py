@@ -291,9 +291,10 @@ def fresh_position_view(service, position_id):
     price = service.current_price(position.symbol)
     if price is not None and price > 0:
         position.metrics.current_price = price
-    recompute_position(position)
+    fee_rates = service.fee_rates(position) if hasattr(service, "fee_rates") else {}
+    recompute_position(position, fee_rates=fee_rates)
     rate = 1.0 if position.quote_asset == "USDT" else service.current_price(f"{position.quote_asset}USDT")
-    return position, price, position_return(position, rate)
+    return position, price, position_return(position, rate, fee_rates=fee_rates)
 
 
 def pnl_metric(container, label, value, text=None):

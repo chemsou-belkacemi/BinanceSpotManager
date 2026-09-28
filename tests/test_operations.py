@@ -33,6 +33,22 @@ def test_cost_basis_includes_buy_and_sell_fees_once():
     assert snapshot["Frais non convertis"] == {"BNB": 0.001}
 
 
+def test_third_asset_fees_are_deducted_when_a_rate_is_available():
+    p = Position(symbol="BTCUSDC", base_asset="BTC", quote_asset="USDC")
+    p.entries = [Entry(status=EntryStatus.FILLED, executed_qty=.001,
+                       average_fill_price=80000, quote_spent=80,
+                       commissions=[Commission(asset="BNB", amount=.001)])]
+    p.metrics.current_price = 81000
+    without_rate = accounting_snapshot(p)
+    valued = accounting_snapshot(p, fee_rates={"BNB": 600})
+    assert without_rate["Total"] == pytest.approx(1)
+    assert valued["Total"] == pytest.approx(.4)
+    assert valued["Frais externes valorises"] == pytest.approx(.6)
+    assert valued["Frais valorises"]["BNB"]["quote_value"] == pytest.approx(.6)
+    assert valued["Frais non convertis"] == {}
+    assert valued["Complet"]
+
+
 def test_base_fees_reduce_inventory_and_increase_cost():
     p = Position(symbol="BTCUSDT", base_asset="BTC", quote_asset="USDT")
     p.entries = [Entry(executed_qty=1, quote_spent=100, commissions=[Commission(asset="BTC", amount=0.01)])]

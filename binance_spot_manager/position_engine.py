@@ -474,7 +474,7 @@ class PositionEngine:
 # ==========================================================================
 
 
-def recompute_position(position: Position) -> Position:
+def recompute_position(position: Position, *, fee_rates: Optional[dict[str, float]] = None) -> Position:
     """Recalcule integralement metriques et PnL depuis l'etat des Entries/TP/SL.
 
     Cette fonction est idempotente : l'appeler deux fois donne le meme resultat.
@@ -543,7 +543,7 @@ def recompute_position(position: Position) -> Position:
     )
 
     from .accounting import accounting_snapshot
-    accounting = accounting_snapshot(position)
+    accounting = accounting_snapshot(position, fee_rates=fee_rates)
     realized = accounting["Realise"]
     position.pnl.realized = realized
 
@@ -553,7 +553,7 @@ def recompute_position(position: Position) -> Position:
         percent_change(current, metrics.average_price) if metrics.average_price else 0.0
     )
     position.pnl.total = realized + unrealized
-    position.pnl.fees_paid = quote_fees
+    position.pnl.fees_paid = quote_fees + accounting["Frais externes valorises"]
     position.pnl.unpriced_fees = accounting["Frais non convertis"]
     position.pnl.complete = accounting["Complet"]
     position.pnl.updated_at = utcnow()

@@ -150,7 +150,11 @@ def live_position_summary(position_id):
     pnl_metric(head2[4], "PnL total (USDT / %)", returns["total_usdt"],
                f"{fmt_price(returns['total_usdt'])} USDT ({fmt_percent(returns['percent'])})")
     if not returns["complete"]:
-        st.warning("PnL indicatif : conversion indisponible ou frais dans un autre actif (BNB notamment) non valorisés.")
+        missing = ", ".join(returns["unpriced_fee_assets"]) or "inconnus"
+        st.warning(f"PnL incomplet : frais non valorisables ({missing}) ou conversion USDT indisponible.")
+    elif returns["estimated_fee_assets"]:
+        assets = ", ".join(returns["estimated_fee_assets"])
+        st.caption(f"Frais {assets} déduits avec le cours Binance actuel : PnL estimatif, conversion actualisée chaque seconde.")
 
     st.caption(
         f"Position {position.position_id} · source "

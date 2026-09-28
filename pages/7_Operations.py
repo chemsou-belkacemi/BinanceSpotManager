@@ -164,10 +164,10 @@ def alerts_panel():
 alerts_panel()
 
 st.subheader("Comptabilite detaillee")
-accounting = [accounting_snapshot(p) for p in positions]
+accounting = [accounting_snapshot(p, fee_rates=service.fee_rates(p)) for p in positions]
 if accounting:
     pnl_dataframe(accounting, hide_index=True)
-    st.caption("Vue au cout moyen net : frais en base et en cotation inclus. Les frais BNB/autres sans taux historique restent explicites ; aucune conversion inventee. Ne pas additionner des devises differentes.")
+    st.caption("Vue au coût moyen net : frais en base et cotation inclus. Les frais BNB/autres valorisables utilisent le cours Binance actuel et restent signalés comme estimatifs ; les actifs sans taux restent explicites. Ne pas additionner des devises différentes.")
 
 st.subheader("Sauvegardes verifiables")
 st.caption("Export des positions, preferences, presets et bases de commandes/intention. Ni .env, ni .venv, ni cles API de configuration. Archive non chiffree : conserver dans un emplacement prive.")
