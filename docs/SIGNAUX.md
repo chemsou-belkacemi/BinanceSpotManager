@@ -77,4 +77,4 @@ de bougie, remappage Bitget/forex et apprentissage libre de formats. L'automatis
 sans confirmation nécessite d'abord des politiques par source (budget, durée de
 validité, allocations, interprétation SL et gestion des modifications).
 
-Tests hors réseau : `python -m pytest tests/test_signals.py tests/test_signals_ui.py tests/test_commands.py tests/test_automation.py`.
+Tests hors réseau : `make test TESTS="tests/test_signals.py tests/test_signals_ui.py tests/test_commands.py tests/test_automation.py"`.

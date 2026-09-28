@@ -68,7 +68,7 @@ prix/risque/solde, réponse d'achat perdue, annulation incertaine, fermeture ave
 TP inconnu, frais, reprise des alertes, archives altérées et parcours de la
 nouvelle page depuis le point d'entrée Streamlit.
 
-Relancer : `python -m pytest -m "not integration"`.
+Relancer : `make test`.
 Les tests Demo en lecture seule sont séparés ; aucun ordre de test n'est envoyé
 automatiquement. Redémarrer le worker après mise à jour, puis vérifier les
 sorties existantes dans Operations. Ne pas modifier les clés de compte tout

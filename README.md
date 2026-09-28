@@ -11,26 +11,26 @@ pendant la phase de développement et de validation.
 
 ---
 
-## 1. Installation
+## 1. Prérequis
 
-Windows / PowerShell, depuis la racine du projet :
+Tout s'exécute dans des conteneurs Docker : ni Python ni paquet à installer
+sur la machine. Seuls sont nécessaires :
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-```
+- **Docker** : Docker Desktop (macOS, Windows) ou Docker Engine (Linux) ;
+- **make** : fourni par macOS (outils en ligne de commande Xcode) et Linux ;
+  sous Windows, passer par WSL ;
+- **git**, pour récupérer le projet.
 
-Ne jamais modifier `.venv` manuellement.
+`make help` liste toutes les commandes. La première commande qui en a besoin
+construit l'image (connexion Internet requise, environ une minute).
 
 ## 2. Configuration
 
-```powershell
-Copy-Item .env.example .env
-notepad .env
+```bash
+make init     # crée .env à partir de .env.example (n'écrase jamais un .env existant)
 ```
 
-Variables essentielles :
+Ouvrir ensuite `.env` dans un éditeur et renseigner les clés. Variables essentielles :
 
 | Variable | Rôle | Valeur par défaut |
 |---|---|---|
@@ -40,30 +40,40 @@ Variables essentielles :
 | `BSM_DEMO_API_KEY` | clé API Demo | vide |
 | `BSM_DEMO_API_SECRET` | secret API Demo | vide |
 | `BSM_QUOTE_ASSET` | actif de cotation | `USDT` |
+| `BSM_UI_PORT` | port de l'interface sur `127.0.0.1` | `8501` |
 
 **Quelle URL utiliser ?** Le cahier des charges mentionnait `https://demo-api.binance.com`.
 Le testnet Spot public de Binance est `https://testnet.binance.vision`, et **les deux sont
 acceptés** par la liste blanche. Mets dans `.env` l'URL correspondant à tes clés — si elles
 viennent de `testnet.binance.vision`, la valeur par défaut convient.
 
-Le fichier `.env` est ignoré par Git. Les clés ne sont jamais affichées par l'application.
+Le fichier `.env` est ignoré par Git, lu au démarrage des conteneurs et jamais
+copié dans l'image. Les clés ne sont jamais affichées par l'application. Après
+toute modification de `.env`, lancer `make restart` : sous Docker, le bouton
+*Recharger la configuration* de Settings ne relit pas le fichier.
 
 ## 3. Vérification avant tout lancement
 
-```powershell
-python scripts/check_connection.py
+```bash
+make check
 ```
 
 Affiche : mode, URL, appartenance à la liste blanche, ping, offset horloge, état du compte,
 solde, existence de la paire et filtres. **Ne crée aucun ordre.**
 
-Si les clés sont absentes, le script reste utilisable pour tout ce qui est public (prix, filtres).
+Si les clés sont absentes, la vérification reste utilisable pour tout ce qui est public (prix, filtres).
 
-## 4. Lancement de l'interface
+## 4. Lancement
 
-```powershell
-streamlit run app.py
+```bash
+make up       # construit si besoin et démarre l'interface et le worker
+make ps       # état des services et des healthchecks
+make logs     # journaux de tous les services (make logs SERVICE=worker)
+make down     # arrête et supprime les conteneurs ; les données sont conservées
 ```
+
+Interface : **http://127.0.0.1:8501**, publiée uniquement sur la machine locale.
+Deux services partagent la même image : `ui` (Streamlit) et `worker`.
 
 Pages disponibles dans le menu de gauche :
 
@@ -77,36 +87,52 @@ Pages disponibles dans le menu de gauche :
 | **Investissement** | achat Market Demo simple sans sortie, ou avec TP seul / SL seul |
 | **Operations** | demandes au worker, intentions incertaines, protection, alertes, comptabilité et sauvegardes |
 
-## 5. Lancement du worker
+## 5. Le worker
 
-Le worker est un processus **séparé** de Streamlit. Deux façons :
+Le worker est un conteneur **séparé** de l'interface. Docker le maintient en vie
+et le relance après un crash ou un redémarrage de la machine. Il écrit son
+heartbeat et son état dans `data/bot_runtime.json`, tourne à l'intervalle
+choisi dans Settings (5 secondes par défaut), et
+reste vivant même sans aucune position. L'état affiché par le Dashboard repose
+sur ce heartbeat.
 
-**Depuis l'interface** — Dashboard → *Démarrer le worker*. Le processus est détaché
-(sans fenêtre visible sous Windows) et son état s'affiche dans le bandeau.
+**Depuis le Dashboard :** *Arrêter proprement* met le worker **en veille** :
+aucun suivi, aucun ordre, heartbeat maintenu. *Démarrer* le relance. Une veille
+survit au redémarrage du conteneur et de la machine : un worker mis en veille
+ne reprend jamais seul.
 
-**En ligne de commande :**
+**Depuis le terminal :**
 
-```powershell
-python scripts/bot_worker.py
-```
-
-Le worker écrit son PID, son heartbeat et son état dans `data/bot_runtime.json`,
-tourne à l'intervalle choisi dans Settings (1 seconde dans les préférences
-locales actuelles), et reste vivant même sans aucune position.
+| Commande | Effet |
+|---|---|
+| `make worker-restart` | redémarre le conteneur ; remplace l'arrêt forcé d'un worker bloqué |
+| `make worker-stop` | arrête le conteneur (SIGTERM, fin de boucle propre) |
+| `make worker-start` | redémarre un conteneur arrêté |
 
 Les prix des paires suivies utilisent, quand il est disponible, le flux public
 `miniTicker` de l'environnement Demo sélectionné. Un prix WebSocket de plus de 5 secondes est ignoré
 et le client revient automatiquement à REST ; les statuts d'ordres restent
-vérifiés séparément sur Binance. Ce flux est limité à `demo-api.binance.com` et `testnet.binance.vision`, et
-requiert le paquet `websockets` indiqué dans `requirements.txt`. Sans ce paquet,
-le fonctionnement REST antérieur est conservé.
+vérifiés séparément sur Binance. Ce flux est limité à `demo-api.binance.com` et `testnet.binance.vision`.
 
-**Arrêt :** bouton *Arrêter proprement* du Dashboard, qui crée `data/bot_stop.flag`.
-L'*Arrêt forcé* tue le processus — à réserver à un worker bloqué.
+Un verrou système (`data/bot_worker.lock.lease`) empêche deux workers d'utiliser
+les mêmes données, y compris depuis deux conteneurs : un second worker est
+refusé au démarrage. Ne jamais placer les volumes sur un partage réseau
+(verrous et SQLite exigent un seul hôte), ni lancer plusieurs replicas du worker.
 
-Un verrou système (`data/bot_worker.lock.lease`) et son descriptif PID (`data/bot_worker.lock`)
-empêchent deux workers d'utiliser le même répertoire de données.
-Si un worker démarre alors qu'un autre est vivant, le démarrage est refusé.
+### Données et sauvegardes
+
+`data/` et `logs/` vivent dans les volumes Docker `bsm-data` et `bsm-logs`, pas
+dans le dossier du projet. `make down` les conserve ; **ne jamais lancer
+`docker compose down -v`**, qui supprime positions et journal d'intentions.
+
+- `make backup` écrit une archive **non chiffrée** dans `backups/`, worker
+  arrêté le temps de la copie. La conserver dans un emplacement privé.
+- `make import-data` reprend un ancien dossier `./data` créé hors Docker.
+  L'import est refusé si le volume contient déjà des positions. Démarrer sur un
+  volume vide alors que des positions sont ouvertes sur Demo les laisserait sans suivi.
+- `make shell` ouvre un shell dans un conteneur en cours d'exécution ;
+  `make run CMD="python scripts/<script>.py ..."` lance un script ponctuel relié
+  aux données.
 
 ## 6. Créer un trade
 
@@ -173,6 +199,7 @@ BinanceSpotManager/
 ├── app.py                      point d'entrée Streamlit
 ├── ui_common.py                helpers d'interface partagés
 ├── requirements.txt
+├── Dockerfile / docker-compose.yml / Makefile / .dockerignore
 ├── .env.example / .gitignore / pytest.ini
 ├── binance_spot_manager/
 │   ├── config.py               Settings + garde-fous de sécurité
@@ -192,12 +219,12 @@ BinanceSpotManager/
 │   └── dashboard_service.py    façade de lecture pour l'interface
 ├── pages/                      1_Dashboard, 2_New_Trade, 3_Positions,
 │                               4_History, 5_Settings
-├── scripts/                    bot_worker, check_connection,
-│                               check_open_orders, demo_tests
+├── scripts/                    bot_worker, check_connection, check_open_orders,
+│                               demo_tests, migrate_oco_demo, worker_healthcheck
 ├── tests/                      test_engines, test_risk_and_store,
 │                               test_automation, test_demo_integration
-├── data/                       positions/, signals/, bot_runtime.json, ...
-└── logs/                       events.jsonl, bot.log, errors.log
+├── data/  (volume bsm-data)    positions/, signals/, bot_runtime.json, ...
+└── logs/  (volume bsm-logs)    events.jsonl, bot.log, errors.log
 ```
 
 ### Responsabilités
@@ -223,8 +250,8 @@ s'exécute immédiatement en entier ou expire, permettant de restaurer le SL.
 **OCO Demo expérimental (un TP à 100 %).** Le Dashboard peut calculer les paramètres
 d'un OCO de vente pour une position à un seul TP (100 %), en tenant compte des
 commissions d'achat et des filtres Binance. L'aperçu seul ne place aucun ordre.
-La migration explicite `scripts/migrate_oco_demo.py --position-id ID --execute`
-arrête le worker, annule le SL indépendant, crée l'OCO, vérifie ses deux
+La migration explicite `make migrate-oco POSITION=ID EXECUTE=1` met le worker
+en veille, annule le SL indépendant, crée l'OCO, vérifie ses deux
 branches, enregistre les identifiants et relance le worker. En cas de refus
 confirmé de l'OCO, elle tente de restaurer le SL. Le worker lit ensuite les
 deux branches sans envoyer de deuxième vente. Les exécutions partielles ou
@@ -274,10 +301,11 @@ thread dédié pour ne pas ralentir la surveillance.
 
 ## 10. Tests
 
-Tests hors ligne (aucun réseau, aucun ordre) :
+Tests hors ligne (aucun réseau, aucun ordre), dans un conteneur jetable sans
+volume ni secret :
 
-```powershell
-pytest -q -m "not integration"
+```bash
+make test
 ```
 
 Couvrent : arrondis prix/quantité, minQty, minNotional, formatage sans notation
@@ -289,21 +317,20 @@ d'automation TP/SL avec un client Binance simulé.
 
 Tests d'intégration Demo (lecture seule) :
 
-```powershell
-pytest tests/test_demo_integration.py -q
-python scripts/demo_tests.py
-python scripts/demo_tests.py --execute   # ajoute /order/test (aucune exécution)
-```
-
-ou pour ne lancer que le hors ligne :
-
-```powershell
-pytest -q -m "not integration"
+```bash
+make integration              # tests/test_demo_integration.py, clés .env, sans les volumes de données
+make demo-tests               # essais Demo en lecture seule
+make demo-tests EXECUTE=1     # ajoute /order/test (aucune exécution)
+make open-orders SYMBOL=BTCUSDT   # ordres ouverts et rapprochement, lecture seule
 ```
 
 Aucun test destructif n'est lancé automatiquement au démarrage de l'application.
 
 ## 11. Où sont les données et les logs
+
+Dans les conteneurs, sous `/app/data` (volume `bsm-data`) et `/app/logs` (volume
+`bsm-logs`). Consultation : `make shell SERVICE=worker`, ou `make backup` pour
+une copie hors Docker.
 
 | Chemin | Contenu |
 |---|---|
@@ -322,18 +349,22 @@ Aucun test destructif n'est lancé automatiquement au démarrage de l'applicatio
 
 ## 12. Résolution de problèmes
 
-**Le worker ne démarre pas.** Vérifier `data/bot_worker.lock` : s'il contient un PID mort,
-Settings → *Nettoyer l'état du worker*. Si un worker vivant le détient, l'arrêter d'abord.
+**Le worker ne démarre pas.** `make ps` puis `make logs SERVICE=worker`. Le message
+« Un worker est deja actif » signifie qu'un autre worker utilise les mêmes données
+(par exemple un `make run` resté ouvert) : l'arrêter d'abord.
 
-**Le dashboard affiche « Worker inactif » avec un heartbeat ancien.** Le processus est
-probablement bloqué : *Arrêt forcé*, puis nettoyage, puis redémarrage.
+**Le Dashboard affiche « Worker en veille ».** Un arrêt propre a été demandé :
+*Démarrer* le relance.
+
+**Le Dashboard n'a plus de heartbeat du worker.** Le conteneur est arrêté ou bloqué :
+`make worker-restart`, puis `make logs SERVICE=worker`.
 
 **Les ordres n'apparaissent pas.** En `DRY_RUN`, aucun ordre n'existe côté Binance — c'est
 le comportement attendu. Sinon, vérifier que les clés API sont renseignées et que le compte
 Demo est actif.
 
 **`Filter failure`** — les quantités ou prix ne respectent pas les filtres. Vérifier via
-`check_connection.py` : `minQty`, `minNotional`, `tickSize`, `stepSize` de la paire.
+`make check` : `minQty`, `minNotional`, `tickSize`, `stepSize` de la paire.
 
 **Paire inexistante ou non vérifiable** — erreur réseau ou symbole erroné ; New Trade
 affiche le détail.

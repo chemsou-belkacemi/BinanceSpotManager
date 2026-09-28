@@ -1,0 +1,68 @@
+# BinanceSpotManager : interface Streamlit + worker, un seul hote.
+#
+# Les deux services partagent les volumes data/ et logs/ : file de commandes,
+# journal d'intentions d'ordres (SQLite) et verrou anti double-worker. Ne pas
+# lancer plusieurs replicas du worker, ni deplacer ces volumes sur un partage
+# reseau : les verrous de fichiers et SQLite exigent un seul noyau.
+
+name: binance-spot-manager
+
+x-app: &app
+  build: .
+  image: binance-spot-manager:latest
+  init: true
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    BSM_WORKER_SUPERVISOR: docker
+  volumes:
+    - bsm-data:/app/data
+    - bsm-logs:/app/logs
+  restart: unless-stopped
+
+services:
+  worker:
+    <<: *app
+    command: ["python", "scripts/bot_worker.py"]
+    # Laisse le worker terminer sa boucle en cours apres SIGTERM.
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "python", "scripts/worker_healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+
+  ui:
+    <<: *app
+    ports:
+      # Interface privee : jamais exposee au reseau local.
+      - "127.0.0.1:${BSM_UI_PORT:-8501}:8501"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+
+  # Outils ponctuels (make test) : aucun volume, aucun secret.
+  test:
+    build: .
+    image: binance-spot-manager:latest
+    profiles: ["tools"]
+    command: ["python", "-m", "pytest", "-m", "not integration", "-p", "no:cacheprovider"]
+
+  # make integration : cles Demo, mais jamais les volumes de donnees reels.
+  integration:
+    build: .
+    image: binance-spot-manager:latest
+    profiles: ["tools"]
+    env_file:
+      - path: .env
+        required: false
+    command: ["python", "-m", "pytest", "tests/test_demo_integration.py", "-p", "no:cacheprovider"]
+
+volumes:
+  bsm-data:
+  bsm-logs:
