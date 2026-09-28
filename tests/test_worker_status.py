@@ -452,3 +452,107 @@ def test_tp_notification_is_sent_even_when_cycle_also_reports_error():
         worker._process_position(position, 85000)
 
     assert sent == ["tp"]
+
+
+def _crossed_stop_worker(monkeypatch, *, price=80000.0, saved=None):
+    from binance_spot_manager.models import EventType
+
+    position = Position(symbol="BTCUSDT", base_asset="BTC", quote_asset="USDT")
+    position.status = PositionStatus.ACTIVE
+    worker = Worker.__new__(Worker)
+    events, sent, saved_positions, closes = [], [], [], []
+
+    def get_price(symbol):
+        if isinstance(price, Exception):
+            raise price
+        return price
+
+    worker.client = SimpleNamespace(get_price=get_price)
+    worker.execution = SimpleNamespace()
+    worker.positions = SimpleNamespace(save=saved_positions.append)
+    worker.events = SimpleNamespace(append=lambda event, message, **kw: events.append((event, kw.get("level"))))
+    worker.notifications = SimpleNamespace(
+        stop_crossed_exit=lambda *args: "exit",
+        stop_crossed_paused=lambda *args: "paused",
+        notify_position_event=lambda position, notice: sent.append(notice),
+    )
+    monkeypatch.setattr(
+        "scripts.bot_worker.get_settings_store",
+        lambda: SimpleNamespace(load=lambda: saved if saved is not None else {}),
+    )
+    monkeypatch.setattr(
+        "binance_spot_manager.market_close.close_market",
+        lambda position, execution, positions, reason: closes.append(reason) or {"message": "Vente au marche confirmee"},
+    )
+    return worker, position, SimpleNamespace(events=events, sent=sent, closes=closes, EventType=EventType)
+
+
+def test_crossed_stop_sells_at_market_after_fresh_price_check(monkeypatch):
+    from binance_spot_manager.models import CloseReason
+
+    worker, position, seen = _crossed_stop_worker(monkeypatch, price=80000.0)
+    worker._exit_on_crossed_stop(position, 80640.0)
+
+    assert seen.closes == [CloseReason.STOP_CROSSED]
+    assert seen.sent == ["exit"]
+    assert not position.automation.paused
+
+
+def test_crossed_stop_does_not_sell_when_price_recovered(monkeypatch):
+    worker, position, seen = _crossed_stop_worker(monkeypatch, price=81000.0)
+    worker._exit_on_crossed_stop(position, 80640.0)
+
+    assert seen.closes == [] and seen.sent == []
+    assert not position.automation.paused
+
+
+def test_crossed_stop_without_fresh_price_does_nothing(monkeypatch):
+    worker, position, seen = _crossed_stop_worker(monkeypatch, price=BinanceError("timeout"))
+    worker._exit_on_crossed_stop(position, 80640.0)
+
+    assert seen.closes == [] and seen.sent == []
+
+
+def test_crossed_stop_pauses_when_auto_exit_disabled(monkeypatch):
+    worker, position, seen = _crossed_stop_worker(
+        monkeypatch, price=80000.0, saved={"exit_on_crossed_stop": False},
+    )
+    worker._exit_on_crossed_stop(position, 80640.0)
+
+    assert seen.closes == []
+    assert position.automation.paused
+    assert seen.sent == ["paused"]
+    assert (seen.EventType.ERROR, "CRITICAL") in seen.events
+
+
+def test_crossed_stop_pauses_when_market_exit_fails(monkeypatch):
+    worker, position, seen = _crossed_stop_worker(monkeypatch, price=80000.0)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("Annulation non confirmee : aucune vente envoyee")
+
+    monkeypatch.setattr("binance_spot_manager.market_close.close_market", fail)
+    worker._exit_on_crossed_stop(position, 80640.0)
+
+    assert position.automation.paused
+    assert seen.sent == ["paused"]
+    assert (seen.EventType.ERROR, "CRITICAL") in seen.events
+
+
+def test_cycle_with_crossed_stop_triggers_exit_before_reporting_error():
+    from binance_spot_manager.automation_engine import CycleResult
+
+    position = Position(symbol="BTCUSDT", base_asset="BTC", quote_asset="USDT")
+    position.status = PositionStatus.ACTIVE
+    worker = Worker.__new__(Worker)
+    handled = []
+    worker.automation = SimpleNamespace(run_cycle=lambda p, price: CycleResult(
+        stop_crossed_at=80640.0, errors=["SL non recree : Stop price would trigger immediately."],
+    ))
+    worker.positions = SimpleNamespace(save=lambda p: None)
+    worker._exit_on_crossed_stop = lambda p, stop: handled.append(stop)
+
+    with pytest.raises(RuntimeError):
+        worker._process_position(position, 80000)
+
+    assert handled == [80640.0]

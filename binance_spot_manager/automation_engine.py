@@ -58,6 +58,8 @@ class CycleResult:
     position_finished: bool = False
     errors: list[str] = field(default_factory=list)
     exits_blocked: bool = False
+    #: Stop refuse par Binance car deja franchi : le worker decide de la sortie.
+    stop_crossed_at: Optional[float] = None
 
     @property
     def changed(self) -> bool:
@@ -274,6 +276,7 @@ class AutomationEngine:
                         result.actions.append(f"SL ajuste a {desired_qty} {position.base_asset}")
                     else:
                         result.errors.append(f"SL non ajuste : {adjusted.error}")
+                        self._note_crossed_stop(result, adjusted, sl.resolved_price)
                     return
             # L'ordre vit toujours et n'est pas rempli : la protection est en
             # place. On sort ici — sans ce retour, le bloc suivant recreerait un
@@ -319,6 +322,7 @@ class AutomationEngine:
                 result.actions.append(f"SL recree @ {sl.resolved_price}")
             else:
                 result.errors.append(f"SL non recree : {created.error}")
+                self._note_crossed_stop(result, created, sl.resolved_price)
 
     def _record_sl_execution(self, position, status, result):
         """Enregistre les cumuls ; un SL partiel ne ferme pas toute la position."""
@@ -351,6 +355,11 @@ class AutomationEngine:
                 EventType.ERROR, "SL partiellement execute : controle du reliquat requis",
                 position_id=position.position_id, symbol=position.symbol, level="CRITICAL",
             )
+
+    @staticmethod
+    def _note_crossed_stop(result: CycleResult, order, stop_price: Optional[float]) -> None:
+        if order.stop_would_trigger and stop_price:
+            result.stop_crossed_at = stop_price
 
     def _fetch_status_safe(
         self,
@@ -644,6 +653,7 @@ class AutomationEngine:
             result.actions.append("SL restaure apres tentative de TP")
         else:
             result.errors.append(f"SL non restaure apres TP : {restored.error}")
+            self._note_crossed_stop(result, restored, sl.resolved_price)
             self.events.append(
                 EventType.ERROR,
                 f"SL non restaure apres TP {position.symbol} : {restored.error}",
@@ -764,6 +774,11 @@ class AutomationEngine:
             )
         else:
             result.errors.append(f"SL non deplace : {order.error}")
+            if position.stop_loss.status is SLStatus.FAILED:
+                # L'ancien SL est deja annule : la prochaine protection doit
+                # viser le nouveau niveau, pas revenir a l'ancien stop.
+                position.stop_loss.resolved_price = new_price
+            self._note_crossed_stop(result, order, new_price)
 
     # ------------------------------------------------------------------
     # Fin de position

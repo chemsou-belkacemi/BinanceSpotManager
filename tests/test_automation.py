@@ -326,7 +326,7 @@ class FakeClient:
 def settings() -> Settings:
     return Settings(
         run_mode=RunMode.DEMO_AUTO,
-        demo_base_url="[testnet.binance.vision](https://testnet.binance.vision)",
+        demo_base_url="https://testnet.binance.vision",
         demo_api_key="key",
         demo_api_secret="secret",
         quote_asset="USDT",
@@ -1027,6 +1027,86 @@ def test_rejected_gtc_tp_is_retried_with_new_client_id(journaled, rules, events)
     assert len(fake.posted) == len(set(fake.posted)) == 2
 
 
+def test_crossed_stop_is_reported_to_worker(journaled, rules, events):
+    execution, fake = journaled
+    position = make_position(rules)
+    position.stop_loss.status = SLStatus.PLANNED
+    position.stop_loss.order_id = None
+    position.stop_loss.client_order_id = None
+    fake.reject["STOP_LOSS_LIMIT"] = [_rejection("Stop price would trigger immediately.")]
+
+    result = build_automation(execution, rules, events).run_cycle(position, 80500)
+
+    assert result.stop_crossed_at == pytest.approx(80640.0)
+
+
+def test_other_stop_rejection_is_not_a_crossed_stop(journaled, rules, events):
+    execution, fake = journaled
+    position = make_position(rules)
+    position.stop_loss.status = SLStatus.PLANNED
+    position.stop_loss.order_id = None
+    position.stop_loss.client_order_id = None
+    fake.reject["STOP_LOSS_LIMIT"] = [_rejection("Account has insufficient balance for requested action.")]
+
+    result = build_automation(execution, rules, events).run_cycle(position, 84000)
+
+    assert result.stop_crossed_at is None
+    assert position.stop_loss.status is SLStatus.FAILED
+
+
+def test_break_even_stop_rejected_after_tp_keeps_new_level(journaled, rules, events):
+    """TP1 vendu, SL vise le break-even, mais le prix est deja retombe dessous."""
+    execution, fake = journaled
+    position = make_position(rules, tp_rules={1: SLRuleAfterTP.BREAK_EVEN})
+    fake.reject["STOP_LOSS_LIMIT"] = [_rejection("Stop price would trigger immediately.")]
+
+    result = build_automation(execution, rules, events).run_cycle(position, 86600)
+
+    break_even = position.stop_loss.resolved_price
+    assert result.tp_executed == 1
+    assert break_even > 80640.0  # jamais de retour a l'ancien stop
+    assert result.stop_crossed_at == pytest.approx(break_even)
+
+
+def test_worker_sells_remainder_when_break_even_stop_is_already_crossed(
+    journaled, rules, events, tmp_path, monkeypatch
+):
+    """Chaine complete : TP1 vendu, SL break-even refuse, vente au marche du reliquat."""
+    from types import SimpleNamespace
+
+    from binance_spot_manager.models import CloseReason
+    from binance_spot_manager.position_store import PositionStore
+    from scripts import bot_worker
+
+    execution, fake = journaled
+    store = PositionStore(tmp_path / "positions")
+    position = make_position(rules, tp_rules={1: SLRuleAfterTP.BREAK_EVEN})
+    store.save(position)
+    monkeypatch.setattr(bot_worker, "get_settings_store", lambda: SimpleNamespace(load=lambda: {}))
+    worker = bot_worker.Worker.__new__(bot_worker.Worker)
+    worker.automation = build_automation(execution, rules, events)
+    worker.execution, worker.client, worker.positions, worker.events = execution, fake, store, events
+    sent = []
+    worker.notifications = SimpleNamespace(
+        tp_executed=lambda *a: "tp", sl_moved=lambda *a: "sl_moved",
+        stop_crossed_exit=lambda *a: "exit", stop_crossed_paused=lambda *a: "paused",
+        position_finished=lambda *a: "finished",
+        notify_position_event=lambda position, notice: sent.append(notice),
+    )
+    fake.reject["STOP_LOSS_LIMIT"] = [_rejection("Stop price would trigger immediately.")]
+    fake.price = 83000.0  # prix relu en REST : retombe sous le break-even
+
+    with pytest.raises(RuntimeError, match="SL non restaure"):
+        worker._process_position(position, 86600)
+
+    assert not position.is_open
+    assert position.close_reason is CloseReason.STOP_CROSSED
+    assert position.metrics.net_qty == pytest.approx(0.0)
+    assert "exit" in sent and "paused" not in sent
+    sells = [o for o in fake.created if o["type"] == "MARKET"]
+    assert [o["qty"] for o in sells] == pytest.approx([0.0036, 0.0024])
+
+
 def test_reused_client_id_still_blocks_as_uncertain(journaled, rules):
     """Le journal reste strict : un identifiant deja envoye n'est jamais renvoye."""
     execution, fake = journaled
@@ -1089,7 +1169,7 @@ def test_transport_failure_checks_before_retry(engine):
 def dry_run_settings() -> Settings:
     return Settings(
         run_mode=RunMode.DRY_RUN,
-        demo_base_url="[testnet.binance.vision](https://testnet.binance.vision)",
+        demo_base_url="https://testnet.binance.vision",
         demo_api_key="key",
         demo_api_secret="secret",
     )

@@ -69,6 +69,8 @@ class OrderResult:
     commissions: list[Commission] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
     error: str = ""
+    #: SL refuse par Binance parce que le prix a deja franchi le stop.
+    stop_would_trigger: bool = False
 
     @property
     def is_filled(self) -> bool:
@@ -692,7 +694,10 @@ class ExecutionEngine:
                     )
                 )
             else:
-                result = OrderResult(success=False, error=str(exc))
+                result = OrderResult(
+                    success=False, error=str(exc),
+                    stop_would_trigger=exc.is_stop_would_trigger,
+                )
 
         if result.success:
             position.stop_loss.order_id = result.order_id

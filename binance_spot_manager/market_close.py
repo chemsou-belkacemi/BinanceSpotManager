@@ -22,7 +22,7 @@ def apply_sale(position, sale, result, rules):
     sale.commissions = result.commissions
     recompute_position(position)
     if result.status == "FILLED" and float(rules.round_qty(position.metrics.net_qty, market=True)) == 0:
-        finish_position(position, CloseReason.MANUAL_CLOSE)
+        finish_position(position, sale.close_reason)
     elif result.status in TERMINAL:
         position.status = PositionStatus.ACTIVE
         position.log(EventType.ERROR, "Cloture incomplete : position en pause, solde restant a verifier")
@@ -41,7 +41,7 @@ def poll_market_close(position, execution):
     return True
 
 
-def close_market(position, execution, positions):
+def close_market(position, execution, positions, *, reason=CloseReason.MANUAL_CLOSE):
     if execution._dry_run():
         return {"message": "DRY_RUN : aucune annulation ni vente effectuee"}
     if any(sale.status not in TERMINAL for sale in position.manual_exits):
@@ -108,7 +108,7 @@ def close_market(position, execution, positions):
     recompute_position(position)
     positions.save(position)
     if position.metrics.net_qty <= 1e-12:
-        finish_position(position, CloseReason.MANUAL_CLOSE)
+        finish_position(position, reason)
         positions.save(position)
         return {"message": "Ordres annules ; aucun solde restant a vendre"}
     rules = execution.rules(position.symbol, refresh=True)
@@ -121,7 +121,8 @@ def close_market(position, execution, positions):
         raise RuntimeError("Solde libre insuffisant : aucune vente envoyee, position en pause")
     sale = ManualExit(client_order_id=build_client_order_id(
         symbol=position.symbol, position_id=position.position_id,
-        suffix=f"MC{len(position.manual_exits) + 1}", identity_version=2), requested_qty=qty)
+        suffix=f"MC{len(position.manual_exits) + 1}", identity_version=2), requested_qty=qty,
+        close_reason=reason)
     position.manual_exits.append(sale)
     positions.save(position)
     result = execution._create_order_safe(symbol=position.symbol, side="SELL", order_type="MARKET",

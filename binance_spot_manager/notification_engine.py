@@ -399,6 +399,39 @@ class NotificationEngine:
             symbol=position.symbol,
         )
 
+    def stop_crossed_exit(
+        self, position: Position, stop_price: float, market_price: float, outcome: str
+    ) -> Notification:
+        return Notification(
+            event="SL_EXECUTED",
+            title=f"Stop franchi — sortie au marché — {position.symbol}",
+            body=(
+                f"SL refusé par Binance : prix déjà sous le stop\n"
+                f"Stop : {stop_price}\n"
+                f"Prix au contrôle : {market_price}\n"
+                f"Résultat : {outcome}"
+            ),
+            level="WARNING",
+            position_id=position.position_id,
+            symbol=position.symbol,
+        )
+
+    def stop_crossed_paused(
+        self, position: Position, stop_price: float, reason: str
+    ) -> Notification:
+        return Notification(
+            event="BINANCE_ERROR",
+            title=f"Stop franchi — position en pause — {position.symbol}",
+            body=(
+                f"Stop : {stop_price}\n"
+                f"{reason}\n"
+                f"Position sans protection : vérifier sur Binance Demo."
+            ),
+            level="CRITICAL",
+            position_id=position.position_id,
+            symbol=position.symbol,
+        )
+
     def position_finished(self, position: Position) -> Notification:
         return Notification(
             event="POSITION_FINISHED",

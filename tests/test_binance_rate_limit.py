@@ -41,3 +41,14 @@ def test_429_starts_cooldown_without_second_http_request(monkeypatch):
 ])
 def test_write_error_classification(error, ambiguous):
     assert error.is_ambiguous_write is ambiguous
+
+
+@pytest.mark.parametrize("message, expected", [
+    ("Stop price would trigger immediately.", True),
+    ("Order would immediately trigger.", True),
+    ("Account has insufficient balance for requested action.", False),
+])
+def test_stop_would_trigger_is_recognised(message, expected):
+    from binance_spot_manager.binance_client import BinanceError
+
+    assert BinanceError(message, code=-2010, status=400).is_stop_would_trigger is expected

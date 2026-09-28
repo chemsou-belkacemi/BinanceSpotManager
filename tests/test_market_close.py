@@ -291,3 +291,14 @@ def test_portfolio_revalues_from_stream_and_shares_one_second_rest_reads(setup, 
     now[0] = 1.01
     service.portfolio()
     assert len(balance_reads) == 2
+
+
+def test_stop_crossed_exit_records_its_own_close_reason(setup):
+    from binance_spot_manager.models import CloseReason
+
+    position, _, store, execution, _, _ = setup
+    close_market(position, execution, store, reason=CloseReason.STOP_CROSSED)
+
+    assert not position.is_open
+    assert position.close_reason is CloseReason.STOP_CROSSED
+    assert store.load(position.position_id).manual_exits[-1].close_reason is CloseReason.STOP_CROSSED

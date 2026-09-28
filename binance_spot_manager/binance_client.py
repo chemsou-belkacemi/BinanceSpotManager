@@ -69,6 +69,12 @@ class BinanceError(RuntimeError):
         return self.code == -2010 and "duplicate" in self.message.lower()
 
     @property
+    def is_stop_would_trigger(self) -> bool:
+        """Refus d'un ordre stop : le prix a deja franchi le niveau demande."""
+        message = self.message.lower()
+        return "trigger immediately" in message or "immediately trigger" in message
+
+    @property
     def is_filter_failure(self) -> bool:
         return "filter failure" in self.message.lower()
 

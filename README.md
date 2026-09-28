@@ -252,6 +252,26 @@ envoyées en texte, pour éviter la notation scientifique que Binance refuse.
 **Fenêtre non protégée signalée.** Si le SL ne peut pas être recréé après un déplacement,
 l'événement est journalisé en niveau `CRITICAL` plutôt que masqué.
 
+**Stop déjà franchi.** Si Binance refuse le SL parce que le prix est déjà sous
+le stop (cas typique : SL remonté au break-even après un TP alors que le cours
+est retombé), le worker relit le prix en REST et, s'il reste sous le stop, vend
+au marché la quantité nette de cette position via la clôture au marché
+(raison `STOP_CROSSED`). Si le prix est remonté, le SL est simplement recréé.
+Si la vente est impossible ou incertaine, la position est mise en pause avec
+une alerte critique, sans renvoi automatique. Settings → *Vendre au marché si
+le stop est déjà franchi* permet de toujours choisir la pause. Une vente au
+marché peut s'exécuter sous le stop.
+
+**Refus Binance et nouvel identifiant.** Un ordre SL ou TP refusé de façon
+certaine par Binance est retenté avec un nouveau `clientOrderId` ; seul un
+résultat incertain (timeout, `5xx`) bloque pour vérification.
+
+**Notifications limitées.** Les erreurs et désynchronisations répétées sont
+envoyées au plus une fois par minute, et un message identique au plus une fois
+par quart d'heure ; le message suivant indique combien ont été regroupés. Les
+TP, SL et fins de position ne sont jamais limités. Le worker envoie depuis un
+thread dédié pour ne pas ralentir la surveillance.
+
 ## 10. Tests
 
 Tests hors ligne (aucun réseau, aucun ordre) :

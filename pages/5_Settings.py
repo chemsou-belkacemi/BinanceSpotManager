@@ -143,6 +143,15 @@ with tabs[1]:
         max_value=600,
         value=int(saved.get("heartbeat_stale_after", settings.heartbeat_stale_after)),
     )
+    exit_on_crossed_stop = st.toggle(
+        "Vendre au marché si le stop est déjà franchi",
+        value=bool(saved.get("exit_on_crossed_stop", True)),
+        help=(
+            "Quand Binance refuse le SL parce que le prix est déjà sous le stop, le worker "
+            "relit le prix puis vend la quantité de cette position au marché. Désactivé : "
+            "la position est mise en pause, sans protection, avec une alerte."
+        ),
+    )
 
     st.subheader("Risque portefeuille")
     max_risk = st.number_input(
@@ -269,6 +278,7 @@ with tabs[1]:
             {
                 "worker_interval": int(interval),
                 "heartbeat_stale_after": int(heartbeat_warn),
+                "exit_on_crossed_stop": bool(exit_on_crossed_stop),
                 "max_risk_per_position_percent": float(max_risk),
                 "max_total_risk_percent": float(max_total_risk),
                 "max_open_positions": int(max_positions),

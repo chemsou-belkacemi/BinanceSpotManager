@@ -314,8 +314,67 @@ class Worker:
             self.notifications.notify_position_event(
                 position, self.notifications.position_finished(position)
             )
+        if outcome.stop_crossed_at is not None and position.is_open:
+            self._exit_on_crossed_stop(position, outcome.stop_crossed_at)
         if outcome.errors:
             raise RuntimeError(" ; ".join(outcome.errors))
+
+    def _exit_on_crossed_stop(self, position, stop_price: float) -> None:
+        """Binance refuse le SL car le prix a deja franchi le stop : sortir ou mettre en pause.
+
+        Le prix est relu en REST avant toute vente. La vente passe par la cloture
+        au marche : intention persistee avant l'envoi, annulations confirmees,
+        quantite nette de cette position uniquement, aucun renvoi automatique.
+        """
+        from binance_spot_manager.market_close import close_market
+
+        saved = get_settings_store().load()
+        if isinstance(saved, dict) and not saved.get("exit_on_crossed_stop", True):
+            self._pause_on_crossed_stop(
+                position, stop_price, "Sortie automatique desactivee dans Settings"
+            )
+            return
+        try:
+            price = self.client.get_price(position.symbol)
+        except Exception as exc:  # noqa: BLE001 - sans prix frais, aucune vente
+            logging.getLogger("bsm.worker").warning(
+                "Prix REST indisponible pour %s : sortie reportee (%s)", position.symbol, exc,
+            )
+            return
+        if price > stop_price:
+            # Le prix est repasse au-dessus du stop : le SL sera recree au prochain cycle.
+            return
+
+        self.events.append(
+            EventType.SL_EXECUTED,
+            f"Stop franchi ({position.symbol}) : prix {price} <= stop {stop_price}, vente au marche",
+            position_id=position.position_id, symbol=position.symbol, level="WARNING",
+        )
+        try:
+            result = close_market(
+                position, self.execution, self.positions, reason=CloseReason.STOP_CROSSED,
+            )
+        except Exception as exc:  # noqa: BLE001 - issue incertaine : pause, jamais de renvoi
+            self._pause_on_crossed_stop(position, stop_price, f"Sortie au marche impossible : {exc}")
+            return
+        self.notifications.notify_position_event(
+            position,
+            self.notifications.stop_crossed_exit(
+                position, stop_price, price, result.get("message", ""),
+            ),
+        )
+
+    def _pause_on_crossed_stop(self, position, stop_price: float, reason: str) -> None:
+        position.automation.paused = True
+        self.positions.save(position)
+        self.events.append(
+            EventType.ERROR,
+            f"Stop franchi ({position.symbol}) : {reason}. Position en pause, sans protection",
+            position_id=position.position_id, symbol=position.symbol, level="CRITICAL",
+        )
+        self.notifications.notify_position_event(
+            position, self.notifications.stop_crossed_paused(position, stop_price, reason),
+        )
 
     def _monitor_oco(self, position, price: Optional[float]) -> None:
         """Lecture seule des deux branches : jamais de deuxième vente locale."""

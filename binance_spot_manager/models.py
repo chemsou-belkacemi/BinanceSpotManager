@@ -159,6 +159,7 @@ class CloseReason(str, Enum):
     ALL_TP_HIT = "ALL_TP_HIT"
     SL_EXECUTED = "SL_EXECUTED"
     MANUAL_CLOSE = "MANUAL_CLOSE"
+    STOP_CROSSED = "STOP_CROSSED"
     CANCELED_BEFORE_FILL = "CANCELED_BEFORE_FILL"
     ERROR = "ERROR"
 
@@ -500,6 +501,7 @@ class ManualExit(BSMModel):
     average_fill_price: float = 0.0
     commissions: list[Commission] = Field(default_factory=list)
     status: str = "UNKNOWN"
+    close_reason: CloseReason = CloseReason.MANUAL_CLOSE
 
     def commission_total(self, asset: str) -> float:
         return sum(c.amount for c in self.commissions if c.asset == asset)
