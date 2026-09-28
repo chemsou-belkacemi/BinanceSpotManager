@@ -266,6 +266,9 @@ class Worker:
             return
 
         outcome = self.automation.run_cycle(position, price)
+        self.positions.save(position)
+        if outcome.errors:
+            raise RuntimeError(" ; ".join(outcome.errors))
         if outcome.tp_executed is not None:
             executed_tp = next(
                 (t for t in position.take_profits if t.sequence_number == outcome.tp_executed),
@@ -286,7 +289,6 @@ class Worker:
             self.notifications.notify_position_event(
                 position, self.notifications.position_finished(position)
             )
-        self.positions.save(position)
 
     def _monitor_oco(self, position, price: Optional[float]) -> None:
         """Lecture seule des deux branches : jamais de deuxième vente locale."""

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -62,8 +63,19 @@ class EventStore:
         if not self.path.exists():
             return []
         try:
-            with self.path.open("r", encoding="utf-8") as handle:
-                lines = handle.readlines()
+            with self.path.open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                cursor = handle.tell()
+                chunks = []
+                newline_count = 0
+                while cursor > 0 and newline_count <= max(limit, 1):
+                    size = min(cursor, 65536)
+                    cursor -= size
+                    handle.seek(cursor)
+                    chunk = handle.read(size)
+                    chunks.append(chunk)
+                    newline_count += chunk.count(b"\n")
+                lines = b"".join(reversed(chunks)).decode("utf-8", errors="replace").splitlines()
         except OSError as exc:
             logger.error("Lecture journal impossible : %s", exc)
             return []
@@ -122,7 +134,7 @@ def configure_logging(level: int = logging.INFO) -> None:
 
     log_file = ERROR_LOG_FILE.parent / "bot.log"
     try:
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler = RotatingFileHandler(log_file, maxBytes=5_000_000, backupCount=3, encoding="utf-8")
         file_handler.setFormatter(formatter)
         root.addHandler(file_handler)
     except OSError:

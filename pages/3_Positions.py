@@ -504,7 +504,8 @@ if position.is_open and position.metrics.net_qty > 0 and sl.status is not SLStat
             result = execution.move_stop_loss(
                 position, new_stop_price=target, quantity=remaining
             )
-            position.stop_loss.resolved_price = target
+            if result.success:
+                position.stop_loss.resolved_price = target
             recompute_position(position)
             service.positions.save(position)
 

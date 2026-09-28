@@ -20,9 +20,10 @@ CACHE_TTL_SECONDS = 3600
 
 def _d(value: Any) -> Decimal:
     """Conversion robuste vers Decimal (accepte str, int, float, Decimal)."""
-    if isinstance(value, Decimal):
-        return value
-    return Decimal(str(value))
+    result = value if isinstance(value, Decimal) else Decimal(str(value))
+    if not result.is_finite():
+        raise ValueError("Prix ou quantite non fini")
+    return result
 
 
 def format_decimal(value: Decimal) -> str:

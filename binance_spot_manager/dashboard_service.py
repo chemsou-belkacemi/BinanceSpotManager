@@ -258,6 +258,8 @@ class DashboardService:
         if quote_free is None:
             quote_free = self.portfolio(live=False).quote_free
         positions = self.positions.list_all()
+        if self.positions.read_errors:
+            raise ValueError("Risque incomplet : une position locale est illisible")
         quote_assets = {p.quote_asset for p in positions if p.is_open}
         rates = {self.settings.quote_asset: 1.0}
         if quote_assets - rates.keys():

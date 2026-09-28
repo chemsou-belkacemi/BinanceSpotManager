@@ -134,7 +134,7 @@ class RiskEngine:
 
         total_capital = max(snapshot.total_capital, 0.0)
         if total_capital <= 0:
-            report.warn("Portefeuille vide : limites de risque non evaluables")
+            report.refuse("Capital indisponible ou nul : limites de risque non evaluables")
             return report
 
         planned_risk = abs(plan.loss_max_estimated)

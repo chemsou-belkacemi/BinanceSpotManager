@@ -141,11 +141,17 @@ class ReconciliationEngine:
         wallet_free_qty: Optional[float] = None,
         apply: bool = True,
     ) -> ReconciliationReport:
+        if not apply:
+            position = position.model_copy(deep=True)
         report = ReconciliationReport(
             position_id=position.position_id,
             symbol=position.symbol,
             checked_at=utcnow(),
         )
+
+        if position.oco_exit is not None:
+            report.add("OCO_MONITOR", "OCO suivi par le worker : utiliser le controle TP/SL de Settings", severity="INFO")
+            return report
 
         if self.execution.settings.dry_run:
             # En DRY_RUN il n'y a rien a comparer : aucun ordre n'existe.
@@ -179,19 +185,21 @@ class ReconciliationEngine:
                 SyncStatus.MANUAL_CHANGE if has_manual else SyncStatus.DESYNC_DETECTED
             )
             position.sync_status = report.status
-            self.events.append(
-                EventType.MANUAL_CHANGE if has_manual else EventType.DESYNC_DETECTED,
-                f"{len(report.findings)} ecart(s) detecte(s) sur {position.symbol}",
-                position_id=position.position_id,
-                symbol=position.symbol,
-                level="WARNING",
-                findings=[f.message for f in report.findings],
-            )
-            position.log(
-                EventType.MANUAL_CHANGE if has_manual else EventType.DESYNC_DETECTED,
-                f"{len(report.findings)} ecart(s) avec Binance",
-                status=report.status.value,
-            )
+            if apply:
+                self.events.append(
+                    EventType.MANUAL_CHANGE if has_manual else EventType.DESYNC_DETECTED,
+                    f"{len(report.findings)} ecart(s) detecte(s) sur {position.symbol}",
+                    position_id=position.position_id,
+                    symbol=position.symbol,
+                    level="WARNING",
+                    findings=[f.message for f in report.findings],
+                )
+            if apply:
+                position.log(
+                    EventType.MANUAL_CHANGE if has_manual else EventType.DESYNC_DETECTED,
+                    f"{len(report.findings)} ecart(s) avec Binance",
+                    status=report.status.value,
+                )
         else:
             if position.sync_status is not SyncStatus.SYNCED:
                 position.sync_status = SyncStatus.RECONCILED
@@ -429,7 +437,7 @@ class ReconciliationEngine:
                         suggested_action="Enregistrer la sortie et cloturer la position",
                         executed_qty=status.executed_qty,
                     )
-                else:
+                elif status is not None and status.is_terminal_dead:
                     sl.status = SLStatus.CANCELED
                     report.add(
                         "MANUAL_CHANGE",
@@ -437,6 +445,12 @@ class ReconciliationEngine:
                         severity="CRITICAL",
                         target_type="SL",
                         suggested_action="Recréer un SL depuis le Dashboard",
+                    )
+                else:
+                    report.add(
+                        "UNKNOWN_ORDER", "SL non confirme : son absence des ordres ouverts ne prouve pas une annulation",
+                        severity="CRITICAL", target_type="SL",
+                        suggested_action="Verifier le statut Binance avant toute action",
                     )
 
         # Le SL ne peut proteger que la quantite vendable au pas LOT_SIZE.

@@ -57,6 +57,7 @@ class CycleResult:
     sl_moved_to: Optional[float] = None
     position_finished: bool = False
     errors: list[str] = field(default_factory=list)
+    exits_blocked: bool = False
 
     @property
     def changed(self) -> bool:
@@ -131,7 +132,7 @@ class AutomationEngine:
         try:
             self._check_expired_entries(position, result)
             self._check_stop_loss(position, current_price, result)
-            if not result.position_finished:
+            if not result.position_finished and not result.exits_blocked:
                 self._check_take_profits(position, current_price, result)
         except Exception as exc:  # noqa: BLE001 — une position ne doit pas tuer le worker
             logger.exception("Cycle automation en echec (%s)", position.symbol)
@@ -211,17 +212,14 @@ class AutomationEngine:
             )
             if status is None:
                 position.sync_status = SyncStatus.DESYNC_DETECTED
+                result.exits_blocked = True
                 result.actions.append("SL incertain : verification Binance requise")
                 return
             if status.executed_qty > QTY_EPSILON:
-                self.position_engine.apply_sl_fill(
-                    position,
-                    executed_qty=status.executed_qty,
-                    average_price=status.average_price,
-                    quote_received=status.cummulative_quote_qty,
-                    commissions=status.commissions,
-                )
-                result.position_finished = True
+                sl.order_id = status.order_id
+                if status.is_open:
+                    sl.status = SLStatus.ACTIVE
+                self._record_sl_execution(position, status, result)
                 return
             if status.is_open:
                 sl.order_id = status.order_id
@@ -245,17 +243,17 @@ class AutomationEngine:
                 # uniquement s'il est rempli), soit annule manuellement.
                 result.actions.append("SL introuvable cote Binance — reconciliation requise")
                 position.sync_status = position.sync_status.__class__.DESYNC_DETECTED
+                result.exits_blocked = True
                 return
             if status is not None and status.executed_qty > QTY_EPSILON:
-                self.position_engine.apply_sl_fill(
-                    position,
-                    executed_qty=status.executed_qty,
-                    average_price=status.average_price,
-                    quote_received=status.cummulative_quote_qty,
-                    commissions=status.commissions,
-                )
-                result.actions.append(f"SL execute @ {status.average_price}")
-                result.position_finished = True
+                self._record_sl_execution(position, status, result)
+                return
+            if status is not None and status.is_terminal_dead:
+                sl.status = SLStatus.CANCELED
+                position.sync_status = SyncStatus.DESYNC_DETECTED
+                position.automation.paused = True
+                result.exits_blocked = True
+                result.errors.append("SL termine sans vente : protection absente, automatisation en pause")
                 return
             next_tp = position.next_tp
             tp_due = bool(
@@ -321,6 +319,38 @@ class AutomationEngine:
                 result.actions.append(f"SL recree @ {sl.resolved_price}")
             else:
                 result.errors.append(f"SL non recree : {created.error}")
+
+    def _record_sl_execution(self, position, status, result):
+        """Enregistre les cumuls ; un SL partiel ne ferme pas toute la position."""
+        sl = position.stop_loss
+        remaining = max(position.metrics.net_qty + sl.executed_qty - status.executed_qty, 0.0)
+        if status.is_filled and float(self._rules(position).round_qty(remaining)) <= 0:
+            self.position_engine.apply_sl_fill(
+                position, executed_qty=status.executed_qty,
+                average_price=status.average_price, quote_received=status.cummulative_quote_qty,
+                commissions=status.commissions,
+            )
+            result.actions.append(f"SL execute @ {status.average_price}")
+            result.position_finished = True
+            return
+        changed = abs(sl.executed_qty - status.executed_qty) > QTY_EPSILON
+        sl.executed_qty = status.executed_qty
+        sl.average_fill_price = status.average_price
+        sl.quote_received = status.cummulative_quote_qty
+        if status.commissions:
+            sl.commissions = list(status.commissions)
+        if not status.is_open:
+            sl.status = SLStatus.CANCELED
+            position.automation.paused = True
+        position.sync_status = SyncStatus.DESYNC_DETECTED
+        result.exits_blocked = True
+        recompute_position(position)
+        result.errors.append("SL partiellement execute : reliquat a controler, aucune vente TP supplementaire")
+        if changed:
+            self.events.append(
+                EventType.ERROR, "SL partiellement execute : controle du reliquat requis",
+                position_id=position.position_id, symbol=position.symbol, level="CRITICAL",
+            )
 
     def _fetch_status_safe(
         self,
@@ -719,10 +749,9 @@ class AutomationEngine:
         order = self.execution.move_stop_loss(
             position, new_stop_price=new_price, quantity=remaining
         )
-        position.stop_loss.resolved_price = new_price
-        recompute_position(position)
-
         if order.success:
+            position.stop_loss.resolved_price = new_price
+            recompute_position(position)
             result.sl_moved_to = new_price
             result.actions.append(f"SL deplace vers {new_price}")
             position.log(

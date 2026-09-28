@@ -5,14 +5,20 @@ from pathlib import Path
 from streamlit.testing.v1 import AppTest
 
 from binance_spot_manager.bot_process_manager import WorkerStatus
+from binance_spot_manager.position_store import PositionStore
 from ui_common import get_service
 
 
 DASHBOARD = Path(__file__).resolve().parents[1] / "pages" / "1_Dashboard.py"
 
 
-def test_one_stop_click_waits_then_refreshes(monkeypatch):
+def test_one_stop_click_waits_then_refreshes(monkeypatch, tmp_path):
     service = get_service()
+    # Ce test d'interface ne doit consulter ni le portefeuille reel ni Binance.
+    monkeypatch.setattr(service, "positions", PositionStore(tmp_path / "positions"))
+    monkeypatch.setattr(service.client, "get_balances", lambda: {})
+    monkeypatch.setattr(service.client, "get_prices", lambda: {})
+    monkeypatch.setattr(service.client, "get_open_orders", lambda *args, **kwargs: [])
     status = WorkerStatus(
         running=True, pid_alive=True, pid=12345, state="MONITORING",
     )

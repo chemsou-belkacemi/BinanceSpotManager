@@ -21,9 +21,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from binance_spot_manager.config import get_settings  # noqa: E402
-from binance_spot_manager.execution_engine import ExecutionEngine  # noqa: E402
+from binance_spot_manager.execution_engine import ExecutionEngine, build_client_order_id  # noqa: E402
 from binance_spot_manager.models import (  # noqa: E402
     EntryReference,
+    EntryStatus,
     EventType,
     OrderType,
     PriceMode,
@@ -630,6 +631,14 @@ confirm = st.checkbox(
 )
 
 if st.button(action_label, type="primary", disabled=not (confirm and ready)):
+    # Une protection OCO ne peut pas couvrir silencieusement un nouvel achat.
+    if existing is not None and existing.oco_exit is not None:
+        st.error("Ajout d'Entries sur OCO non pris en charge : conserver la protection existante.")
+        st.stop()
+    worker_now = service.worker_status()
+    if not settings.dry_run and (not worker_now.running or worker_now.heartbeat_age is None or worker_now.heartbeat_age >= 20):
+        st.error("Démarre le worker avant de créer une position avec sorties suivies.")
+        st.stop()
     spec.preset_name = preset_name
     spec.source_name = source_name or "manual"
     spec.tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
@@ -659,6 +668,14 @@ if st.button(action_label, type="primary", disabled=not (confirm and ready)):
     # -- 2. Envoie les Entries --------------------------------------------
     results: list[tuple[int, bool, str]] = []
     for entry in target_entries:
+        entry.client_order_id = entry.client_order_id or build_client_order_id(
+            symbol=position.symbol, position_id=position.position_id,
+            suffix=f"E{entry.sequence_number}", environment=position.environment,
+        )
+        if not settings.dry_run:
+            entry.status = EntryStatus.SUBMITTED
+        # Echec disque ou conflit : aucun ordre n'est envoye pour cette Entry.
+        service.positions.save(position)
         outcome = execution.place_entry(
             position, entry, current_price=float(price or 0.0)
         )
@@ -681,6 +698,10 @@ if st.button(action_label, type="primary", disabled=not (confirm and ready)):
                 commissions=outcome.commissions,
                 order_id=outcome.order_id,
             )
+        service.positions.save(position)
+        if not outcome.success:
+            st.warning("Envoi des Entries suivantes suspendu : vérifier le résultat de cet ordre.")
+            break
 
     service.positions.save(position)
 

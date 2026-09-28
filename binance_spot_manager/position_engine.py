@@ -491,9 +491,8 @@ def recompute_position(position: Position) -> Position:
 
     sold = sum(tp.executed_qty for tp in position.take_profits)
     received = sum(tp.quote_received for tp in position.take_profits)
-    if position.stop_loss.status is SLStatus.EXECUTED:
-        sold += position.stop_loss.executed_qty
-        received += position.stop_loss.quote_received
+    sold += position.stop_loss.executed_qty
+    received += position.stop_loss.quote_received
 
     metrics.total_bought_qty = total_bought
     metrics.total_sold_qty = sold
@@ -537,7 +536,7 @@ def recompute_position(position: Position) -> Position:
     )
 
     realized = sum(tp.gain_realized for tp in position.take_profits)
-    if position.stop_loss.status is SLStatus.EXECUTED and position.stop_loss.average_fill_price:
+    if position.stop_loss.executed_qty > 0 and position.stop_loss.average_fill_price:
         realized += (
             position.stop_loss.average_fill_price - metrics.average_price
         ) * position.stop_loss.executed_qty - position.stop_loss.commission_total(position.quote_asset)

@@ -32,6 +32,7 @@ from .config import (
     get_settings,
 )
 from .event_store import EventStore, log_error
+from .file_mutex import FileMutex
 from .models import BotRuntime, EventType, WorkerState, utcnow
 from .position_store import RuntimeStore, atomic_write_json, read_json
 
@@ -127,6 +128,7 @@ class WorkerLock:
 
     def __init__(self, path: Optional[Path] = None) -> None:
         self.path = Path(path) if path else BOT_LOCK_FILE
+        self._lease = FileMutex(self.path.with_suffix(self.path.suffix + ".lease"))
 
     def read_owner(self) -> Optional[int]:
         payload = read_json(self.path)
@@ -146,12 +148,19 @@ class WorkerLock:
     def acquire(self, pid: Optional[int] = None) -> bool:
         """Prend le verrou. False si un autre worker vivant le detient."""
         my_pid = pid or os.getpid()
-        if self.is_held_by_other(my_pid):
+        if not self._lease.acquire():
             return False
-        atomic_write_json(
-            self.path,
-            {"pid": my_pid, "acquired_at": utcnow().isoformat()},
-        )
+        if self.is_held_by_other(my_pid):
+            self._lease.release()
+            return False
+        try:
+            atomic_write_json(
+                self.path,
+                {"pid": my_pid, "acquired_at": utcnow().isoformat()},
+            )
+        except Exception:
+            self._lease.release()
+            raise
         return True
 
     def release(self, pid: Optional[int] = None) -> None:
@@ -159,6 +168,7 @@ class WorkerLock:
         owner = self.read_owner()
         if owner is None or owner == my_pid:
             self.path.unlink(missing_ok=True)
+        self._lease.release()
 
     def force_release(self) -> None:
         """Libere un verrou orphelin (PID mort). Jamais sur un worker vivant."""

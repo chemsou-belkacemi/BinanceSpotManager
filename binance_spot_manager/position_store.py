@@ -16,6 +16,8 @@ import json
 import logging
 import os
 import tempfile
+import re
+import time
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -27,8 +29,13 @@ from .config import (
     ensure_directories,
 )
 from .models import BotRuntime, Position, PositionStatus, utcnow
+from .file_mutex import FileMutex
 
 logger = logging.getLogger("bsm.store")
+
+
+class ConcurrentPositionUpdate(RuntimeError):
+    """Une version plus recente existe : recharger, ne jamais ecraser."""
 
 
 def atomic_write_text(path: Path, content: str) -> None:
@@ -55,7 +62,7 @@ def atomic_write_text(path: Path, content: str) -> None:
 
 
 def atomic_write_json(path: Path, payload: Any) -> None:
-    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2, default=str, allow_nan=False))
 
 
 def read_json(path: Path) -> Optional[Any]:
@@ -82,6 +89,8 @@ class PositionStore:
     # -- chemins --------------------------------------------------------
 
     def path_for(self, position_id: str) -> Path:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", position_id):
+            raise ValueError("Identifiant de position invalide")
         return self.directory / f"{position_id}.json"
 
     def exists(self, position_id: str) -> bool:
@@ -90,16 +99,43 @@ class PositionStore:
     # -- ecriture -------------------------------------------------------
 
     def save(self, position: Position) -> Path:
-        position.touch()
         path = self.path_for(position.position_id)
-        atomic_write_json(path, position.model_dump(mode="json"))
+        Position.model_validate(position.model_dump(mode="python"))
+        with FileMutex(self.directory / ".write.lock"):
+            old = read_json(path)
+            if old is None and path.exists():
+                raise RuntimeError(f"Fichier illisible conserve : {path.name}")
+            if old is not None:
+                previous = Position.model_validate(old)
+                if previous.position_id != position.position_id:
+                    raise RuntimeError(f"Identifiant incoherent dans {path.name}")
+                if previous.revision != position.revision:
+                    raise ConcurrentPositionUpdate(
+                        f"{position.symbol} : position modifiee par un autre processus. "
+                        "Recharger et verifier Binance avant de reprendre l'action."
+                    )
+                backup = self.directory / ".backups" / path.name
+                if not backup.exists() or time.time() - backup.stat().st_mtime >= 60:
+                    atomic_write_json(backup, old)
+            if position.is_open and (old is None or not previous.is_open):
+                existing = self.list_all()
+                if self.read_errors:
+                    raise RuntimeError("Creation refusee : positions locales illisibles")
+                if any(p.is_open and p.symbol == position.symbol and p.position_id != position.position_id for p in existing):
+                    raise ValueError(f"Une position active existe deja sur {position.symbol}")
+            position.touch()
+            payload = position.model_dump(mode="json")
+            payload["revision"] = position.revision + 1
+            atomic_write_json(path, payload)
+            position.revision = payload["revision"]
         return path
 
     def delete(self, position_id: str) -> bool:
         path = self.path_for(position_id)
-        if path.exists():
-            path.unlink()
-            return True
+        with FileMutex(self.directory / ".write.lock"):
+            if path.exists():
+                path.unlink()
+                return True
         return False
 
     # -- lecture --------------------------------------------------------
@@ -109,7 +145,10 @@ class PositionStore:
         if raw is None:
             return None
         try:
-            return Position.model_validate(raw)
+            position = Position.model_validate(raw)
+            if position.position_id != position_id or not position.symbol:
+                raise ValueError("Identifiant ou symbole incoherent")
+            return position
         except Exception as exc:
             logger.error("Position illisible %s : %s", position_id, exc)
             return None
@@ -124,7 +163,10 @@ class PositionStore:
                 self.read_errors.append(f"{path.name} : fichier vide, illisible ou JSON invalide")
                 continue
             try:
-                positions.append(Position.model_validate(raw))
+                position = Position.model_validate(raw)
+                if position.position_id != path.stem or not position.symbol:
+                    raise ValueError("Identifiant ou symbole incoherent")
+                positions.append(position)
             except Exception as exc:
                 self.read_errors.append(f"{path.name} : modele de position invalide")
                 logger.error("Position ignoree (%s) : %s", path.name, exc)

@@ -20,7 +20,8 @@ from urllib.parse import urlencode
 
 import requests
 
-from .config import Settings, get_settings
+from .config import DATA_DIR, ALLOWED_DEMO_BASE_URLS, SecurityError, Settings, get_settings
+from .order_journal import OrderJournal
 
 logger = logging.getLogger("bsm.binance")
 
@@ -75,7 +76,7 @@ class BinanceError(RuntimeError):
     def is_ambiguous_write(self) -> bool:
         """La requete a pu atteindre Binance sans reponse exploitable."""
         return (
-            self.code == -1007
+            self.code in {-1006, -1007}
             or self.status is not None and self.status >= 500
             or self.status is None and self.code is None
             and self.message.lower().startswith("echec reseau")
@@ -99,6 +100,7 @@ class BinanceSpotClient:
         self._time_offset_ms: int = 0
         self._time_synced_at: float = 0.0
         self._cooldown_until: float = 0.0
+        self._order_journal = OrderJournal(DATA_DIR / "order_intents.sqlite3")
 
     # ------------------------------------------------------------------
     # Transport
@@ -125,6 +127,11 @@ class BinanceSpotClient:
         if method in _WRITE_METHODS:
             # Garde-fou : refuse toute ecriture hors Demo whitelistee.
             self.settings.assert_write_allowed(f"{method} {endpoint}")
+            if self.settings.dry_run:
+                raise SecurityError("DRY_RUN : toute ecriture Binance est interdite")
+
+        if signed and (not self.settings.is_demo or self.base_url not in ALLOWED_DEMO_BASE_URLS):
+            raise SecurityError("Requete signee interdite hors Binance Demo")
 
         remaining = self._cooldown_until - time.monotonic()
         if remaining > 0:
@@ -133,6 +140,7 @@ class BinanceSpotClient:
                 status=429, endpoint=endpoint, retry_after=remaining,
             )
 
+        intent_payload = dict(payload)
         headers: dict[str, str] = {}
         if signed:
             if not self.settings.has_credentials:
@@ -146,6 +154,19 @@ class BinanceSpotClient:
             query = urlencode(payload, doseq=True)
             payload["signature"] = self._sign(query)
 
+        if method == "POST" and endpoint in {"/api/v3/order", "/api/v3/orderList/oco"}:
+            if self._cooldown_until > time.monotonic():
+                raise BinanceError("Limite Binance active apres synchronisation", status=429, endpoint=endpoint)
+            client_id = intent_payload.get("newClientOrderId") or intent_payload.get("listClientOrderId")
+            if not client_id:
+                raise SecurityError("Identifiant stable requis avant de creer un ordre Demo")
+            namespace = self.base_url + ":" + hashlib.sha256(self.settings.api_key.encode()).hexdigest()
+            if not self._order_journal.claim(namespace, str(intent_payload.get("symbol", "")), str(client_id), intent_payload):
+                raise BinanceError(
+                    "Intention deja enregistree : consulter Binance, aucun renvoi automatique",
+                    code=-1007, endpoint=endpoint,
+                )
+
         try:
             response = self._session.request(
                 method,
@@ -153,12 +174,21 @@ class BinanceSpotClient:
                 params=payload,
                 headers=headers,
                 timeout=self.settings.http_timeout,
+                allow_redirects=False,
             )
         except requests.RequestException as exc:
-            logger.error("Transport Binance KO %s %s : %s", method, endpoint, exc)
-            raise BinanceError(f"Echec reseau : {exc}", endpoint=endpoint) from exc
+            # Les exceptions requests peuvent contenir l'URL signee complete.
+            logger.error("Transport Binance KO %s %s : %s", method, endpoint, type(exc).__name__)
+            raise BinanceError(f"Echec reseau : {type(exc).__name__}", endpoint=endpoint) from None
 
-        return self._parse(response, endpoint)
+        body = self._parse(response, endpoint)
+        if method == "POST" and endpoint == "/api/v3/order":
+            if not isinstance(body, dict) or not body.get("orderId") or not body.get("status"):
+                raise BinanceError("Reponse d'ordre incomplete : statut inconnu", code=-1006, endpoint=endpoint)
+        if method == "POST" and endpoint == "/api/v3/orderList/oco":
+            if not isinstance(body, dict) or "orderListId" not in body or len(body.get("orders", [])) != 2:
+                raise BinanceError("Reponse OCO incomplete : statut inconnu", code=-1006, endpoint=endpoint)
+        return body
 
     def _parse(self, response: requests.Response, endpoint: str) -> Any:
         try:
@@ -166,9 +196,11 @@ class BinanceSpotClient:
         except ValueError:
             body = None
 
+        if 300 <= response.status_code < 400:
+            raise BinanceError("Redirection Binance refusee", code=-1006, endpoint=endpoint)
         if response.status_code >= 400:
             code = None
-            message = response.text[:400]
+            message = "Reponse HTTP Binance en erreur"
             retry_after = None
             if response.status_code in (418, 429):
                 try:
@@ -187,6 +219,9 @@ class BinanceSpotClient:
             if isinstance(body, dict):
                 code = body.get("code")
                 message = str(body.get("msg") or message)
+                for secret in (self.settings.api_key, self.settings.api_secret):
+                    if secret:
+                        message = message.replace(secret, "[REDACTED]")
             logger.error(
                 "Erreur Binance %s %s code=%s msg=%s",
                 response.status_code,
@@ -202,6 +237,8 @@ class BinanceSpotClient:
                 retry_after=retry_after,
             )
 
+        if body is None:
+            raise BinanceError("Reponse Binance non JSON : statut inconnu", code=-1006, endpoint=endpoint)
         return body
 
     def _sign(self, query: str) -> str:
@@ -262,7 +299,10 @@ class BinanceSpotClient:
         data = self._request(
             "GET", "/api/v3/ticker/price", params={"symbol": symbol.upper()}
         )
-        return float(data["price"])
+        value = float(data["price"])
+        if not math.isfinite(value) or value <= 0:
+            raise BinanceError("Prix Binance invalide", endpoint="/api/v3/ticker/price")
+        return value
 
     def get_prices(self, symbols: Optional[list[str]] = None) -> dict[str, float]:
         """Prix de plusieurs paires en un appel."""
@@ -275,6 +315,8 @@ class BinanceSpotClient:
         params = {"symbols": json.dumps(wanted, separators=(",", ":"))} if wanted else None
         data = self._request("GET", "/api/v3/ticker/price", params=params)
         prices = {row["symbol"]: float(row["price"]) for row in data or []}
+        if any(not math.isfinite(value) or value <= 0 for value in prices.values()):
+            raise BinanceError("Prix Binance invalide", endpoint="/api/v3/ticker/price")
         if symbols is None:
             return prices
         return {k: v for k, v in prices.items() if k in wanted}
@@ -307,7 +349,25 @@ class BinanceSpotClient:
 
     def get_open_orders(self, symbol: Optional[str] = None) -> list[dict[str, Any]]:
         params = {"symbol": symbol.upper()} if symbol else None
-        return self._request("GET", "/api/v3/openOrders", params=params, signed=True) or []
+        orders = self._request("GET", "/api/v3/openOrders", params=params, signed=True) or []
+        return [self._with_fills(order) for order in orders]
+
+    def _with_fills(self, order: dict[str, Any]) -> dict[str, Any]:
+        """Recupere les commissions absentes de GET order avant tout calcul net."""
+        executed = float(order.get("executedQty") or 0)
+        if executed <= 0 or order.get("fills"):
+            return order
+        trades = self.get_my_trades(order["symbol"], order_id=order["orderId"], limit=1000)
+        quantity = sum(float(trade.get("qty") or 0) for trade in trades)
+        if not math.isclose(quantity, executed, rel_tol=1e-9, abs_tol=1e-12):
+            raise BinanceError("Historique des executions incomplet : quantite nette non confirmee")
+        if any("commission" not in trade or not trade.get("commissionAsset") for trade in trades):
+            raise BinanceError("Commissions des executions indisponibles")
+        return order | {"fills": [
+            {"price": t["price"], "qty": t["qty"], "commission": t["commission"],
+             "commissionAsset": t["commissionAsset"], "tradeId": t.get("id")}
+            for t in trades
+        ]}
 
     def get_order(
         self,
@@ -318,7 +378,7 @@ class BinanceSpotClient:
     ) -> dict[str, Any]:
         if order_id is None and client_order_id is None:
             raise ValueError("order_id ou client_order_id requis")
-        return self._request(
+        order = self._request(
             "GET",
             "/api/v3/order",
             params={
@@ -328,6 +388,7 @@ class BinanceSpotClient:
             },
             signed=True,
         )
+        return self._with_fills(order)
 
     def get_order_list(
         self, *, order_list_id: Optional[int] = None,

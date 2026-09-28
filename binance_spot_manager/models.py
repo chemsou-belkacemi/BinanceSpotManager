@@ -205,7 +205,7 @@ class WorkerState(str, Enum):
 class BSMModel(BaseModel):
     """Base commune : enums serialises en valeur, mutation autorisee."""
 
-    model_config = ConfigDict(use_enum_values=False, validate_assignment=False)
+    model_config = ConfigDict(use_enum_values=False, validate_assignment=False, allow_inf_nan=False)
 
 
 # ==========================================================================
@@ -488,6 +488,7 @@ class OcoExit(BSMModel):
 
 
 class Position(BSMModel):
+    revision: int = 0
     position_id: str = Field(default_factory=lambda: new_id("pos"))
     symbol: str = ""
     base_asset: str = ""

@@ -43,6 +43,70 @@ from binance_spot_manager.symbol_rules import SymbolRules, parse_symbol_rules
 
 pytestmark = pytest.mark.unit
 
+
+@pytest.mark.parametrize("status", ["PARTIALLY_FILLED", "CANCELED", "FILLED"])
+def test_partial_sl_never_closes_remaining_position_or_sends_tp(engine, events, status):
+    execution, fake, rules = engine
+    position = make_position(rules)
+    fake.orders[SL_CLIENT_ID].update({
+        "status": status, "executedQty": "0.002", "cummulativeQuoteQty": "160",
+    })
+    automation = build_automation(execution, rules, events)
+    result = automation.run_cycle(position, 90000)  # prix qui declencherait aussi le TP
+    assert not result.position_finished
+    assert position.is_open
+    assert position.metrics.net_qty == pytest.approx(0.004)
+    assert result.exits_blocked
+    assert fake.created == []
+    assert fake.cancelled == []
+    automation.run_cycle(position, 90000)
+    assert position.metrics.net_qty == pytest.approx(0.004)
+
+
+def test_unknown_sl_blocks_local_tp_in_same_cycle(engine, events):
+    execution, fake, rules = engine
+    position = make_position(rules)
+    fake.orders.clear()
+    result = build_automation(execution, rules, events).run_cycle(position, 90000)
+    assert result.exits_blocked
+    assert fake.created == []
+
+
+def test_partial_sl_then_full_fill_accounts_cumulative_fees_once(engine, events):
+    execution, fake, rules = engine
+    position = make_position(rules)
+    order = fake.orders[SL_CLIENT_ID]
+    order.update({
+        "status": "PARTIALLY_FILLED", "executedQty": "0.002", "cummulativeQuoteQty": "160",
+        "fills": [{"qty": "0.002", "price": "80000", "commission": "0.16", "commissionAsset": "USDT"}],
+    })
+    automation = build_automation(execution, rules, events)
+    automation.run_cycle(position, 80000)
+    assert position.metrics.net_qty == pytest.approx(0.004)
+    order.update({
+        "status": "FILLED", "executedQty": "0.006", "cummulativeQuoteQty": "480",
+        "fills": [{"qty": "0.006", "price": "80000", "commission": "0.48", "commissionAsset": "USDT"}],
+    })
+    result = automation.run_cycle(position, 80000)
+    assert result.position_finished
+    assert not position.is_open
+    assert position.metrics.net_qty == pytest.approx(0)
+    assert position.stop_loss.executed_qty == pytest.approx(0.006)
+    assert position.stop_loss.commission_total("USDT") == pytest.approx(0.48)
+    automation.run_cycle(position, 80000)
+    assert position.stop_loss.quote_received == pytest.approx(480)
+    assert fake.created == []
+    assert fake.cancelled == []
+
+
+def test_sl_move_does_not_replace_order_if_cancellation_unconfirmed(engine):
+    execution, fake, rules = engine
+    position = make_position(rules)
+    fake.orders.clear()
+    result = execution.move_stop_loss(position, new_stop_price=82000, quantity=0.006)
+    assert not result.success
+    assert fake.created == []
+
 SYMBOL_INFO = {
     "symbol": "BTCUSDT",
     "baseAsset": "BTC",

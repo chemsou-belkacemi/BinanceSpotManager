@@ -119,12 +119,12 @@ class Settings(BaseModel):
     run_mode: RunMode = RunMode.DRY_RUN
 
     demo_base_url: str = "https://testnet.binance.vision"
-    demo_api_key: str = ""
-    demo_api_secret: str = ""
+    demo_api_key: str = Field(default="", repr=False, exclude=True)
+    demo_api_secret: str = Field(default="", repr=False, exclude=True)
 
     live_base_url: str = "https://api.binance.com"
-    live_api_key: str = ""
-    live_api_secret: str = ""
+    live_api_key: str = Field(default="", repr=False, exclude=True)
+    live_api_secret: str = Field(default="", repr=False, exclude=True)
 
     recv_window: int = 5000
     http_timeout: int = 10
@@ -142,12 +142,12 @@ class Settings(BaseModel):
     taker_fee_percent: float = 0.1
     maker_fee_percent: float = 0.1
 
-    telegram_bot_token: str = ""
+    telegram_bot_token: str = Field(default="", repr=False, exclude=True)
     telegram_chat_id: str = ""
     smtp_host: str = ""
     smtp_port: int = 587
     smtp_user: str = ""
-    smtp_password: str = ""
+    smtp_password: str = Field(default="", repr=False, exclude=True)
     smtp_from: str = ""
     smtp_to: str = ""
 

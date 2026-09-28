@@ -250,7 +250,7 @@ def test_find_entry_by_client_order_id(store):
 def test_atomic_write_leaves_no_temp_file(tmp_path):
     store = PositionStore(tmp_path)
     store.save(make_open_position("BTCUSDT"))
-    leftovers = [p for p in tmp_path.iterdir() if p.name.startswith(".")]
+    leftovers = list(tmp_path.glob("*.tmp"))
     assert leftovers == []
 
 
@@ -273,7 +273,9 @@ def test_invalid_model_is_reported_and_errors_clear_after_repair(tmp_path):
     assert len(store.read_errors) == 1
     assert "modele" in store.read_errors[0]
     assert invalid.read_bytes() == before
-    atomic_write_json(invalid, make_open_position("BTCUSDT").model_dump(mode="json"))
+    repaired = make_open_position("BTCUSDT")
+    repaired.position_id = "invalid"
+    atomic_write_json(invalid, repaired.model_dump(mode="json"))
     assert len(store.list_all()) == 1
     assert store.read_errors == []
 

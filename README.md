@@ -94,16 +94,17 @@ tourne à l'intervalle choisi dans Settings (1 seconde dans les préférences
 locales actuelles), et reste vivant même sans aucune position.
 
 Les prix des paires suivies utilisent, quand il est disponible, le flux public
-`miniTicker` du Spot Testnet. Un prix WebSocket de plus de 5 secondes est ignoré
+`miniTicker` de l'environnement Demo sélectionné. Un prix WebSocket de plus de 5 secondes est ignoré
 et le client revient automatiquement à REST ; les statuts d'ordres restent
-vérifiés séparément sur Binance. Ce flux n'est activé que pour `testnet.binance.vision` et
+vérifiés séparément sur Binance. Ce flux est limité à `demo-api.binance.com` et `testnet.binance.vision`, et
 requiert le paquet `websockets` indiqué dans `requirements.txt`. Sans ce paquet,
 le fonctionnement REST antérieur est conservé.
 
-**Arrêt :** bouton *Arrêter proprement* du Dashboard, ou suppression de `data/bot_stop.flag`.
+**Arrêt :** bouton *Arrêter proprement* du Dashboard, qui crée `data/bot_stop.flag`.
 L'*Arrêt forcé* tue le processus — à réserver à un worker bloqué.
 
-Un verrou (`data/bot_worker.lock`) empêche deux workers de piloter le même compte.
+Un verrou système (`data/bot_worker.lock.lease`) et son descriptif PID (`data/bot_worker.lock`)
+empêchent deux workers d'utiliser le même répertoire de données.
 Si un worker démarre alors qu'un autre est vivant, le démarrage est refusé.
 
 ## 6. Créer un trade
@@ -124,7 +125,8 @@ Si un worker démarre alors qu'un autre est vivant, le démarrage est refusé.
    SL soient surveillés.
 
 Si une position existe déjà sur la paire, **aucune seconde position n'est créée** :
-les nouvelles Entries sont ajoutées à la position existante.
+les nouvelles Entries sont ajoutées à la position existante, sauf en mode OCO :
+l'ajout est refusé tant que le redimensionnement sûr des branches n'est pas implémenté.
 
 ### Investissement long terme
 
@@ -232,7 +234,10 @@ construit pour rester sous les 36 caractères. Avant un envoi, le bot vérifie s
 l'ordre existe déjà et l'adopte si nécessaire. Après un timeout ou un `5xx`,
 il cherche l'ordre côté Binance, mais ne renvoie pas automatiquement une
 écriture dont le résultat reste incertain : une vérification/réconciliation
-est nécessaire. En cas de `429` ou `418`, le client respecte `Retry-After`.
+est nécessaire. Un journal SQLite réserve durablement chaque identifiant avant
+le POST et interdit son renvoi, y compris après redémarrage. Ce journal ne prouve
+pas que l'ordre existe ; il ne faut pas le supprimer pour débloquer une opération.
+En cas de `429` ou `418`, le client respecte `Retry-After`.
 
 **Confirmation obligatoire des TP.** Un TP n'est jamais considéré exécuté parce que le prix
 a touché le niveau. Il faut un fill confirmé par Binance ; un TP partiellement exécuté
@@ -250,7 +255,7 @@ l'événement est journalisé en niveau `CRITICAL` plutôt que masqué.
 Tests hors ligne (aucun réseau, aucun ordre) :
 
 ```powershell
-pytest -q
+pytest -q -m "not integration"
 ```
 
 Couvrent : arrondis prix/quantité, minQty, minNotional, formatage sans notation
@@ -271,7 +276,7 @@ python scripts/demo_tests.py --execute   # ajoute /order/test (aucune exécution
 ou pour ne lancer que le hors ligne :
 
 ```powershell
-pytest -q -m unit
+pytest -q -m "not integration"
 ```
 
 Aucun test destructif n'est lancé automatiquement au démarrage de l'application.
@@ -281,9 +286,12 @@ Aucun test destructif n'est lancé automatiquement au démarrage de l'applicatio
 | Chemin | Contenu |
 |---|---|
 | `data/positions/<position_id>.json` | une position par fichier, écriture atomique |
+| `data/positions/.backups/` | instantané local précédent, renouvelé au plus une fois par minute |
+| `data/order_intents.sqlite3` | intentions d'ordres durables, sans clés API |
 | `data/bot_runtime.json` | état, PID, heartbeat du worker |
 | `data/bot_stop.flag` | présent = arrêt demandé |
 | `data/bot_worker.lock` | verrou anti double-worker |
+| `data/bot_worker.lock.lease` | verrou système ; ne pas supprimer pendant l'exécution |
 | `data/settings.json` | réglages de la page Settings |
 | `data/presets.json` | presets enregistrés |
 | `logs/events.jsonl` | journal d'événements, une ligne JSON par événement |
@@ -321,9 +329,18 @@ affiche le détail.
   `PositionStore`, aucun appel direct au système de fichiers ailleurs.
 - **Le break-even avec frais** estime le point d'équilibre à partir des commissions d'achat
   réellement constatées, sans coût de sortie estimé. Il est présenté comme une estimation.
-- **Un seul TP est traité par cycle** (5 s) pour garder un état cohérent — sur une chute très
-  rapide du prix, plusieurs TP peuvent être atteints avant que le cycle suivant ne les traite,
-  mais ils seront bien exécutés aux niveaux prévus.
+- **Un seul TP local est traité par cycle**, à la cadence des Settings. Toucher plusieurs
+  niveaux rapidement ne garantit ni leur exécution ni leur prix : les ventes Market
+  peuvent subir un glissement et les ventes FOK peuvent expirer.
+- **Multi-TP en OCO : aperçu uniquement.** L'exécution d'un OCO par tranche et le
+  déplacement coordonné de leurs SL ne sont pas encore implémentés.
+
+## Audit et feuille de route
+
+Voir [l'audit du 28 septembre 2026](docs/AUDIT_SECURITE_2026-09-28.md) pour les
+correctifs appliqués, les vérifications et les travaux restants avant commercialisation.
+L'interface est désormais liée à `127.0.0.1` par défaut, avec CORS et protection XSRF
+activés dans `.streamlit/config.toml`. Redémarrer Streamlit pour appliquer ces réglages.
 
 ## 14. Évolutions prévues
 

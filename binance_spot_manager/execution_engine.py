@@ -594,6 +594,10 @@ class ExecutionEngine:
         attempt: int = 0,
     ) -> OrderResult:
         """Cree l'unique SL Binance (STOP_LOSS_LIMIT) sur la quantite restante."""
+        if position.oco_exit is not None:
+            return OrderResult(success=False, error="SL independant interdit sur une position OCO")
+        if position.stop_loss.executed_qty > QTY_EPSILON:
+            return OrderResult(success=False, error="SL deja partiellement execute : reconcilier le reliquat avant remplacement")
         rules = self.rules(position.symbol)
         qty = float(rules.round_qty(quantity, market=False))
         if qty <= 0:
@@ -610,11 +614,16 @@ class ExecutionEngine:
         client_order_id = self._sl_client_order_id(position, attempt)
 
         existing = self.find_existing_order(position.symbol, client_order_id)
-        if existing is not None and normalize_order_response(existing).is_open:
-            position.stop_loss.order_id = existing.get("orderId")
-            position.stop_loss.client_order_id = client_order_id
-            position.stop_loss.status = SLStatus.ACTIVE
-            return normalize_order_response(existing, client_order_id=client_order_id)
+        if existing is not None:
+            found = normalize_order_response(existing, client_order_id=client_order_id)
+            if found.is_open:
+                position.stop_loss.order_id = found.order_id
+                position.stop_loss.client_order_id = client_order_id
+                position.stop_loss.status = SLStatus.ACTIVE
+            else:
+                found.success = False
+                found.error = "Identifiant SL deja utilise : reconcilier avant toute nouvelle protection"
+            return found
 
         if self._dry_run():
             self._log_skip(
@@ -714,6 +723,12 @@ class ExecutionEngine:
         On annule d'abord pour ne jamais depasser MAX_NUM_ALGO_ORDERS, et
         l'echec de creation est journalise comme une fenetre non protegee.
         """
+        if position.oco_exit is not None:
+            return OrderResult(success=False, error="Deplacement du SL OCO non implemente : aucun ordre modifie")
+        if position.stop_loss.executed_qty > QTY_EPSILON:
+            return OrderResult(success=False, error="SL partiellement execute : deplacement suspendu")
+        if position.stop_loss.status is SLStatus.REPLACING:
+            return OrderResult(success=False, error="SL deja en remplacement : confirmer son etat Binance")
         previous_order_id = position.stop_loss.order_id
         previous_client_id = position.stop_loss.client_order_id
 
@@ -723,13 +738,14 @@ class ExecutionEngine:
             if not self._confirm(
                 "CANCEL_SL", {"symbol": position.symbol, "order_id": previous_order_id}
             ):
+                position.stop_loss.status = SLStatus.ACTIVE
                 return OrderResult(success=False, error="Annule par l'utilisateur")
             cancelled = self.cancel_order(
                 position.symbol,
                 order_id=previous_order_id,
                 client_order_id=previous_client_id,
             )
-            if not cancelled.success:
+            if not cancelled.success or cancelled.executed_qty > 0 or cancelled.status not in {"CANCELED", "EXPIRED", "EXPIRED_IN_MATCH"}:
                 # On ne cree pas de second SL tant que l'ancien vit encore :
                 # cela creerait une double protection et deux ventes.
                 position.stop_loss.status = SLStatus.ACTIVE
@@ -784,7 +800,7 @@ class ExecutionEngine:
         order_id: Optional[int] = None,
         client_order_id: Optional[str] = None,
     ) -> OrderResult:
-        """Annule un ordre. Un ordre deja disparu n'est pas une erreur."""
+        """Annulation confirmee uniquement si l'ordre est terminal sans fill."""
         if self._dry_run():
             self._log_skip("cancel_order", symbol, "", order_id=order_id)
             return OrderResult(success=True, dry_run=True)
@@ -793,21 +809,30 @@ class ExecutionEngine:
             raw = self.client.cancel_order(
                 symbol, order_id=order_id, client_order_id=client_order_id
             )
-            return normalize_order_response(
-                raw or {}, client_order_id=client_order_id or ""
-            )
+            reports = raw.get("orderReports", [raw]) if isinstance(raw, dict) else []
+            if not reports:
+                return OrderResult(success=False, status="UNKNOWN", error="Reponse d'annulation incomplete")
+            normalized = [normalize_order_response(r) for r in reports]
+            wanted = next((r for r in normalized if r.order_id == order_id), None) if order_id else normalized[0]
+            if wanted is None or any(r.status not in {"CANCELED", "EXPIRED", "EXPIRED_IN_MATCH"} or r.executed_qty > 0 for r in normalized):
+                return OrderResult(success=False, status="UNKNOWN", error="Annulation non confirmee sans execution : reconcilier les ordres")
+            return wanted
         except BinanceError as exc:
-            if exc.is_unknown_order:
-                return OrderResult(
-                    success=True, error="Ordre deja absent cote Binance"
-                )
+            if exc.is_unknown_order or exc.is_ambiguous_write:
+                try:
+                    current = self.fetch_order_status(symbol, order_id=order_id, client_order_id=client_order_id)
+                except BinanceError:
+                    current = None
+                if current is not None and current.status in {"CANCELED", "EXPIRED", "EXPIRED_IN_MATCH"} and current.executed_qty == 0:
+                    return current
+                return OrderResult(success=False, status="UNKNOWN", error="Annulation incertaine : verification Binance requise")
             return OrderResult(success=False, error=str(exc))
 
     def cancel_entry(self, position: Position, entry: Entry) -> OrderResult:
         result = self.cancel_order(
             position.symbol, order_id=entry.order_id, client_order_id=entry.client_order_id
         )
-        if result.success or "deja absent" in result.error:
+        if result.success:
             entry.status = EntryStatus.CANCELED
             self.events.append(
                 EventType.ENTRY_CANCELED,
