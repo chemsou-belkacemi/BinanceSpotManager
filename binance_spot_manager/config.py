@@ -131,6 +131,9 @@ class Settings(BaseModel):
 
     worker_interval: int = 5
     heartbeat_stale_after: int = 20
+    #: "local" : le Dashboard lance et arrete le process. "docker" : le
+    #: conteneur est gere par Docker, l'arret propre met le worker en veille.
+    worker_supervisor: str = "local"
 
     quote_asset: str = "USDT"
     capital_reserve_percent: float = 20.0
@@ -183,6 +186,10 @@ class Settings(BaseModel):
     @property
     def requires_human_validation(self) -> bool:
         return self.run_mode is RunMode.DEMO_MANUAL
+
+    @property
+    def worker_managed_by_docker(self) -> bool:
+        return self.worker_supervisor == "docker"
 
     @property
     def mode_label(self) -> str:
@@ -253,6 +260,9 @@ def load_settings() -> Settings:
         http_timeout=_env_int("BSM_HTTP_TIMEOUT", 10),
         worker_interval=_env_int("BSM_WORKER_INTERVAL", 5),
         heartbeat_stale_after=_env_int("BSM_HEARTBEAT_STALE_AFTER", 20),
+        worker_supervisor=(
+            "docker" if _env_str("BSM_WORKER_SUPERVISOR").lower() == "docker" else "local"
+        ),
         quote_asset=_env_str("BSM_QUOTE_ASSET", "USDT").upper(),
         capital_reserve_percent=_env_float("BSM_CAPITAL_RESERVE_PERCENT", 20.0),
         max_risk_per_position_percent=_env_float("BSM_MAX_RISK_PER_POSITION_PERCENT", 1.0),
