@@ -61,12 +61,29 @@ def test_bulk_actions_cover_alerts_beyond_visible_page(tmp_path):
     for i in range(105):
         inbox.ingest({"event": "ERROR", "level": "ERROR", "message": f"Erreur {i}", "ts": "2026-01-01T00:00:00Z"})
     assert len(inbox.recent()) == 100
+    assert inbox.counts() == {"total": 105, "unread": 105, "read": 0}
     assert inbox.acknowledge_all() == 105
     assert inbox.recent(unread=True) == []
+    assert inbox.counts() == {"total": 105, "unread": 0, "read": 105}
     assert inbox.acknowledge_all() == 0
     assert inbox.delete_all() == 105
     assert AlertInbox(inbox.path).recent() == []
     assert inbox.delete_all() == 0
+    assert inbox.counts() == {"total": 0, "unread": 0, "read": 0}
+
+
+def test_alert_filter_applies_before_page_limit(tmp_path):
+    inbox = AlertInbox(tmp_path / "alerts.db")
+    old = {"event": "ERROR", "level": "ERROR", "message": "Ancienne non lue", "ts": "2026-01-01T00:00:00Z"}
+    inbox.ingest(old)
+    for i in range(101):
+        newer = dict(old, message=f"Lue {i}", ts="2026-01-02T00:00:00Z")
+        inbox.ingest(newer)
+        inbox.acknowledge(inbox.key(newer))
+    assert inbox.key(old) not in {a["id"] for a in inbox.recent()}
+    assert [a["id"] for a in inbox.recent(unread=True)] == [inbox.key(old)]
+    assert len(inbox.recent(read=True)) == 100
+    assert inbox.counts() == {"total": 102, "unread": 1, "read": 101}
 
 
 @pytest.mark.parametrize("delete_all", [False, True])
@@ -93,6 +110,37 @@ def test_mark_all_read_suppresses_pending_delivery_but_allows_recurrence(tmp_pat
     inbox.acknowledge_all()
     assert not inbox.claim_delivery(record)
     assert inbox.claim_delivery(dict(record, ts="2026-01-01T00:00:01Z"))
+
+
+@pytest.mark.parametrize("action", ["acknowledge", "delete"])
+def test_stale_single_action_preserves_new_occurrence(tmp_path, action):
+    ui = AlertInbox(tmp_path / "alerts.db")
+    worker = AlertInbox(ui.path)
+    record = {"event": "ERROR", "level": "CRITICAL", "message": "Protection absente", "ts": "2026-01-01T00:00:00Z"}
+    worker.ingest(record)
+    observed = ui.recent()[0]
+    newer = dict(record, ts="2026-01-01T00:00:01Z")
+    worker.ingest(newer)
+    assert getattr(ui, action)(observed["id"], expected_last_seen=observed["last_seen"]) == 0
+    assert ui.recent(unread=True)[0]["record"] == newer
+    assert ui.claim_delivery(newer)
+    assert getattr(ui, action)(observed["id"], expected_last_seen=newer["ts"]) == 1
+
+
+@pytest.mark.parametrize("action", ["acknowledge_all", "delete_all"])
+def test_bulk_snapshot_preserves_new_alerts_and_recurrences(tmp_path, action):
+    ui = AlertInbox(tmp_path / "alerts.db")
+    worker = AlertInbox(ui.path)
+    record = {"event": "ERROR", "level": "ERROR", "message": "Ancienne", "ts": "2026-01-01T00:00:00Z"}
+    worker.ingest(record)
+    recurring = dict(record, message="Recurrente")
+    worker.ingest(recurring)
+    versions = ui.versions()
+    worker.ingest(dict(recurring, ts="2026-01-01T00:00:01Z"))
+    worker.ingest(dict(record, message="Nouvelle", ts="2026-01-01T00:00:02Z"))
+    assert getattr(ui, action)(expected_versions=versions) == 1
+    assert {a["record"]["message"] for a in ui.recent(unread=True)} == {"Recurrente", "Nouvelle"}
+    assert getattr(ui, action)(expected_versions={}) == 0
 
 
 def test_backup_excludes_env_and_checks_json_and_sqlite(tmp_path):
@@ -160,9 +208,22 @@ def test_operations_page_renders_without_network(monkeypatch, tmp_path):
     for i in range(2):
         inbox.ingest({"event": "ERROR", "level": "ERROR", "message": f"Test {i}", "ts": "2026-01-01T00:00:00Z"})
     app.run()
+    app.selectbox(key="operations_alert_filter").select("Non lues").run()
+    assert not app.exception
+    selected_id = app.selectbox(key="operations_alert_selection").value
+    old_alert = next(a for a in inbox.recent() if a["id"] == selected_id)
+    inbox.ingest(dict(old_alert["record"], ts="2026-01-01T00:00:01Z"))
+    next(b for b in app.button if b.label == "Marquer cette alerte comme lue").click().run()
+    assert not app.exception
+    assert len(inbox.recent(unread=True)) == 2
+    assert any("a évolué" in message.value for message in app.info)
     next(b for b in app.button if b.label == "Tout marquer comme lu").click().run()
     assert not app.exception
     assert not inbox.recent(unread=True)
+    assert any(c.value == "Aucune alerte pour ce filtre." for c in app.caption)
+    assert next(b for b in app.button if b.label == "Tout marquer comme lu").disabled
+    app.selectbox(key="operations_alert_filter").select("Lues").run()
+    assert not app.exception
     next(b for b in app.button if b.label == "Supprimer cette alerte").click().run()
     assert not app.exception
     assert len(inbox.recent()) == 1

@@ -18,6 +18,7 @@ l'utilisateur voit dans le Dashboard. Seule la reprise d'etat NON ambiguë
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -176,6 +177,8 @@ class ReconciliationEngine:
 
         self._reconcile_entries(position, report, by_client_id, by_order_id, apply)
         self._reconcile_take_profits(position, report, by_client_id, by_order_id, apply)
+        # Les controles SL/wallet doivent utiliser les executions recuperees ce cycle.
+        recompute_position(position)
         self._reconcile_stop_loss(position, report, by_client_id, by_order_id)
         self._reconcile_wallet(position, report, wallet_free_qty)
 
@@ -225,9 +228,10 @@ class ReconciliationEngine:
         for entry in position.entries:
             order = self._find_order(entry, by_client_id, by_order_id)
 
-            if entry.status is EntryStatus.SUBMITTED and order is None:
-                # L'ordre a quitte les ordres ouverts : rempli ou annule ?
-                status = self.execution.fetch_order_status(
+            if entry.is_open_on_binance:
+                # Les ordres ouverts sont enrichis des executions et commissions.
+                # Une entree partielle reste suivie jusqu'a son etat terminal.
+                status = normalize_order_response(order) if order is not None else self.execution.fetch_order_status(
                     position.symbol,
                     order_id=entry.order_id,
                     client_order_id=entry.client_order_id,
@@ -242,10 +246,21 @@ class ReconciliationEngine:
                         suggested_action="Verifier manuellement sur Binance",
                     )
                     continue
+                if status.status.upper() not in {"NEW", "PENDING_NEW", "PARTIALLY_FILLED", "FILLED",
+                                                  "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"}:
+                    report.add("UNKNOWN_ORDER", "Statut d'achat Binance non reconnu", severity="CRITICAL",
+                               target_type="ENTRY", target_id=entry.entry_id)
+                    continue
+                if not math.isfinite(status.executed_qty) or status.executed_qty < entry.executed_qty - QTY_EPSILON:
+                    report.add("STALE_FILL", "Quantite Binance inferieure au cumul deja enregistre : achat conserve",
+                               severity="CRITICAL", target_type="ENTRY", target_id=entry.entry_id)
+                    continue
                 if status.executed_qty > QTY_EPSILON:
                     self._apply_entry_fill(position, entry, status, report, apply)
                 elif status.is_terminal_dead:
-                    entry.status = EntryStatus.CANCELED
+                    if apply:
+                        entry.status = self._entry_status(status)
+                        entry.order_id = status.order_id or entry.order_id
                     report.add(
                         "MANUAL_CHANGE",
                         f"Entry {entry.sequence_number} annulee cote Binance",
@@ -253,6 +268,11 @@ class ReconciliationEngine:
                         target_id=entry.entry_id,
                         suggested_action="Aucune action automatique — annulation respectee",
                     )
+                elif status.order_id and not entry.order_id:
+                    if apply:
+                        entry.order_id = status.order_id
+                    report.add("ORDER_ADOPTED", f"Entry {entry.sequence_number} : identifiant Binance retrouve",
+                               target_type="ENTRY", target_id=entry.entry_id, auto_applied=apply)
                 continue
 
             if order is not None and entry.status is EntryStatus.PLANNED:
@@ -265,6 +285,15 @@ class ReconciliationEngine:
                     suggested_action="Adopter l'ordre ou l'annuler depuis le Dashboard",
                 )
 
+    @staticmethod
+    def _entry_status(status: OrderResult) -> EntryStatus:
+        return {
+            "NEW": EntryStatus.SUBMITTED, "PENDING_NEW": EntryStatus.SUBMITTED,
+            "PARTIALLY_FILLED": EntryStatus.PARTIALLY_FILLED, "FILLED": EntryStatus.FILLED,
+            "CANCELED": EntryStatus.CANCELED, "EXPIRED": EntryStatus.EXPIRED,
+            "EXPIRED_IN_MATCH": EntryStatus.EXPIRED, "REJECTED": EntryStatus.REJECTED,
+        }[status.status.upper()]
+
     def _apply_entry_fill(
         self,
         position: Position,
@@ -273,7 +302,19 @@ class ReconciliationEngine:
         report: ReconciliationReport,
         apply: bool,
     ) -> None:
-        if entry.executed_qty > QTY_EPSILON:
+        quote_spent = status.cummulative_quote_qty or status.executed_qty * status.average_price
+        if (not math.isfinite(quote_spent) or not math.isfinite(status.average_price)
+                or quote_spent <= 0 or status.average_price <= 0
+                or quote_spent < entry.quote_spent - QTY_EPSILON):
+            report.add("INVALID_FILL", "Cout d'achat Binance incoherent : cumul local conserve",
+                       severity="CRITICAL", target_type="ENTRY", target_id=entry.entry_id)
+            return
+        next_status = self._entry_status(status)
+        commissions = list(status.commissions) if status.commissions else list(entry.commissions)
+        order_id = status.order_id or entry.order_id
+        if (entry.executed_qty == status.executed_qty and entry.quote_spent == quote_spent
+                and entry.average_fill_price == status.average_price and entry.status is next_status
+                and entry.commissions == commissions and entry.order_id == order_id):
             return
         if not (self.auto_apply_fills and apply):
             report.add(
@@ -288,17 +329,13 @@ class ReconciliationEngine:
             )
             return
 
-        entry.status = (
-            EntryStatus.FILLED
-            if abs(status.executed_qty - entry.binance_qty) < QTY_EPSILON
-            else EntryStatus.PARTIALLY_FILLED
-        )
+        # Binance renvoie des cumuls : remplacer, jamais additionner a l'etat local.
+        entry.status = next_status
         entry.executed_qty = status.executed_qty
         entry.average_fill_price = status.average_price
-        entry.quote_spent = status.cummulative_quote_qty or status.executed_qty * status.average_price
-        if status.commissions:
-            entry.commissions = list(status.commissions)
-        entry.order_id = status.order_id or entry.order_id
+        entry.quote_spent = quote_spent
+        entry.commissions = commissions
+        entry.order_id = order_id
         entry.filled_at = entry.filled_at or utcnow()
 
         report.add(

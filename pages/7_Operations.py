@@ -105,21 +105,49 @@ if intents:
 else:
     st.caption("Aucune intention dans le nouveau journal. Les ordres anterieurs restent visibles au Dashboard.")
 
-st.subheader("Alertes persistantes")
-inbox = service.events.alert_inbox()
-alerts = inbox.recent()
-if message := st.session_state.pop("operations_alert_message", None):
-    st.success(message)
-if alerts:
-    actions = st.columns(2)
-    if actions[0].button("Tout marquer comme lu", key="alerts_read_all"):
-        count = inbox.acknowledge_all()
+@st.fragment(run_every="5s")
+def alerts_panel():
+    st.subheader("Alertes persistantes")
+    inbox = service.events.alert_inbox()
+
+    def read_all(versions):
+        count = inbox.acknowledge_all(expected_versions=versions)
         st.session_state.operations_alert_message = f"{count} alerte(s) marquée(s) comme lue(s)."
-        st.rerun()
-    if actions[1].button("Tout supprimer", key="alerts_delete_all"):
-        count = inbox.delete_all()
+
+    def delete_all(versions):
+        count = inbox.delete_all(expected_versions=versions)
         st.session_state.operations_alert_message = f"{count} alerte(s) supprimée(s). Le journal des événements est conservé."
-        st.rerun()
+
+    def read_one(alert_id, version):
+        if inbox.acknowledge(alert_id, expected_last_seen=version):
+            st.session_state.operations_alert_message = "Alerte marquée comme lue."
+        else:
+            st.session_state.operations_alert_notice = "Cette alerte a évolué ou a été supprimée. La liste est actualisée ; aucune nouvelle occurrence n'a été marquée comme lue."
+
+    def delete_one(alert_id, version):
+        if inbox.delete(alert_id, expected_last_seen=version):
+            st.session_state.operations_alert_message = "Alerte supprimée. Le journal des événements est conservé."
+        else:
+            st.session_state.operations_alert_notice = "Cette alerte a évolué ou a été supprimée. La liste est actualisée ; aucune nouvelle occurrence n'a été supprimée."
+
+    if message := st.session_state.pop("operations_alert_message", None):
+        st.success(message)
+    if notice := st.session_state.pop("operations_alert_notice", None):
+        st.info(notice)
+    counts = inbox.counts()
+    st.caption(f"{counts['unread']} non lue(s) · {counts['read']} lue(s) · {counts['total']} au total · actualisé toutes les 5 secondes.")
+    selected_filter = st.selectbox("Afficher les alertes", ["Toutes", "Non lues", "Lues"], key="operations_alert_filter")
+    actions = st.columns(2)
+    versions = inbox.versions()
+    actions[0].button("Tout marquer comme lu", key="alerts_read_all", on_click=read_all, args=(versions,), disabled=counts["unread"] == 0)
+    actions[1].button("Tout supprimer", key="alerts_delete_all", on_click=delete_all, args=(versions,), disabled=counts["total"] == 0)
+    st.caption("Les actions « Tout » concernent toutes les alertes déjà présentes, quel que soit le filtre. Les nouvelles alertes ou occurrences arrivées depuis l'affichage sont conservées.")
+    alerts = inbox.recent(unread=selected_filter == "Non lues", read=selected_filter == "Lues")
+    if not alerts:
+        st.caption("Aucune alerte pour ce filtre." if counts["total"] else "Aucune alerte persistante.")
+        return
+    matching_count = counts[{"Toutes": "total", "Non lues": "unread", "Lues": "read"}[selected_filter]]
+    st.caption(f"{len(alerts)} alerte(s) affichée(s) sur {matching_count}, les plus récentes en premier.")
     st.dataframe([{"Alerte": a["record"].get("message", ""), "Niveau": a["record"].get("level"),
                    "Derniere occurrence": a["last_seen"], "Occurrences": a["occurrences"],
                    "Lue": a["acknowledged_at"] is not None} for a in alerts], hide_index=True)
@@ -127,17 +155,13 @@ if alerts:
     chosen_alert = st.selectbox("Alerte à gérer", list(by_id), key="operations_alert_selection",
                                format_func=lambda aid: f"{by_id[aid]['last_seen']} · {by_id[aid]['record'].get('message', aid)}")
     single_actions = st.columns(2)
-    if single_actions[0].button("Marquer cette alerte comme lue", disabled=by_id[chosen_alert]["acknowledged_at"] is not None):
-        inbox.acknowledge(chosen_alert)
-        st.session_state.operations_alert_message = "Alerte marquée comme lue."
-        st.rerun()
-    if single_actions[1].button("Supprimer cette alerte", key="alerts_delete_one"):
-        inbox.delete(chosen_alert)
-        st.session_state.operations_alert_message = "Alerte supprimée. Le journal des événements est conservé."
-        st.rerun()
-    st.caption("Les actions « Tout » concernent toutes les alertes, y compris celles hors des 100 dernières affichées. Une nouvelle occurrence du problème peut créer une nouvelle alerte.")
-else:
-    st.caption("Aucune alerte persistante.")
+    single_actions[0].button("Marquer cette alerte comme lue", disabled=by_id[chosen_alert]["acknowledged_at"] is not None,
+                             on_click=read_one, args=(chosen_alert, by_id[chosen_alert]["last_seen"]))
+    single_actions[1].button("Supprimer cette alerte", key="alerts_delete_one", on_click=delete_one,
+                             args=(chosen_alert, by_id[chosen_alert]["last_seen"]))
+
+
+alerts_panel()
 
 st.subheader("Comptabilite detaillee")
 accounting = [accounting_snapshot(p) for p in positions]

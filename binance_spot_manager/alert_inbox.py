@@ -49,34 +49,66 @@ class AlertInbox:
                 acknowledged_at=NULL WHERE excluded.last_seen>last_seen""",
                        (key, json.dumps(record, default=str), stamp, stamp, key, stamp))
 
-    def recent(self, limit=100, *, unread=False):
+    def counts(self):
+        with closing(self.connect()) as db:
+            row = db.execute("""SELECT COUNT(*) AS total,
+                COUNT(CASE WHEN acknowledged_at IS NULL THEN 1 END) AS unread,
+                COUNT(acknowledged_at) AS read FROM alerts""").fetchone()
+            return dict(row)
+
+    def recent(self, limit=100, *, unread=False, read=False):
+        if unread and read:
+            raise ValueError("Choisir les alertes lues ou non lues, pas les deux")
+        condition = "WHERE acknowledged_at IS NULL " if unread else (
+            "WHERE acknowledged_at IS NOT NULL " if read else ""
+        )
         with closing(self.connect()) as db:
             return [dict(row) | {"record": json.loads(row["record"])} for row in db.execute(
-                "SELECT * FROM alerts " + ("WHERE acknowledged_at IS NULL " if unread else "") + "ORDER BY last_seen DESC LIMIT ?",
+                "SELECT * FROM alerts " + condition + "ORDER BY last_seen DESC, id LIMIT ?",
                 (max(1, min(limit, 500)),),
             )]
 
-    def acknowledge(self, alert_id):
-        with closing(self.connect()) as db, db:
-            db.execute("UPDATE alerts SET acknowledged_at=?, delivered=1 WHERE id=?", (time.time(), alert_id))
+    def versions(self):
+        """Toutes les versions observees, sans limite de pagination."""
+        with closing(self.connect()) as db:
+            return {row["id"]: row["last_seen"] for row in db.execute("SELECT id, last_seen FROM alerts")}
 
-    def acknowledge_all(self):
+    def acknowledge(self, alert_id, *, expected_last_seen=None):
         with closing(self.connect()) as db, db:
+            return db.execute("""UPDATE alerts SET acknowledged_at=?, delivered=1
+                WHERE id=? AND (? IS NULL OR last_seen=?)""",
+                (time.time(), alert_id, expected_last_seen, expected_last_seen)).rowcount
+
+    def acknowledge_all(self, *, expected_versions=None):
+        with closing(self.connect()) as db, db:
+            if expected_versions is not None:
+                now = time.time()
+                return db.executemany("""UPDATE alerts SET acknowledged_at=?, delivered=1
+                    WHERE id=? AND last_seen=? AND acknowledged_at IS NULL""",
+                    [(now, alert_id, version) for alert_id, version in expected_versions.items()]).rowcount
             return db.execute(
                 "UPDATE alerts SET acknowledged_at=?, delivered=1 WHERE acknowledged_at IS NULL",
                 (time.time(),),
             ).rowcount
 
-    def delete(self, alert_id):
+    @staticmethod
+    def _delete_version(db, alert_id, expected_last_seen):
+        params = (alert_id, expected_last_seen, expected_last_seen)
+        db.execute("""INSERT INTO deleted_alerts SELECT id, last_seen FROM alerts
+            WHERE id=? AND (? IS NULL OR last_seen=?)
+            ON CONFLICT(id) DO UPDATE SET last_seen=MAX(deleted_alerts.last_seen, excluded.last_seen)""", params)
+        return db.execute("DELETE FROM alerts WHERE id=? AND (? IS NULL OR last_seen=?)", params).rowcount
+
+    def delete(self, alert_id, *, expected_last_seen=None):
         """Retire l'alerte sans qu'un autre onglet puisse rejouer son ancien evenement."""
         with closing(self.connect()) as db, db:
-            db.execute("""INSERT INTO deleted_alerts SELECT id, last_seen FROM alerts WHERE id=?
-                ON CONFLICT(id) DO UPDATE SET last_seen=MAX(deleted_alerts.last_seen, excluded.last_seen)""",
-                       (alert_id,))
-            return db.execute("DELETE FROM alerts WHERE id=?", (alert_id,)).rowcount
+            return self._delete_version(db, alert_id, expected_last_seen)
 
-    def delete_all(self):
+    def delete_all(self, *, expected_versions=None):
         with closing(self.connect()) as db, db:
+            if expected_versions is not None:
+                return sum(self._delete_version(db, alert_id, version)
+                           for alert_id, version in expected_versions.items())
             db.execute("""INSERT INTO deleted_alerts SELECT id, last_seen FROM alerts WHERE 1
                 ON CONFLICT(id) DO UPDATE SET last_seen=MAX(deleted_alerts.last_seen, excluded.last_seen)""")
             return db.execute("DELETE FROM alerts").rowcount
