@@ -116,6 +116,35 @@ def test_ui_queue_does_not_send_before_worker_and_worker_sends_once(processor):
     assert len(calls) == 1
 
 
+def test_expired_signal_confirmation_is_refused_before_any_order(processor):
+    worker, calls = processor
+    position = proposed()
+    worker.store.enqueue(worker.scope, "SUBMIT_POSITION", {
+        "position": position.model_dump(mode="json"), "entry_ids": [e.entry_id for e in position.entries],
+        "reference_price": 84000, "signal_confirmation_expires_at": 1,
+    }, request_key="expired-signal")
+    assert worker.run_one() == "FAILED"
+    assert calls == []
+    assert not worker.positions.exists(position.position_id)
+
+
+def test_old_worker_cannot_receive_signal_commands(monkeypatch, tmp_path):
+    from binance_spot_manager.dashboard_service import DashboardService
+    from binance_spot_manager.models import BotRuntime
+    settings = Settings(run_mode=RunMode.DEMO_MANUAL, demo_api_key="test", demo_api_secret="test")
+    service = DashboardService(settings=settings)
+    service.commands = CommandStore(tmp_path / "commands.db")
+    runtime = BotRuntime(run_mode=settings.run_mode.value, base_url=settings.base_url,
+                         command_scope=account_scope(settings))
+    monkeypatch.setattr(service, "worker_status", lambda: SimpleNamespace(running=True, heartbeat_age=0))
+    monkeypatch.setattr(service, "runtime", lambda: runtime)
+    with pytest.raises(ValueError, match="Redemarrer"):
+        service.submit_command("SUBMIT_POSITION", {"signal_confirmation_expires_at": 1}, request_key="sig")
+    assert service.commands.list_recent(account_scope(settings)) == []
+    runtime.command_capabilities = ["signal_v1"]
+    assert service.submit_command("SUBMIT_POSITION", {"signal_confirmation_expires_at": 1}, request_key="sig")["state"] == "PENDING"
+
+
 @pytest.mark.parametrize("failure", ["price", "risk", "stop", "funds"])
 def test_worker_revalidates_before_post(processor, failure):
     worker, calls = processor

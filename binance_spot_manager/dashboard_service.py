@@ -154,6 +154,8 @@ class DashboardService:
             raise ValueError("Configuration du worker differente : le redemarrer")
         if runtime.command_scope != account_scope(self.settings):
             raise ValueError("Compte du worker different ou ancien worker : le redemarrer")
+        if "signal_confirmation_expires_at" in payload and "signal_v1" not in runtime.command_capabilities:
+            raise ValueError("Redemarrer le worker pour activer les garde-fous des signaux")
         return self.commands.enqueue(account_scope(self.settings), action, payload, request_key=request_key)
 
     # ------------------------------------------------------------------

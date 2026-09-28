@@ -41,7 +41,29 @@ page_header("Settings", "Configuration, presets et diagnostic")
 banner(settings)
 sidebar_status(settings)
 
-tabs = st.tabs(["Sécurité", "Worker & risque", "Presets", "Notifications", "Diagnostic"])
+tabs = st.tabs(["Sécurité", "Worker & risque", "Presets", "Notifications", "Diagnostic", "Signaux"])
+
+with tabs[5]:
+    from binance_spot_manager.position_store import get_settings_store
+    from binance_spot_manager.telegram_signals import chat_allowlist
+
+    st.subheader("Réception des signaux Telegram")
+    st.caption("Import à la demande depuis la page Signaux. Aucun achat automatique à la réception. Le token existant n'est ni affiché ni modifié.")
+    signal_preferences = get_settings_store().load()
+    with st.form("telegram_signal_preferences"):
+        signal_enabled = st.toggle("Autoriser l'import Telegram", value=bool(signal_preferences.get("signal_telegram_enabled", False)))
+        signal_chats = st.text_input("Conversations autorisées (identifiants numériques séparés par des virgules)", value=signal_preferences.get("signal_telegram_chats", ""))
+        st.caption("Exemple : -1001234567890, 123456789. Les chats de notification ne sont pas autorisés implicitement. Utiliser un seul lecteur getUpdates pour ce bot ; un webhook actif empêche cet import.")
+        if st.form_submit_button("Enregistrer la réception des signaux"):
+            try:
+                if signal_enabled:
+                    chat_allowlist(signal_chats)
+                    if not settings.telegram_bot_token:
+                        raise ValueError("Token Telegram absent de la configuration actuelle.")
+                get_settings_store().update({"signal_telegram_enabled": signal_enabled, "signal_telegram_chats": signal_chats.strip()})
+                st.success("Réglages enregistrés.")
+            except ValueError as exc:
+                st.error(str(exc))
 
 # ==========================================================================
 # Sécurité

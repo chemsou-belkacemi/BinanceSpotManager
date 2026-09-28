@@ -1,0 +1,124 @@
+"""Durable, account-scoped signals and immutable execution confirmations."""
+from contextlib import contextmanager
+import json
+from pathlib import Path
+import sqlite3
+import time
+import uuid
+
+from .config import DATA_DIR
+from .signal_parser import content_hash, parse_signal
+
+
+class SignalInbox:
+    def __init__(self, path=DATA_DIR / "signals.sqlite3"):
+        self.path = Path(path)
+
+    @contextmanager
+    def connect(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        db = sqlite3.connect(self.path, timeout=10)
+        db.row_factory = sqlite3.Row
+        try:
+            db.execute("PRAGMA synchronous=FULL")
+            db.execute("""CREATE TABLE IF NOT EXISTS signals (
+                id TEXT PRIMARY KEY, scope TEXT NOT NULL, hash TEXT NOT NULL,
+                source TEXT NOT NULL, external_id TEXT NOT NULL, received REAL NOT NULL,
+                raw TEXT NOT NULL, parsed TEXT NOT NULL, payload TEXT,
+                UNIQUE(scope, hash))""")
+            db.execute("""CREATE TABLE IF NOT EXISTS telegram_offsets (
+                bot TEXT PRIMARY KEY, offset INTEGER NOT NULL)""")
+            db.execute("""CREATE TABLE IF NOT EXISTS signal_origins (
+                scope TEXT NOT NULL, external_id TEXT NOT NULL, signal_id TEXT NOT NULL,
+                PRIMARY KEY(scope, external_id, signal_id))""")
+            db.commit()
+            yield db
+        finally:
+            db.close()
+
+    @staticmethod
+    def decode(row):
+        if row is None:
+            return None
+        return dict(row) | {"parsed": json.loads(row["parsed"]),
+                            "payload": json.loads(row["payload"]) if row["payload"] else None}
+
+    def receive(self, scope, raw, *, template="auto", source="manual", external_id="", edited=False):
+        parsed = parse_signal(raw, template).to_dict()
+        if edited:
+            parsed["errors"].append("Message édité : vérifier manuellement via New Trade ; aucun ordre remplacé.")
+        with self.connect() as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            originals = db.execute("""SELECT signals.* FROM signals JOIN signal_origins
+                ON signals.id=signal_origins.signal_id WHERE signal_origins.scope=? AND signal_origins.external_id=?""",
+                (scope, external_id)).fetchall() if external_id else []
+            revised = any(original["hash"] != content_hash(raw) for original in originals)
+            if revised:
+                parsed["errors"].append("Révision d'un message déjà reçu : aucune seconde exécution automatique.")
+            if edited or revised:
+                for original in originals:
+                    previous = json.loads(original["parsed"])
+                    error = "Message source édité : ancienne version invalidée. Si déjà transmise, vérifier la position dans Opérations."
+                    if error not in previous["errors"]:
+                        previous["errors"].append(error)
+                    db.execute("UPDATE signals SET parsed=? WHERE id=?", (json.dumps(previous), original["id"]))
+            db.execute("INSERT OR IGNORE INTO signals VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+                       (uuid.uuid4().hex, scope, content_hash(raw), source, external_id, time.time(),
+                        raw[:20000], json.dumps(parsed, allow_nan=False)))
+            row = db.execute("SELECT * FROM signals WHERE scope=? AND hash=?", (scope, content_hash(raw))).fetchone()
+            if external_id:
+                db.execute("INSERT OR IGNORE INTO signal_origins VALUES (?, ?, ?)", (scope, external_id, row["id"]))
+            if edited or revised:
+                previous = json.loads(row["parsed"])
+                error = "Message édité : vérifier manuellement via New Trade, aucune seconde exécution."
+                if error not in previous["errors"]:
+                    previous["errors"].append(error)
+                    db.execute("UPDATE signals SET parsed=? WHERE id=?", (json.dumps(previous), row["id"]))
+                    row = db.execute("SELECT * FROM signals WHERE id=?", (row["id"],)).fetchone()
+            return self.decode(row)
+
+    def recent(self, scope):
+        with self.connect() as db:
+            return [self.decode(row) for row in db.execute(
+                "SELECT * FROM signals WHERE scope=? ORDER BY received DESC LIMIT 100", (scope,))]
+
+    def reanalyse(self, scope, signal_id, *, template="auto"):
+        """Refresh parsing after a format upgrade, retaining edit blocks and confirmations."""
+        with self.connect() as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM signals WHERE scope=? AND id=?", (scope, signal_id)).fetchone()
+            if row is None or row["payload"] is not None:
+                raise ValueError("Signal absent ou déjà confirmé : réanalyse impossible.")
+            previous = json.loads(row["parsed"])
+            if any(error.startswith(("Message édité", "Message source édité", "Révision d'un message"))
+                   for error in previous["errors"]):
+                raise ValueError("Message source édité : réanalyse bloquée, vérifier manuellement via New Trade.")
+            parsed = parse_signal(row["raw"], template).to_dict()
+            db.execute("UPDATE signals SET parsed=? WHERE scope=? AND id=?",
+                       (json.dumps(parsed, allow_nan=False), scope, signal_id))
+            return self.decode(db.execute("SELECT * FROM signals WHERE scope=? AND id=?", (scope, signal_id)).fetchone())
+
+    def freeze(self, scope, signal_id, payload):
+        """First confirmation wins, including random IDs; never overwrite a sent/uncertain plan."""
+        encoded = json.dumps(payload, sort_keys=True, allow_nan=False)
+        with self.connect() as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM signals WHERE scope=? AND id=?", (scope, signal_id)).fetchone()
+            if row is None or json.loads(row["parsed"])["errors"]:
+                raise ValueError("Signal absent ou bloqué")
+            if row["payload"]:
+                if row["payload"] != encoded:
+                    raise ValueError("Signal déjà confirmé : consulter la commande existante dans Opérations.")
+                return json.loads(row["payload"])
+            db.execute("UPDATE signals SET payload=? WHERE scope=? AND id=?", (encoded, scope, signal_id))
+            return payload
+
+    def offset(self, bot):
+        with self.connect() as db:
+            row = db.execute("SELECT offset FROM telegram_offsets WHERE bot=?", (bot,)).fetchone()
+            return row[0] if row else 0
+
+    def advance(self, bot, offset):
+        with self.connect() as db, db:
+            db.execute("INSERT INTO telegram_offsets VALUES (?, ?) ON CONFLICT(bot) DO UPDATE SET offset=MAX(offset, excluded.offset)",
+                       (bot, offset))

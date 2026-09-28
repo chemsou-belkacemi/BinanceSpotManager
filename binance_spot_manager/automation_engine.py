@@ -589,7 +589,10 @@ class AutomationEngine:
             f"({confirmed.executed_qty})"
         )
 
-        if tp.sequence_number == 1 and self.config.cancel_entries_on_first_tp:
+        if tp.sequence_number == 1 and (
+            self.config.cancel_entries_on_first_tp
+            or position.automation.cancel_remaining_entries_on_first_tp
+        ):
             cancels = self.execution.cancel_open_entries(position)
             if cancels:
                 result.actions.append(f"{len(cancels)} entry(ies) restantes annulees")

@@ -72,6 +72,19 @@ def test_unknown_sl_blocks_local_tp_in_same_cycle(engine, events):
     assert fake.created == []
 
 
+def test_position_flag_cancels_remaining_entries_after_first_tp(engine, events, monkeypatch):
+    execution, fake, rules = engine
+    position = make_position(rules)
+    position.automation.cancel_remaining_entries_on_first_tp = True
+    automation = build_automation(execution, rules, events)
+    automation.config.cancel_entries_on_first_tp = False
+    canceled = []
+    monkeypatch.setattr(execution, "cancel_open_entries", lambda p: canceled.append(p.position_id) or [])
+    result = automation.run_cycle(position, 86600)
+    assert result.tp_executed == 1
+    assert canceled == [position.position_id]
+
+
 def test_partial_sl_then_full_fill_accounts_cumulative_fees_once(engine, events):
     execution, fake, rules = engine
     position = make_position(rules)

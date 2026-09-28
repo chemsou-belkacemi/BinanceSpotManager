@@ -608,6 +608,7 @@ class Position(BSMModel):
 
 class BotRuntime(BSMModel):
     command_scope: str = ""
+    command_capabilities: list[str] = Field(default_factory=list)
     state: WorkerState = WorkerState.STOPPED
     pid: Optional[int] = None
     started_at: Optional[datetime] = None

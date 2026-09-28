@@ -1,6 +1,7 @@
 """Execute les demandes UI dans le worker, avec validation au dernier moment."""
 
 import math
+import time
 from dataclasses import replace
 
 from .command_store import account_scope
@@ -112,6 +113,10 @@ class CommandProcessor:
             raise RejectedCommand(result.error or "Operation refusee")
 
     def _submit_position(self, payload):
+        if "signal_confirmation_expires_at" in payload:
+            deadline = positive(payload["signal_confirmation_expires_at"], "Expiration du signal")
+            if deadline <= time.time() or deadline > time.time() + 125:
+                raise RejectedCommand("Confirmation du signal expirée ou invalide ; aucun ordre envoyé")
         proposed = Position.model_validate(payload["position"])
         if proposed.environment != "DEMO" or proposed.quote_asset not in {"USDT", "USDC"}:
             raise RejectedCommand("Position Demo USDT/USDC requise")

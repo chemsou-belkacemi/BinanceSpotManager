@@ -50,6 +50,8 @@ avant lancement. **Investissement** permet un achat simple sans sortie ou un
 achat avec TP seul / SL seul. **Dashboard** suit le worker, le portefeuille
 multidevise et les ordres réels. **Positions** détaille chaque position,
 **History** conserve les positions terminées, **Settings** regroupe les réglages.
+**Signaux** analyse un texte collé ou importé de Telegram, puis prépare un plan
+Demo à confirmer avant transmission au worker.
 """
 )
 
