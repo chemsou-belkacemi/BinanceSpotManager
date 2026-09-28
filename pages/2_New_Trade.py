@@ -4,8 +4,8 @@ Section 20 à 44 du cahier des charges. Deux modes : Quick Trade et Advanced Tra
 Tout est recalculé à la volée : prix, quantités, prix moyen, SL, gains par TP,
 scénarios A/B/C, exposition portefeuille.
 
-Au clic sur « Lancer », les Entries sont ENVOYEES via l'Execution Engine
-(ordre Market ou Limit selon la saisie), puis la position est persistée.
+Au clic sur « Lancer », une demande durable est transmise au worker,
+qui revalide le plan puis envoie les Entries via l'Execution Engine.
 Les TP restent locaux : c'est le worker qui les surveille.
 """
 
@@ -21,7 +21,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from binance_spot_manager.config import get_settings  # noqa: E402
-from binance_spot_manager.execution_engine import ExecutionEngine, build_client_order_id  # noqa: E402
 from binance_spot_manager.models import (  # noqa: E402
     EntryReference,
     EntryStatus,
@@ -63,6 +62,8 @@ from ui_common import (  # noqa: E402
     sidebar_status,
     symbol_status_box,
     warning_list,
+    submit_to_worker,
+    new_command_confirmation,
 )
 
 settings = get_settings()
@@ -621,117 +622,26 @@ tags_raw = col_c.text_input("Tags", "", help="Séparés par des virgules")
 action_label = "Ajouter à la position existante" if existing else "Lancer la position"
 ready = risk.accepted and plan.is_valid
 
-# L'Execution Engine est construit ici : c'est lui qui envoie reellement les
-# ordres. Il verifie le mode et l'URL autorisee avant tout envoi.
-execution = ExecutionEngine(settings=settings, events=service.events)
-
+new_command_confirmation("new_trade")
 confirm = st.checkbox(
     "Je confirme le lancement sur Binance Demo" if not settings.dry_run else
     "Je confirme la simulation (DRY_RUN : aucun ordre ne sera envoyé)"
 )
-
 if st.button(action_label, type="primary", disabled=not (confirm and ready)):
-    # Une protection OCO ne peut pas couvrir silencieusement un nouvel achat.
     if existing is not None and existing.oco_exit is not None:
-        st.error("Ajout d'Entries sur OCO non pris en charge : conserver la protection existante.")
-        st.stop()
-    worker_now = service.worker_status()
-    if not settings.dry_run and (not worker_now.running or worker_now.heartbeat_age is None or worker_now.heartbeat_age >= 20):
-        st.error("Démarre le worker avant de créer une position avec sorties suivies.")
+        st.error("Ajout sur OCO non pris en charge : conserver la protection existante.")
         st.stop()
     spec.preset_name = preset_name
     spec.source_name = source_name or "manual"
     spec.tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
-
     engine = PositionEngine(rules)
-
-    # -- 1. Construit la position (ou le lot d'Entries a ajouter) ---------
-    if existing is not None:
-        position = existing
-        new_entries = engine.from_plan(plan, spec).entries
-        engine.add_entries(existing, new_entries)
-        target_entries = new_entries
-    else:
-        position = engine.from_plan(plan, spec)
-        target_entries = list(position.entries)
-
-    service.events.append(
-        EventType.POSITION_CREATED if existing is None else EventType.POSITION_UPDATED,
-        f"Position {position.symbol} "
-        f"{'créée' if existing is None else 'complétée'} depuis New Trade "
-        f"({len(target_entries)} entry/ies)",
-        position_id=position.position_id,
-        symbol=position.symbol,
-        capital=plan.capital_total,
+    proposed = engine.from_plan(plan, spec)
+    submit_to_worker(
+        "SUBMIT_POSITION",
+        {"position": proposed.model_dump(mode="json"),
+         "entry_ids": [e.entry_id for e in proposed.entries],
+         "existing_id": existing.position_id if existing else None,
+         "reference_price": float(price or 0)},
+        confirmation_key="new_trade",
     )
-
-    # -- 2. Envoie les Entries --------------------------------------------
-    results: list[tuple[int, bool, str]] = []
-    for entry in target_entries:
-        entry.client_order_id = entry.client_order_id or build_client_order_id(
-            symbol=position.symbol, position_id=position.position_id,
-            suffix=f"E{entry.sequence_number}", environment=position.environment,
-        )
-        if not settings.dry_run:
-            entry.status = EntryStatus.SUBMITTED
-        # Echec disque ou conflit : aucun ordre n'est envoye pour cette Entry.
-        service.positions.save(position)
-        outcome = execution.place_entry(
-            position, entry, current_price=float(price or 0.0)
-        )
-        label = "simulé (DRY_RUN)" if outcome.dry_run else (
-            "envoyé" if outcome.success else "échec"
-        )
-        detail = outcome.status or outcome.error or ""
-        if outcome.success and outcome.executed_qty:
-            detail = f"{outcome.executed_qty} @ {outcome.average_price:.2f}"
-        results.append((entry.sequence_number, outcome.success, f"{label} — {detail}"))
-
-        # Un fill immediat doit etre enregistre tout de suite (ordres Market).
-        if outcome.success and not outcome.dry_run and outcome.executed_qty > 0:
-            engine.apply_entry_fill(
-                position,
-                entry.entry_id,
-                executed_qty=outcome.executed_qty,
-                average_price=outcome.average_price,
-                quote_spent=outcome.cummulative_quote_qty,
-                commissions=outcome.commissions,
-                order_id=outcome.order_id,
-            )
-        service.positions.save(position)
-        if not outcome.success:
-            st.warning("Envoi des Entries suivantes suspendu : vérifier le résultat de cet ordre.")
-            break
-
-    service.positions.save(position)
-
-    # -- 3. Rapport --------------------------------------------------------
-    st.success(
-        f"Position {position.symbol} "
-        f"{'créée' if existing is None else 'complétée'} "
-        f"({position.position_id})"
-    )
-
-    for sequence, ok, message in results:
-        (st.success if ok else st.error)(f"Entry {sequence} : {message}")
-
-    if settings.dry_run:
-        st.info(
-            "DRY_RUN actif : les positions sont créées localement, aucun ordre "
-            "n'a été envoyé. Les TP seront détectés mais jamais vendus."
-        )
-    elif any(ok for _, ok, _ in results):
-        st.info(
-            "Le worker doit tourner pour créer le SL, suivre les fills et "
-            "surveiller les TP. Démarrer ou redémarrer depuis le Dashboard."
-        )
-    else:
-        st.warning(
-            "Aucune Entry n'a été envoyée. Vérifie le message d'erreur ci-dessus "
-            "et le journal (logs/events.jsonl)."
-        )
-
-    for key in list(st.session_state.keys()):
-        if key.startswith("nt"):
-            del st.session_state[key]
-    st.cache_resource.clear()
+    st.caption("Le worker revalide prix, solde et risque avant envoi. La demande expire après deux minutes.")

@@ -6,6 +6,7 @@ import io
 import math
 import struct
 import wave
+import uuid
 from typing import Any, Optional
 
 import streamlit as st
@@ -29,7 +30,7 @@ MODE_COLORS = {
 
 @st.cache_resource(show_spinner=False)
 def get_service() -> DashboardService:
-    """Service unique par session Streamlit (client HTTP reutilise)."""
+    """Service partage dans le processus : application locale monocompte."""
     return DashboardService(get_settings())
 
 
@@ -42,6 +43,27 @@ def page_header(title: str, subtitle: str = "") -> None:
     st.title(title)
     if subtitle:
         st.caption(subtitle)
+
+
+def submit_to_worker(action: str, payload: dict, *, confirmation_key: str) -> bool:
+    """Une confirmation reste stable entre clics et reruns ; aucune API d'ordre ici."""
+    key = "command_confirmation_" + confirmation_key
+    request_key = st.session_state.setdefault(key, uuid.uuid4().hex)
+    try:
+        command = get_service().submit_command(action, payload, request_key=request_key)
+    except Exception as exc:
+        st.error(f"Demande non ajoutee : {exc}")
+        return False
+    st.info(f"Demande {command['id'][:12]} — {command['state']}. Suivi dans la page Operations.")
+    return True
+
+
+def new_command_confirmation(key: str) -> None:
+    if "command_confirmation_" + key in st.session_state:
+        st.caption("Une confirmation a deja ete preparee. Verifie son resultat dans Operations avant une nouvelle demande.")
+        if st.button("Preparer une nouvelle demande", key="reset_confirmation_" + key):
+            del st.session_state["command_confirmation_" + key]
+            st.rerun()
 
 
 def banner(settings: Optional[Settings] = None) -> None:
@@ -123,6 +145,12 @@ def global_alerts() -> None:
     audio_slot = st.empty()
     alerts, last_seen = unseen_alerts(records, st.session_state.alert_last_seen)
     st.session_state.alert_last_seen = last_seen
+    if hasattr(service.events, "alert_inbox"):
+        inbox = service.events.alert_inbox()
+        alerts = [record for record in alerts if inbox.claim_delivery(record)]
+        critical = [a for a in inbox.recent(unread=True) if a["record"].get("level") == "CRITICAL"]
+        if critical:
+            st.warning(f"{len(critical)} alerte(s) critique(s) non acquittee(s). Consulter Operations.")
     if alerts:
         newest = alerts[-1]
         st.session_state.alert_latest = newest

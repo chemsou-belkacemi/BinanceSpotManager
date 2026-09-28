@@ -13,9 +13,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from binance_spot_manager.config import get_settings  # noqa: E402
-from binance_spot_manager.execution_engine import (  # noqa: E402
-    ExecutionEngine, build_client_order_id,
-)
 from binance_spot_manager.investment_plan import (  # noqa: E402
     investment_risk_context, make_investment_position, preview_investment,
     preview_simple_buy,
@@ -28,6 +25,7 @@ from binance_spot_manager.risk_engine import RiskEngine  # noqa: E402
 from ui_common import (  # noqa: E402
     banner, fmt_price, fmt_qty, get_service, load_rules,
     page_header, sidebar_status, symbol_status_box,
+    submit_to_worker, new_command_confirmation,
 )
 
 settings = get_settings()
@@ -36,6 +34,7 @@ st.set_page_config(page_title="Investissement — BinanceSpotManager", page_icon
 page_header("Acheter sur Binance Demo", "Achat simple, ou investissement avec TP seul / SL seul")
 banner(settings)
 sidebar_status(settings)
+new_command_confirmation("investment")
 
 if not settings.is_demo:
     st.error("Cette page est réservée à Binance Demo.")
@@ -147,35 +146,13 @@ if purchase_mode.startswith("Achat simple"):
         if not fresh.eligible or fresh.quantity != simple.quantity:
             st.error("Prix ou solde modifié : vérifie le nouvel aperçu avant de recommencer.")
             st.stop()
-        execution = ExecutionEngine(settings=settings, events=service.events)
-        try:
-            result = execution.place_simple_buy(
-                symbol=symbol, quantity=fresh.quantity, client_order_id=client_id,
-            )
-        except Exception as exc:
-            st.error(
-                f"Statut d'achat incertain ({exc}). Vérifie Binance avec l'identifiant "
-                f"{client_id} avant de réessayer ; cet identifiant sera conservé."
-            )
-            st.stop()
-        if result.success:
+        if submit_to_worker(
+            "SIMPLE_BUY",
+            {"symbol": symbol, "quantity": fresh.quantity, "budget": budget,
+             "reference_price": latest_price, "client_order_id": client_id},
+            confirmation_key=f"simple_buy_{st.session_state.simple_buy_nonce}",
+        ):
             st.session_state.simple_buy_done = True
-            if result.dry_run:
-                st.info("DRY_RUN : aucun achat envoyé.")
-            elif result.executed_qty <= 0:
-                st.warning(
-                    f"Ordre #{result.order_id} accepté mais achat non encore confirmé. "
-                    "Vérifie son statut côté Binance avant toute autre action."
-                )
-            else:
-                st.success(
-                    f"Achat {symbol} accepté · ordre #{result.order_id} · "
-                    f"reçu {fmt_qty(result.executed_qty)} {rules.base_asset}."
-                )
-                st.caption("Le portefeuille inclura l'actif après mise à jour des soldes Binance Demo.")
-        else:
-            st.error(f"Achat refusé : {result.error}")
-        st.cache_resource.clear()
     st.stop()
 
 if rules.quote_asset not in {"USDT", "USDC"}:
@@ -322,57 +299,9 @@ if st.button(
         st.stop()
 
     position = make_investment_position(latest, current_price=latest_price)
-    entry = position.entries[0]
-    entry.client_order_id = build_client_order_id(
-        symbol=symbol, position_id=position.position_id, suffix="E1", environment="DEMO"
+    submit_to_worker(
+        "SUBMIT_POSITION",
+        {"position": position.model_dump(mode="json"), "entry_ids": [e.entry_id for e in position.entries],
+         "existing_id": None, "reference_price": latest_price},
+        confirmation_key="investment",
     )
-    entry.status = EntryStatus.SUBMITTED  # suivi possible si la requête d'achat expire
-    service.positions.save(position)
-    service.events.append(
-        EventType.POSITION_CREATED, f"Investissement {symbol} préparé ({exit_mode})",
-        position_id=position.position_id, symbol=symbol,
-    )
-    execution = ExecutionEngine(settings=settings, events=service.events)
-    try:
-        outcome = execution.place_entry(position, entry, current_price=latest_price)
-        if outcome.success and not outcome.dry_run and outcome.executed_qty > 0:
-            commissions = outcome.commissions
-            if not commissions:
-                trades = execution.fetch_my_trades(symbol, order_id=outcome.order_id)
-                if not trades:
-                    raise RuntimeError("Frais de l'achat non vérifiables sur Binance")
-                commissions = [
-                    Commission(asset=str(trade["commissionAsset"]), amount=float(trade["commission"]))
-                    for trade in trades
-                    if trade.get("commissionAsset") and float(trade.get("commission") or 0) > 0
-                ]
-            PositionEngine(rules).apply_entry_fill(
-                position, entry.entry_id,
-                executed_qty=outcome.executed_qty,
-                average_price=outcome.average_price,
-                quote_spent=outcome.cummulative_quote_qty,
-                commissions=commissions,
-                order_id=outcome.order_id,
-            )
-        elif outcome.dry_run:
-            entry.status = EntryStatus.PLANNED
-        service.positions.save(position)
-    except Exception as exc:  # statut d'achat potentiellement inconnu
-        position.sync_status = SyncStatus.DESYNC_DETECTED
-        position.automation.paused = True
-        service.positions.save(position)
-        service.events.append(
-            EventType.ERROR, f"Statut achat {symbol} incertain : {exc}",
-            position_id=position.position_id, symbol=symbol, level="CRITICAL",
-        )
-        st.error("Statut d'achat incertain : vérifier Binance et le journal avant toute autre action.")
-        st.stop()
-
-    if not outcome.success:
-        st.error(f"Achat refusé : {outcome.error}")
-    elif outcome.dry_run:
-        st.info("Simulation créée localement : aucun achat ni ordre de sortie envoyé.")
-    else:
-        st.success(f"Achat envoyé : position {position.position_id}")
-        st.info("Le worker place la sortie sur Binance après confirmation du fill. Vérifie son statut au Dashboard.")
-    st.cache_resource.clear()

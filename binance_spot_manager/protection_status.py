@@ -1,6 +1,39 @@
 """Alertes locales de protection : aucune requete Binance ni mutation."""
 
 from .models import Position, SLStatus, SyncStatus
+from datetime import datetime, timezone
+
+
+def protection_overview(positions, report=None, *, now=None):
+    """Un etat local n'est jamais presente comme une preuve Binance fraiche."""
+    now = now or datetime.now(timezone.utc)
+    fresh = False
+    if report:
+        try:
+            age = (now - datetime.fromisoformat(report["checked_at"])).total_seconds()
+            fresh = 0 <= age <= 30
+        except (ValueError, TypeError, KeyError):
+            pass
+    rows = []
+    for p in positions:
+        if not p.is_open:
+            continue
+        checks = [r for r in (report or {}).get("rows", []) if r["Position"] == p.position_id]
+        issues = protection_alerts([p])
+        if p.metrics.net_qty <= 0:
+            state = "En attente d'achat"
+        elif p.oco_exit is None and p.stop_loss.status is SLStatus.NONE:
+            state = "Sans SL volontairement"
+        elif fresh and checks and all(r["Resultat"] == "OK" for r in checks) and any("SL" in r["Sortie"] for r in checks) and not issues:
+            state = "Sorties verifiees sur Binance (instantane)"
+        elif issues:
+            state = "Protection a controler"
+        else:
+            state = "Verification Binance requise" if not fresh else "Protection non confirmee"
+        rows.append({"Paire": p.symbol, "Position": p.position_id, "Protection": state,
+                     "Automatisation": "En pause" if p.automation.paused else "Active",
+                     "Detail": " ; ".join(issue["message"] for issue in issues)})
+    return rows
 
 
 def protection_alerts(positions: list[Position]) -> list[dict]:

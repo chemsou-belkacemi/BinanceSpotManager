@@ -75,6 +75,7 @@ Pages disponibles dans le menu de gauche :
 | **History** | positions terminées, statistiques, duplication de stratégie |
 | **Settings** | sécurité, risque, presets, notifications, diagnostic |
 | **Investissement** | achat Market Demo simple sans sortie, ou avec TP seul / SL seul |
+| **Operations** | demandes au worker, intentions incertaines, protection, alertes, comptabilité et sauvegardes |
 
 ## 5. Lancement du worker
 
@@ -341,6 +342,47 @@ Voir [l'audit du 28 septembre 2026](docs/AUDIT_SECURITE_2026-09-28.md) pour les
 correctifs appliqués, les vérifications et les travaux restants avant commercialisation.
 L'interface est désormais liée à `127.0.0.1` par défaut, avec CORS et protection XSRF
 activés dans `.streamlit/config.toml`. Redémarrer Streamlit pour appliquer ces réglages.
+
+### Commandes persistantes et opérations
+
+Les boutons d'achat, d'annulation, de déplacement de SL et de fermeture locale
+ne passent plus leurs ordres depuis Streamlit. Ils enregistrent une demande dans
+`data/commands.sqlite3`, que le worker traite séquentiellement. Un worker actif
+est donc nécessaire, également pour une demande de simulation.
+
+- Les confirmations sont dédupliquées et les demandes en attente expirent après
+  deux minutes. Un déplacement du marché de plus de 1 % depuis la confirmation
+  refuse l'achat ; les soldes et le risque sont recontrôlés côté worker.
+- Une demande `SUCCEEDED` signifie **traitée**, pas nécessairement entièrement
+  exécutée par Binance. Voir les identifiants et statuts d'ordres.
+- Une demande interrompue en cours devient `UNCERTAIN` au redémarrage : jamais
+  de renvoi automatique. Operations permet de lire le statut d'une intention.
+- Une annulation manuelle met en pause l'automatisation de la position concernée
+  afin qu'elle ne recrée pas immédiatement la sortie supprimée.
+- La file est séparée par hôte, mode et empreinte de compte. Les positions
+  historiques restent monocompte : ne pas partager ce répertoire entre comptes.
+
+Operations affiche un contrôle de protection horodaté, périmé après 30 secondes,
+et une boîte d'alertes persistante avec acquittement. Acquitter ne corrige pas le
+problème ; les notifications navigateur restent tributaires des autorisations
+du système. Une notification réclamée puis interrompue avant affichage reste
+visible dans l'historique, sans garantie de son ou de popup.
+
+La comptabilité inclut les frais d'achat en cotation dans le coût réparti entre
+vendu et restant. Les commissions en base réduisent les quantités. Les frais
+BNB/autres sans conversion historique restent explicitement non valorisés ;
+le PnL est signalé incomplet. Aucun taux actuel n'est présenté comme historique.
+
+Pour exporter une sauvegarde : arrêter proprement le worker, ouvrir Operations,
+préparer puis télécharger l'archive. Les positions, préférences, presets,
+commandes et intentions sont inclus ; `.env`, `.venv` et les journaux sont exclus.
+L'archive est **non chiffrée** : la conserver dans un emplacement privé.
+Le contrôle vérifie les empreintes, JSON, SQLite et chemins autorisés. Il ne
+restaure rien automatiquement et ne prouve pas l'origine d'une archive non signée.
+Ne jamais remplacer le journal d'intentions récent par un ancien sans rapprochement.
+
+Cette étape ne met pas en service le multi-OCO, l'authentification multiutilisateur
+ni une restauration automatique. Voir [l'état d'avancement](docs/OPERATIONS_V2.md).
 
 ## 14. Évolutions prévues
 

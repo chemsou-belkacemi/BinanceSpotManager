@@ -14,7 +14,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from binance_spot_manager.config import get_settings  # noqa: E402
-from binance_spot_manager.execution_engine import ExecutionEngine  # noqa: E402
 from binance_spot_manager.models import EntryStatus, EventType, SLStatus, SyncStatus, TPStatus  # noqa: E402
 from binance_spot_manager.oco_preview import preview_oco_sell  # noqa: E402
 from binance_spot_manager.position_engine import recompute_position  # noqa: E402
@@ -28,6 +27,7 @@ from ui_common import (  # noqa: E402
     get_service,
     page_header,
     sidebar_status,
+    submit_to_worker,
 )
 
 settings = get_settings()
@@ -44,120 +44,14 @@ sidebar_status(settings)
 # ==========================================================================
 
 
-def _apply_cancel_locally(order_id: int) -> bool:
-    """Reporte une annulation sur l'etat local. Retourne True si une
-    position a bien ete mise a jour.
-
-    Sans cela, la position continuerait de croire que l'ordre vit, et le
-    worker chercherait un ordre disparu a chaque cycle.
-    """
-    for position in service.positions.list_open():
-        touched = False
-
-        if position.oco_exit and order_id in {
-            position.oco_exit.tp_order_id, position.oco_exit.sl_order_id,
-        }:
-            position.oco_exit.status = "FAILED"
-            position.stop_loss.status = SLStatus.CANCELED
-            position.take_profits[0].status = TPStatus.FAILED
-            position.sync_status = SyncStatus.DESYNC_DETECTED
-            position.log(
-                EventType.MANUAL_CHANGE,
-                "OCO annulé depuis le Dashboard — position non protégée",
-                order_id=order_id,
-            )
-            recompute_position(position)
-            service.positions.save(position)
-            return True
-
-        for entry in position.entries:
-            if entry.order_id == order_id:
-                entry.status = EntryStatus.CANCELED
-                position.log(
-                    EventType.ENTRY_CANCELED,
-                    f"Entry {entry.sequence_number} annulée depuis le Dashboard",
-                    entry_id=entry.entry_id,
-                )
-                touched = True
-
-        if position.stop_loss.order_id == order_id:
-            position.stop_loss.status = SLStatus.CANCELED
-            position.log(
-                EventType.MANUAL_CHANGE,
-                "SL annulé depuis le Dashboard — position non protégée",
-                order_id=order_id,
-            )
-            touched = True
-
-        for tp in position.take_profits:
-            if tp.order_id == order_id:
-                tp.status = TPStatus.CANCELED
-                position.log(
-                    EventType.MANUAL_CHANGE,
-                    f"TP {tp.sequence_number} annulé depuis le Dashboard — vente automatique désactivée",
-                    order_id=order_id,
-                )
-                touched = True
-
-        if touched:
-            recompute_position(position)
-            service.positions.save(position)
-            return True
-
-    return False
-
-
 def _cancel_order(order, confirmed: bool) -> None:
-    """Annule un ordre apres confirmation, puis met a jour l'etat local."""
     if not confirmed:
-        st.warning("Coche la confirmation pour annuler cet ordre.")
+        st.warning("Confirme l'annulation avant envoi.")
         return
-
-    is_oco = any(
-        p.oco_exit and order.order_id in {p.oco_exit.tp_order_id, p.oco_exit.sl_order_id}
-        for p in service.positions.list_open()
+    submit_to_worker(
+        "CANCEL_ORDER", {"symbol": order.symbol, "order_id": order.order_id},
+        confirmation_key=f"cancel_{order.order_id}",
     )
-    is_single_tp = any(
-        p.oco_exit is None and any(tp.order_id == order.order_id for tp in p.take_profits)
-        for p in service.positions.list_open()
-    )
-    execution = ExecutionEngine(settings=settings, events=service.events)
-    result = execution.cancel_order(
-        order.symbol,
-        order_id=order.order_id,
-        client_order_id=order.client_order_id or None,
-    )
-
-    if not result.success:
-        st.error(f"Annulation refusée : {result.error}")
-        return
-
-    updated = _apply_cancel_locally(order.order_id)
-
-    service.events.append(
-        EventType.MANUAL_CHANGE,
-        f"Ordre #{order.order_id} annulé depuis le Dashboard ({order.symbol})",
-        symbol=order.symbol,
-        level="WARNING",
-        owner=order.owner or "hors bot",
-        local_state_updated=updated,
-    )
-
-    st.success(f"Ordre #{order.order_id} annulé.")
-    if is_oco:
-        st.warning("OCO annulé : les deux branches sont retirées, la position n'est plus protégée.")
-    elif is_single_tp:
-        st.warning("TP autonome annulé : la position reste ouverte sans vente automatique.")
-    if updated:
-        st.caption("État local mis à jour.")
-    else:
-        st.warning(
-            "Ordre annulé côté Binance, mais aucune position locale ne le "
-            "référençait — vérifier la réconciliation."
-        )
-
-    st.cache_resource.clear()
-    st.rerun()
 
 
 # ==========================================================================
@@ -267,6 +161,8 @@ st.divider()
 st.subheader("Portefeuille")
 
 view = service.portfolio()
+if any(not p.pnl.complete for p in service.positions.list_all()):
+    st.warning("Certains frais ne sont pas convertis : PnL incomplet. Voir la comptabilite detaillee dans Operations.")
 if view.errors:
     for error in view.errors:
         st.warning(error)

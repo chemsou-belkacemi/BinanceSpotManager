@@ -31,6 +31,7 @@ from .position_store import PositionStore, get_presets_store, get_settings_store
 from .risk_engine import PortfolioSnapshot, RiskEngine, RiskLimits
 from .symbol_rules import SymbolRulesCache
 from .binance_client import BinanceSpotClient as _Client  # noqa: F401
+from .command_store import CommandStore, account_scope
 
 logger = logging.getLogger("bsm.dashboard")
 
@@ -142,6 +143,18 @@ class DashboardService:
         self.events = events or EventStore()
         self.notifications = NotificationEngine(self.settings)
         self.market_prices = DemoMarketPriceStream(self.settings)
+        self.commands = CommandStore()
+
+    def submit_command(self, action, payload, *, request_key):
+        status = self.worker_status()
+        if not status.running or status.heartbeat_age is None or status.heartbeat_age >= 20:
+            raise ValueError("Demarre le worker avant d'envoyer une demande")
+        runtime = self.runtime()
+        if runtime.run_mode != self.settings.run_mode.value or runtime.base_url != self.settings.base_url:
+            raise ValueError("Configuration du worker differente : le redemarrer")
+        if runtime.command_scope != account_scope(self.settings):
+            raise ValueError("Compte du worker different ou ancien worker : le redemarrer")
+        return self.commands.enqueue(account_scope(self.settings), action, payload, request_key=request_key)
 
     # ------------------------------------------------------------------
     # Worker

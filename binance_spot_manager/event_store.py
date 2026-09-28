@@ -11,12 +11,14 @@ import json
 import logging
 from logging.handlers import RotatingFileHandler
 import os
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from .config import ERROR_LOG_FILE, EVENTS_FILE, ensure_directories
 from .models import EventType, utcnow
+from .alert_inbox import AlertInbox
 
 logger = logging.getLogger("bsm.events")
 
@@ -28,6 +30,9 @@ class EventStore:
         ensure_directories()
         self.path = Path(path) if path else EVENTS_FILE
         self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def alert_inbox(self):
+        return AlertInbox(self.path.with_suffix(".alerts.sqlite3"))
 
     def append(
         self,
@@ -53,7 +58,8 @@ class EventStore:
                 handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
                 handle.flush()
                 os.fsync(handle.fileno())
-        except OSError as exc:
+            self.alert_inbox().ingest(record)
+        except (OSError, sqlite3.Error) as exc:
             # Le journal ne doit jamais faire tomber le bot.
             logger.error("Ecriture evenement impossible : %s", exc)
         return record

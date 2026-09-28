@@ -6,6 +6,7 @@ import math
 
 from .config import ALLOWED_DEMO_BASE_URLS, Settings
 from .models import Position, utcnow
+from .symbol_rules import SymbolRulesCache
 
 
 def inspect_exits(settings: Settings, client, positions: list[Position]) -> dict:
@@ -15,6 +16,7 @@ def inspect_exits(settings: Settings, client, positions: list[Position]) -> dict
         raise ValueError("Le controle des ordres reels exige le mode Demo et des cles API.")
 
     rows = []
+    rules_cache = SymbolRulesCache(client)
     for position in positions:
         oco = position.oco_exit
         if oco is not None:
@@ -58,6 +60,32 @@ def inspect_exits(settings: Settings, client, positions: list[Position]) -> dict
                     "Prix stop": float(order.get("stopPrice", 0)),
                 })
                 issues = []
+                if not all(math.isfinite(value) for value in (
+                    actual_qty, row["Execute"], row["Prix limite"], row["Prix stop"],
+                )):
+                    issues.append("Valeurs numeriques Binance invalides")
+                if row["Execute"] != 0:
+                    issues.append("Execution a rapprocher avant de confirmer la protection")
+                if name.startswith("SL"):
+                    expected_stop = position.stop_loss.resolved_price
+                    if order.get("type") != "STOP_LOSS_LIMIT" or not (row["Prix stop"] > row["Prix limite"] > 0):
+                        issues.append("Type ou prix de protection SL inattendu")
+                    if not expected_stop or not math.isclose(row["Prix stop"], expected_stop, rel_tol=0, abs_tol=1e-8):
+                        issues.append("Niveau SL different ou non defini localement")
+                    if expected_stop:
+                        expected_limit = float(rules_cache.get(position.symbol).round_price(
+                            expected_stop * (1 - position.stop_loss.limit_offset_percent / 100), mode="down",
+                        ))
+                        if not math.isclose(row["Prix limite"], expected_limit, rel_tol=0, abs_tol=1e-8):
+                            issues.append("Prix limite du SL different")
+                else:
+                    tp = next((t for t in position.take_profits if t.order_id == order_id or client_id and t.client_order_id == client_id), None)
+                    if oco and position.take_profits:
+                        tp = position.take_profits[0]
+                    if order.get("type") not in {"LIMIT", "LIMIT_MAKER"}:
+                        issues.append("Type de TP limite inattendu")
+                    if tp is None or not tp.target_price or not math.isclose(row["Prix limite"], tp.target_price, rel_tol=0, abs_tol=1e-8):
+                        issues.append("Niveau TP different ou non defini localement")
                 if local_status not in {"ACTIVE", "SUBMITTED"}:
                     issues.append(f"Etat local {local_status} : controle requis")
                 if order.get("symbol") != position.symbol or order.get("side") != "SELL":
@@ -77,7 +105,7 @@ def inspect_exits(settings: Settings, client, positions: list[Position]) -> dict
                 if issues:
                     row.update(Resultat="ECART", Detail=" ; ".join(issues))
                 else:
-                    row.update(Resultat="OK", Detail="Ordre de vente ouvert, identifiants et quantite coherents.")
+                    row.update(Resultat="OK", Detail="Ordre ouvert : identifiants, quantite, type et niveau TP/SL coherents.")
             except Exception as exc:  # noqa: BLE001 - poursuivre les autres controles
                 row.update(Resultat="INVERIFIABLE", Detail=str(exc))
     return {"checked_at": utcnow().isoformat(), "rows": rows}

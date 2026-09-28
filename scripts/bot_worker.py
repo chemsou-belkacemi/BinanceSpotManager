@@ -58,6 +58,9 @@ from binance_spot_manager.position_engine import PositionEngine, finish_position
 from binance_spot_manager.position_store import PositionStore, RuntimeStore, get_settings_store  # noqa: E402
 from binance_spot_manager.reconciliation_engine import ReconciliationEngine  # noqa: E402
 from binance_spot_manager.symbol_rules import SymbolRulesCache  # noqa: E402
+from binance_spot_manager.command_store import CommandStore, account_scope
+from binance_spot_manager.command_processor import CommandProcessor
+from binance_spot_manager.dashboard_service import DashboardService
 
 #: Un cycle de reconciliation tous les N passages de boucle.
 RECONCILE_EVERY = 12
@@ -92,6 +95,9 @@ class Worker:
         self.reconciliation = ReconciliationEngine(self.execution, events=self.events)
         self.notifications = NotificationEngine(self.settings)
         self.market_prices = DemoMarketPriceStream(self.settings)
+        self.commands = CommandStore()
+        risk_service = DashboardService(self.settings, position_store=self.positions, client=self.client, events=self.events)
+        self.command_processor = CommandProcessor(self.commands, self.positions, self.execution, risk_service.risk_limits)
 
         self._running = True
         self._loop = 0
@@ -113,6 +119,9 @@ class Worker:
             return 2
 
         self._install_signal_handlers()
+        interrupted = self.commands.recover_interrupted(account_scope(self.settings))
+        if interrupted:
+            self.events.append(EventType.ERROR, f"{interrupted} commande(s) interrompue(s) : controle requis", level="CRITICAL")
         self._set_state(WorkerState.STARTING, "Worker demarre")
         self.events.append(
             EventType.WORKER_STARTED,
@@ -154,12 +163,13 @@ class Worker:
         runtime.environment = self.settings.environment.value
         runtime.run_mode = self.settings.run_mode.value
         runtime.base_url = self.settings.base_url
+        runtime.command_scope = account_scope(self.settings)
         runtime.last_message = message or runtime.last_message
         runtime.heartbeat_at = utcnow()
         if hasattr(self, "market_prices"):
             runtime.price_diagnostics = self.market_prices.snapshot()
             runtime.price_diagnostics["sources"] = getattr(self, "_price_sources", {})
-        if runtime.started_at is None:
+        if runtime.started_at is None or state is WorkerState.STARTING:
             runtime.started_at = utcnow()
         for key, value in fields.items():
             if hasattr(runtime, key):
@@ -228,6 +238,8 @@ class Worker:
     # ------------------------------------------------------------------
 
     def _tick(self) -> int:
+        if hasattr(self, "command_processor"):
+            self.command_processor.run_one()
         positions = self.positions.list_open()
         price_provider = self._price_provider([p.symbol for p in positions])
         errors = [

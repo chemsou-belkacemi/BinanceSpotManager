@@ -424,6 +424,8 @@ class PositionMetrics(BSMModel):
 
 
 class PositionPnL(BSMModel):
+    complete: bool = True
+    unpriced_fees: dict[str, float] = Field(default_factory=dict)
     unrealized: float = 0.0
     unrealized_percent: float = 0.0
     realized: float = 0.0
@@ -603,6 +605,7 @@ class Position(BSMModel):
 
 
 class BotRuntime(BSMModel):
+    command_scope: str = ""
     state: WorkerState = WorkerState.STOPPED
     pid: Optional[int] = None
     started_at: Optional[datetime] = None

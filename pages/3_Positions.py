@@ -32,6 +32,7 @@ from binance_spot_manager.position_engine import (  # noqa: E402
     recompute_position,
 )
 from binance_spot_manager.reconciliation_engine import audit_open_orders  # noqa: E402
+from binance_spot_manager.reconciliation_engine import ReconciliationEngine
 from ui_common import (  # noqa: E402
     banner,
     fmt_percent,
@@ -41,6 +42,7 @@ from ui_common import (  # noqa: E402
     get_service,
     page_header,
     sidebar_status,
+    submit_to_worker, new_command_confirmation,
 )
 
 settings = get_settings()
@@ -63,6 +65,7 @@ labels = {
 }
 choice = st.selectbox("Position", list(labels.keys()))
 position = labels[choice]
+new_command_confirmation(f"move_sl_{position.position_id}")
 
 rules = service.rules_cache.get(position.symbol)
 price = service.current_price(position.symbol)
@@ -500,27 +503,12 @@ if position.is_open and position.metrics.net_qty > 0 and sl.status is not SLStat
                 if resolved:
                     target = float(rules.round_price(resolved, mode="down"))
 
-            remaining = position.metrics.net_qty
-            result = execution.move_stop_loss(
-                position, new_stop_price=target, quantity=remaining
+            submit_to_worker(
+                "MOVE_SL",
+                {"position_id": position.position_id, "target_price": target,
+                 "expected_order_id": sl.order_id},
+                confirmation_key=f"move_sl_{position.position_id}",
             )
-            if result.success:
-                position.stop_loss.resolved_price = target
-            recompute_position(position)
-            service.positions.save(position)
-
-            if result.success:
-                position.log(
-                    EventType.SL_MOVED,
-                    f"SL déplacé vers {fmt_price(target)} depuis le Dashboard",
-                    new_stop=target,
-                )
-                service.positions.save(position)
-                st.success(f"SL déplacé vers {fmt_price(target)}")
-                st.cache_resource.clear()
-                st.rerun()
-            else:
-                st.error(f"SL non déplacé : {result.error}")
 
         if sl_buttons[1].button(
             "🗑️ Supprimer le SL",
@@ -529,23 +517,12 @@ if position.is_open and position.metrics.net_qty > 0 and sl.status is not SLStat
             width="stretch",
         ):
             if sl.order_id:
-                cancelled = execution.cancel_order(
-                    position.symbol,
-                    order_id=sl.order_id,
-                    client_order_id=sl.client_order_id,
+                submit_to_worker(
+                    "CANCEL_ORDER", {"symbol": position.symbol, "order_id": sl.order_id},
+                    confirmation_key=f"delete_sl_{position.position_id}_{sl.order_id}",
                 )
-                if not cancelled.success:
-                    st.error(f"Annulation refusée : {cancelled.error}")
-                    st.stop()
-
-            sl.status = SLStatus.CANCELED
-            sl.order_id = None
-            sl.client_order_id = None
-            position.log(
-                EventType.MANUAL_CHANGE,
-                "SL supprimé manuellement — position non protégée",
-            )
-            _save("SL supprimé")
+            else:
+                st.warning("Aucun ordre identifie : verifier les intentions dans Operations.")
 else:
     st.caption("Aucun SL configuré, ou position sans quantité ouverte.")
 
@@ -601,7 +578,7 @@ for finding in audit_open_orders(position, raw_orders):
 st.markdown("**Réconcilier avec Binance**")
 if st.button("Lancer une réconciliation"):
     with st.spinner("Comparaison de l'état local et de l'état Binance..."):
-        report = service.reconciliation.reconcile(position)
+        report = ReconciliationEngine(execution, events=service.events).reconcile(position, apply=False)
 
     if not report.has_desync:
         st.success("✅ État local et Binance synchronisés.")
@@ -615,7 +592,6 @@ if st.button("Lancer une réconciliation"):
             level(f"[{finding.kind}] {finding.message}{suffix}")
             if finding.suggested_action:
                 st.caption(f"Action suggérée : {finding.suggested_action}")
-    service.positions.save(position)
 
 # ==========================================================================
 # Automatisation
@@ -679,38 +655,10 @@ if position.is_open:
         )
         confirm_close = st.checkbox("Je confirme la fermeture locale")
         if st.button("Fermer la position", disabled=not confirm_close):
-            for entry in position.open_entries:
-                execution.cancel_entry(position, entry)
-            if position.oco_exit and position.oco_exit.status in {"ACTIVE", "PARTIAL"}:
-                cancelled = execution.cancel_order(
-                    position.symbol, order_id=position.oco_exit.tp_order_id
-                )
-                if not cancelled.success:
-                    st.error("OCO non annulé : fermeture locale refusée.")
-                    st.stop()
-                position.oco_exit.status = "CANCELED"
-                position.stop_loss.status = SLStatus.CANCELED
-                for tp in position.take_profits:
-                    if tp.status is TPStatus.SUBMITTED:
-                        tp.status = TPStatus.CANCELED
-            else:
-                for tp in position.take_profits:
-                    if tp.status is TPStatus.SUBMITTED and tp.order_id:
-                        cancelled = execution.cancel_order(position.symbol, order_id=tp.order_id)
-                        if not cancelled.success:
-                            st.error(f"TP #{tp.order_id} non annulé : fermeture locale refusée.")
-                            st.stop()
-                        tp.status = TPStatus.CANCELED
-                if position.stop_loss.status is SLStatus.ACTIVE and position.stop_loss.order_id:
-                    cancelled = execution.cancel_order(position.symbol, order_id=position.stop_loss.order_id)
-                    if not cancelled.success:
-                        st.error("SL non annulé : fermeture locale refusée.")
-                        st.stop()
-                    position.stop_loss.status = SLStatus.CANCELED
-            finish_position(position, CloseReason.MANUAL_CLOSE)
-            service.positions.save(position)
-            st.success("Position fermée localement.")
-            st.rerun()
+            submit_to_worker(
+                "CLOSE_LOCAL", {"position_id": position.position_id},
+                confirmation_key=f"close_{position.position_id}",
+            )
 
 if position.status.value == "CLOSED":
     st.divider()

@@ -535,20 +535,20 @@ def recompute_position(position: Position) -> Position:
         metrics.net_qty * (sl_price - metrics.average_price) if metrics.net_qty > 0 else 0.0
     )
 
-    realized = sum(tp.gain_realized for tp in position.take_profits)
-    if position.stop_loss.executed_qty > 0 and position.stop_loss.average_fill_price:
-        realized += (
-            position.stop_loss.average_fill_price - metrics.average_price
-        ) * position.stop_loss.executed_qty - position.stop_loss.commission_total(position.quote_asset)
+    from .accounting import accounting_snapshot
+    accounting = accounting_snapshot(position)
+    realized = accounting["Realise"]
     position.pnl.realized = realized
 
-    unrealized = (current - metrics.average_price) * metrics.net_qty if metrics.net_qty > 0 else 0.0
+    unrealized = accounting["Non realise"]
     position.pnl.unrealized = unrealized
     position.pnl.unrealized_percent = (
         percent_change(current, metrics.average_price) if metrics.average_price else 0.0
     )
     position.pnl.total = realized + unrealized
     position.pnl.fees_paid = quote_fees
+    position.pnl.unpriced_fees = accounting["Frais non convertis"]
+    position.pnl.complete = accounting["Complet"]
     position.pnl.updated_at = utcnow()
     metrics.updated_at = utcnow()
 
