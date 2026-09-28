@@ -5,10 +5,33 @@ from types import SimpleNamespace
 import pytest
 
 from binance_spot_manager.config import Environment, RunMode, SecurityError, Settings
-from binance_spot_manager.models import Position
+from binance_spot_manager.models import OcoExit, Position
 from scripts import test_oco_lifecycle_demo as lifecycle
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_restart_keeps_oco_identifiers(monkeypatch, changed):
+    position = Position(symbol="ETHUSDT", oco_exit=OcoExit(
+        order_list_id=1, list_client_order_id="test", tp_order_id=10,
+        sl_order_id=11, quantity=0.0053,
+    ))
+    recovered = position.model_copy(deep=True)
+    if changed:
+        recovered.oco_exit.tp_order_id = 99
+    calls = []
+    monkeypatch.setattr(lifecycle, "BotProcessManager", lambda *a: SimpleNamespace(
+        stop=lambda **kw: calls.append("stop") or (True, "stopped"),
+        start=lambda: calls.append("start") or (True, "started"),
+    ))
+    store = SimpleNamespace(load=lambda pid: recovered)
+    if changed:
+        with pytest.raises(RuntimeError, match="Identifiants"):
+            lifecycle.restart_worker_for_test(Settings(), store, position)
+    else:
+        lifecycle.restart_worker_for_test(Settings(), store, position)
+    assert calls == ["stop", "start"]
 
 
 @pytest.mark.parametrize("status", ["CANCELED", "EXPIRED", "EXPIRED_IN_MATCH"])

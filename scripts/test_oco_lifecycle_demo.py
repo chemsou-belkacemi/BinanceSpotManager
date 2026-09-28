@@ -44,7 +44,27 @@ def confirm_single_oco_fill(tp, sl):
         raise RuntimeError("Branche opposee encore ouverte ou partiellement executee")
 
 
-def run(resume_id=None):
+def restart_worker_for_test(settings, store, position):
+    manager = BotProcessManager(settings)
+    stopped, message = manager.stop(timeout_seconds=20)
+    if not stopped:
+        raise RuntimeError(f"Arret du worker non confirme : {message}")
+    started, message = manager.start()
+    if not started:
+        raise RuntimeError(f"OCO toujours chez Binance, worker non relance : {message}")
+    recovered = store.load(position.position_id)
+    if recovered is None or recovered.oco_exit is None:
+        raise RuntimeError("References OCO absentes apres redemarrage")
+    expected = position.oco_exit
+    actual = recovered.oco_exit
+    if (actual.order_list_id, actual.tp_order_id, actual.sl_order_id) != (
+        expected.order_list_id, expected.tp_order_id, expected.sl_order_id,
+    ):
+        raise RuntimeError("Identifiants OCO modifies apres redemarrage")
+    report("WORKER_RESTARTED", position_id=position.position_id, list_id=actual.order_list_id)
+
+
+def run(resume_id=None, *, restart_worker=False, tp_focus=False):
     settings = get_settings()
     if settings.dry_run:
         raise SecurityError("Ce test exige des ordres Demo reels, hors DRY_RUN")
@@ -106,7 +126,7 @@ def run(resume_id=None):
     position.status = PositionStatus.ACTIVE
     current = client.get_price(symbol)
     position.take_profits = [TakeProfit(target_price=current * 1.0001, sell_percent=100)]
-    position.stop_loss.resolved_price = current * 0.999
+    position.stop_loss.resolved_price = current * (0.99 if tp_focus else 0.999)
     preview = preview_oco_sell(position, rules, current)
     if not preview.eligible:
         store.save(position)
@@ -144,6 +164,13 @@ def run(resume_id=None):
     report("OCO_CREATED", position_id=position.position_id, list_id=response["orderListId"],
            tp_order_id=tp_order["orderId"], sl_order_id=sl_order["orderId"],
            quantity=preview.quantity, tp=preview.take_profit_price, sl=preview.stop_price)
+    if restart_worker:
+        restart_worker_for_test(settings, store, position)
+        allowed_ids = {tp_order["orderId"], sl_order["orderId"]}
+        opened = client.get_open_orders(symbol)
+        if any(o["orderId"] not in allowed_ids for o in opened):
+            raise RuntimeError("Ordre supplementaire detecte apres redemarrage")
+        report("NO_DUPLICATE_OPEN_ORDER", symbol=symbol, count=len(opened))
     deadline = time.monotonic() + 120
     filled = False
     while time.monotonic() < deadline:
@@ -174,7 +201,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--resume-position", help="Reprendre seulement un achat de test deja confirme")
+    parser.add_argument("--restart-worker", action="store_true", help="Redemarrer apres creation OCO")
+    parser.add_argument("--tp-focus", action="store_true", help="SL plus eloigne pour observer le TP")
     args = parser.parse_args()
     if not args.execute:
         parser.error("--execute requis : ce test place des ordres Binance Demo")
-    run(args.resume_position)
+    run(args.resume_position, restart_worker=args.restart_worker, tp_focus=args.tp_focus)
