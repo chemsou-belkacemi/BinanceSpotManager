@@ -11,14 +11,17 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import smtplib
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from email.message import EmailMessage
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from .config import Settings, get_settings
 from .models import EventType, Position, TakeProfit
@@ -46,6 +49,16 @@ NOTIFIABLE_EVENTS: dict[str, str] = {
     "INSUFFICIENT_CAPITAL": "Capital insuffisant",
     "DESYNC_DETECTED": "Desynchronisation",
 }
+
+#: Evenements qui se repetent a chaque cycle tant que le probleme persiste.
+#: Les evenements de trading (TP, SL, fin de position) ne sont jamais limites.
+THROTTLED_EVENTS: frozenset[str] = frozenset({"BINANCE_ERROR", "DESYNC_DETECTED"})
+
+#: Un message identique n'est renvoye qu'apres ce delai.
+REPEAT_COOLDOWN_SECONDS = 900.0
+
+#: Ecart minimal entre deux messages differents d'un meme evenement/position.
+MIN_INTERVAL_SECONDS = 60.0
 
 
 @dataclass
@@ -190,13 +203,29 @@ class WhatsAppChannel(NotificationChannel):
 # ==========================================================================
 
 
+@dataclass
+class _ThrottleState:
+    body: str
+    sent_at: float
+    suppressed: int = 0
+
+
 class NotificationEngine:
-    """Dispatche une notification vers les canaux configures."""
+    """Dispatche une notification vers les canaux configures.
+
+    `background=True` (worker) : l'envoi reseau passe par un thread dedie pour
+    ne jamais retarder la surveillance TP/SL. Les erreurs et desynchronisations
+    repetees sont limitees ; un message supprime est compte, jamais perdu en
+    silence : le compteur accompagne le message suivant.
+    """
 
     def __init__(
         self,
         settings: Optional[Settings] = None,
         channels: Optional[list[NotificationChannel]] = None,
+        *,
+        background: bool = False,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.settings = settings or get_settings()
         self.channels = channels or [
@@ -205,13 +234,83 @@ class NotificationEngine:
             SmsChannel(self.settings),
             WhatsAppChannel(self.settings),
         ]
+        self._clock = clock
+        self._throttle: dict[tuple[str, str], _ThrottleState] = {}
+        self._queue: Optional[queue.Queue] = None
+        if background:
+            self._queue = queue.Queue(maxsize=100)
+            threading.Thread(
+                target=self._drain, name="bsm-notifications", daemon=True
+            ).start()
 
     @property
     def active_channels(self) -> list[str]:
         return [c.name for c in self.channels if c.is_configured]
 
     def notify(self, notification: Notification) -> dict[str, bool]:
-        """Envoie a tous les canaux configures. Retourne {canal: succes}."""
+        """Envoie a tous les canaux configures. Retourne {canal: succes}.
+
+        En mode background, retourne {} : l'envoi est differe. Une notification
+        limitee retourne egalement {}.
+        """
+        if not self.active_channels:
+            return {}
+        notification = self._apply_throttle(notification)
+        if notification is None:
+            return {}
+        if self._queue is None:
+            return self._send_now(notification)
+        try:
+            self._queue.put_nowait(notification)
+        except queue.Full:
+            logger.error("File de notifications pleine : %s ignoree", notification.event)
+        return {}
+
+    def close(self, timeout: float = 5.0) -> None:
+        """Laisse partir les notifications en attente, sans bloquer au-dela du delai."""
+        if self._queue is None:
+            return
+        deadline = self._clock() + timeout
+        while self._queue.unfinished_tasks and self._clock() < deadline:
+            time.sleep(0.05)
+
+    def _drain(self) -> None:
+        assert self._queue is not None
+        while True:
+            notification = self._queue.get()
+            try:
+                self._send_now(notification)
+            finally:
+                self._queue.task_done()
+
+    def _apply_throttle(self, notification: Notification) -> Optional[Notification]:
+        if notification.event not in THROTTLED_EVENTS:
+            return notification
+        key = (notification.event, notification.position_id)
+        now = self._clock()
+        state = self._throttle.get(key)
+        if state is not None:
+            elapsed = now - state.sent_at
+            if elapsed < MIN_INTERVAL_SECONDS or (
+                notification.body == state.body and elapsed < REPEAT_COOLDOWN_SECONDS
+            ):
+                state.suppressed += 1
+                return None
+        suppressed = state.suppressed if state is not None else 0
+        self._throttle[key] = _ThrottleState(body=notification.body, sent_at=now)
+        if suppressed:
+            notification = Notification(
+                event=notification.event,
+                title=notification.title,
+                body=f"{notification.body}\n\n({suppressed} message(s) similaire(s) non envoye(s))",
+                level=notification.level,
+                position_id=notification.position_id,
+                symbol=notification.symbol,
+                data=notification.data,
+            )
+        return notification
+
+    def _send_now(self, notification: Notification) -> dict[str, bool]:
         results: dict[str, bool] = {}
         for channel in self.channels:
             if not channel.is_configured:

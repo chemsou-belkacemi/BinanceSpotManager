@@ -94,7 +94,7 @@ class Worker:
             ),
         )
         self.reconciliation = ReconciliationEngine(self.execution, events=self.events)
-        self.notifications = NotificationEngine(self.settings)
+        self.notifications = NotificationEngine(self.settings, background=True)
         self.market_prices = DemoMarketPriceStream(self.settings)
         self.commands = CommandStore()
         risk_service = DashboardService(self.settings, position_store=self.positions, client=self.client, events=self.events)
@@ -159,6 +159,7 @@ class Worker:
         self.events.append(EventType.WORKER_STOPPED, "Worker arrete")
         self.lock.release()
         BOT_STOP_FLAG.unlink(missing_ok=True)
+        self.notifications.close()
 
     def _set_state(self, state: WorkerState, message: str = "", **fields) -> None:
         runtime = self.runtime_store.load()
@@ -292,8 +293,7 @@ class Worker:
 
         outcome = self.automation.run_cycle(position, price)
         self.positions.save(position)
-        if outcome.errors:
-            raise RuntimeError(" ; ".join(outcome.errors))
+        # Les evenements de trading partent meme si le cycle signale aussi une erreur.
         if outcome.tp_executed is not None:
             executed_tp = next(
                 (t for t in position.take_profits if t.sequence_number == outcome.tp_executed),
@@ -314,6 +314,8 @@ class Worker:
             self.notifications.notify_position_event(
                 position, self.notifications.position_finished(position)
             )
+        if outcome.errors:
+            raise RuntimeError(" ; ".join(outcome.errors))
 
     def _monitor_oco(self, position, price: Optional[float]) -> None:
         """Lecture seule des deux branches : jamais de deuxième vente locale."""

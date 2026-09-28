@@ -429,3 +429,26 @@ def test_oco_partial_or_manual_cancellation_never_sends_second_sell(tp_status, t
     assert position.take_profits[0].executed_qty == 0
     assert len(emitted) == 1
     assert emitted[0][1]["level"] == "CRITICAL"
+
+
+def test_tp_notification_is_sent_even_when_cycle_also_reports_error():
+    from binance_spot_manager.automation_engine import CycleResult
+
+    position = Position(symbol="BTCUSDT", base_asset="BTC", quote_asset="USDT")
+    position.status = PositionStatus.ACTIVE
+    position.take_profits.append(TakeProfit(sequence_number=1, target_price=85000))
+    sent = []
+    worker = Worker.__new__(Worker)
+    worker.automation = SimpleNamespace(run_cycle=lambda p, price: CycleResult(
+        tp_executed=1, errors=["SL non restaure apres TP"],
+    ))
+    worker.positions = SimpleNamespace(save=lambda p: None)
+    worker.notifications = SimpleNamespace(
+        tp_executed=lambda position, tp: "tp",
+        notify_position_event=lambda position, notice: sent.append(notice),
+    )
+
+    with pytest.raises(RuntimeError, match="SL non restaure"):
+        worker._process_position(position, 85000)
+
+    assert sent == ["tp"]
