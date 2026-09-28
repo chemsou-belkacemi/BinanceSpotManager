@@ -5,7 +5,7 @@ from collections import defaultdict
 
 def accounting_snapshot(position):
     buys = [entry for entry in position.entries if entry.executed_qty > 0]
-    sells = [*position.take_profits, position.stop_loss]
+    sells = [*position.take_profits, position.stop_loss, *position.manual_exits]
     buy_fees, sell_fees = defaultdict(float), defaultdict(float)
     for sources, bucket in ((buys, buy_fees), (sells, sell_fees)):
         for item in sources:

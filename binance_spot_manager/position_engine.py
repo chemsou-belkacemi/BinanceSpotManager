@@ -494,12 +494,15 @@ def recompute_position(position: Position) -> Position:
     received = sum(tp.quote_received for tp in position.take_profits)
     sold += position.stop_loss.executed_qty
     received += position.stop_loss.quote_received
+    sold += sum(exit.executed_qty for exit in position.manual_exits)
+    received += sum(exit.quote_received for exit in position.manual_exits)
 
     metrics.total_bought_qty = total_bought
     metrics.total_sold_qty = sold
     base_fees_on_buys = sum(e.commission_total(position.base_asset) for e in position.entries)
     base_fees_on_sells = sum(tp.commission_total(position.base_asset) for tp in position.take_profits)
     base_fees_on_sells += position.stop_loss.commission_total(position.base_asset)
+    base_fees_on_sells += sum(exit.commission_total(position.base_asset) for exit in position.manual_exits)
     metrics.net_qty = max(total_bought - sold - base_fees_on_buys - base_fees_on_sells, 0.0)
 
     net_bought = max(total_bought - base_fees_on_buys, 0.0)
@@ -516,8 +519,11 @@ def recompute_position(position: Position) -> Position:
     quote_fees = sum(e.commission_total(position.quote_asset) for e in position.entries)
     quote_fees += sum(tp.commission_total(position.quote_asset) for tp in position.take_profits)
     quote_fees += position.stop_loss.commission_total(position.quote_asset)
+    quote_fees += sum(exit.commission_total(position.quote_asset) for exit in position.manual_exits)
     base_fees = sum(e.commission_total(position.base_asset) for e in position.entries)
     base_fees += sum(tp.commission_total(position.base_asset) for tp in position.take_profits)
+    base_fees += position.stop_loss.commission_total(position.base_asset)
+    base_fees += sum(exit.commission_total(position.base_asset) for exit in position.manual_exits)
     metrics.commissions_quote = quote_fees
     metrics.commissions_base = base_fees
 

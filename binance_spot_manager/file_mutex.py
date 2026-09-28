@@ -15,9 +15,8 @@ class FileMutex:
             return True
         self.path.parent.mkdir(parents=True, exist_ok=True)
         handle = self.path.open("a+b")
-        if self.path.stat().st_size == 0:
-            handle.write(b"\0")
-            handle.flush()
+        # Windows allows locking a byte range beyond EOF. Do not initialize
+        # the file before acquiring: a concurrent owner may already lock byte 0.
         deadline = time.monotonic() + timeout
         while True:
             try:

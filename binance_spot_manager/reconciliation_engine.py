@@ -594,6 +594,10 @@ def audit_open_orders(
             known_ids.add(owner.stop_loss.order_id)
         if owner.stop_loss.client_order_id:
             known_client_ids.add(owner.stop_loss.client_order_id)
+        for sale in owner.manual_exits:
+            if sale.order_id:
+                known_ids.add(sale.order_id)
+            known_client_ids.add(sale.client_order_id)
         if owner.oco_exit:
             known_ids.update({owner.oco_exit.tp_order_id, owner.oco_exit.sl_order_id})
 

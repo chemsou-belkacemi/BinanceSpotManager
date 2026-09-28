@@ -88,15 +88,22 @@ class CommandProcessor:
         )
         return state
 
-    def _position(self, payload):
+    def _position(self, payload, *, allow_closing=False):
         position = self.positions.load(payload["position_id"])
         if position is None or not position.is_open or position.environment != "DEMO":
             raise RejectedCommand("Position Demo ouverte introuvable")
+        if position.status.value == "CLOSING" and not allow_closing:
+            raise RejectedCommand("Cloture en cours : aucune autre modification autorisee")
         return position
 
     def _check_connection(self, payload):
         self.execution.client.ping()
         return {"message": "Circuit UI/worker et connexion Demo verifies ; aucun ordre envoye"}
+
+    def _close_market(self, payload):
+        from .market_close import close_market
+        return close_market(self._position(payload, allow_closing=True),
+                            self.execution, self.positions)
 
     def _fresh_price(self, symbol, reference):
         reference = positive(reference, "Prix de confirmation")
@@ -120,7 +127,7 @@ class CommandProcessor:
         proposed = Position.model_validate(payload["position"])
         if proposed.environment != "DEMO" or proposed.quote_asset not in {"USDT", "USDC"}:
             raise RejectedCommand("Position Demo USDT/USDC requise")
-        if (proposed.oco_exit is not None or proposed.stop_loss.status not in {SLStatus.PLANNED, SLStatus.NONE}
+        if (proposed.manual_exits or proposed.oco_exit is not None or proposed.stop_loss.status not in {SLStatus.PLANNED, SLStatus.NONE}
                 or proposed.stop_loss.order_id or proposed.stop_loss.client_order_id or proposed.stop_loss.executed_qty
                 or any(t.status is not TPStatus.PENDING or t.order_id or t.client_order_id or t.executed_qty for t in proposed.take_profits)):
             raise RejectedCommand("La demande doit contenir un plan neuf, sans ordres ou executions preexistants")

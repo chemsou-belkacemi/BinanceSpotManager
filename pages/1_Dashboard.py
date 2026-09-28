@@ -30,6 +30,8 @@ from ui_common import (  # noqa: E402
     submit_to_worker,
 )
 
+from ui_common import colored_pnl, pnl_metric, pnl_dataframe
+
 settings = get_settings()
 service = get_service()
 
@@ -160,76 +162,86 @@ st.divider()
 
 st.subheader("Portefeuille")
 
-view = service.portfolio()
-if any(not p.pnl.complete for p in service.positions.list_all()):
-    st.warning("Certains frais ne sont pas convertis : PnL incomplet. Voir la comptabilite detaillee dans Operations.")
-if view.errors:
-    for error in view.errors:
-        st.warning(error)
-st.caption(f"Source des soldes : {view.source}")
+@st.fragment(run_every="1s")
+def live_portfolio_summary():
+    view = service.portfolio()
+    if any(not p.pnl.complete for p in service.positions.list_all()):
+        st.warning("Certains frais ne sont pas convertis : PnL incomplet. Voir la comptabilite detaillee dans Operations.")
+    if view.errors:
+        for error in view.errors:
+            st.warning(error)
+    st.caption(f"Source des soldes : {view.source}")
 
-cols = st.columns(6)
-cols[0].metric(f"{settings.quote_asset} libre", fmt_price(view.quote_free))
-cols[1].metric("Capital engagé", fmt_price(view.capital_committed))
-cols[2].metric("Capital en attente", fmt_price(view.capital_pending))
-cols[3].metric("PnL latent", fmt_price(view.unrealized_pnl))
-cols[4].metric("PnL réalisé", fmt_price(view.realized_pnl))
-cols[5].metric("PnL total", fmt_price(view.total_pnl))
+    cols = st.columns(6)
+    cols[0].metric(f"{settings.quote_asset} libre", fmt_price(view.quote_free))
+    cols[1].metric("Capital engagé", fmt_price(view.capital_committed))
+    cols[2].metric("Capital en attente", fmt_price(view.capital_pending))
+    pnl_metric(cols[3], "PnL latent", view.unrealized_pnl)
+    pnl_metric(cols[4], "PnL réalisé", view.realized_pnl)
+    pnl_metric(cols[5], "PnL total", view.total_pnl)
 
-cols = st.columns(4)
-cols[0].metric("Risque total", fmt_price(view.total_risk_quote), f"{view.total_risk_percent:.2f} %")
-cols[1].metric("Exposition", f"{view.exposure_percent:.1f} %")
-cols[2].metric("Réserve estimée", fmt_price(view.capital_reserved))
-cols[3].metric("Positions ouvertes", view.open_positions)
+    cols = st.columns(4)
+    cols[0].metric("Risque total", fmt_price(view.total_risk_quote), f"{view.total_risk_percent:.2f} %")
+    cols[1].metric("Exposition", f"{view.exposure_percent:.1f} %")
+    cols[2].metric("Réserve estimée", fmt_price(view.capital_reserved))
+    cols[3].metric("Positions ouvertes", view.open_positions)
 
-st.markdown("**Tous les actifs Spot Demo**")
-try:
-    wallet = service.wallet_valuation()
-except Exception as exc:  # lecture uniquement ; ne masque pas le reste du Dashboard
-    st.warning(f"Valorisation du portefeuille indisponible : {exc}")
-else:
-    st.caption(
-        f"Soldes libres + bloqués · prix indicatifs Binance Demo · "
-        f"{wallet.valued_at.strftime('%d/%m/%Y %H:%M:%S')} UTC"
-    )
-    totals = st.columns(2)
-    totals[0].metric(
-        "Total connu en USDT" if wallet.unpriced_usdt else "Total en USDT",
-        f"{wallet.total_usdt:,.2f}",
-    )
-    totals[1].metric(
-        "Total connu en EUR" if wallet.unpriced_eur else "Total en EUR",
-        f"{wallet.total_eur:,.2f} €",
-    )
-    if wallet.unpriced_usdt or wallet.unpriced_eur:
-        st.warning(
-            "Actifs sans taux Demo : "
-            + ", ".join(sorted(set(wallet.unpriced_usdt + wallet.unpriced_eur)))
-            + ". Ils sont affichés, mais exclus des totaux correspondants."
-        )
-    if wallet.assets:
-        st.dataframe(
-            pd.DataFrame([
-                {
-                    "Actif": row.asset,
-                    "Libre": fmt_qty(row.free),
-                    "Bloqué": fmt_qty(row.locked),
-                    "Total": fmt_qty(row.total),
-                    "Cours USDT": fmt_price(row.price_usdt) if row.price_usdt is not None else "—",
-                    "Cours EUR": fmt_price(row.price_eur) if row.price_eur is not None else "—",
-                    "Valeur USDT": f"{row.value_usdt:,.2f}" if row.value_usdt is not None else "—",
-                    "Valeur EUR": f"{row.value_eur:,.2f}" if row.value_eur is not None else "—",
-                    "Part": (
-                        f"{row.value_usdt / wallet.total_usdt * 100:.1f} %"
-                        if row.value_usdt is not None and wallet.total_usdt > 0 else "—"
-                    ),
-                }
-                for row in wallet.assets
-            ]),
-            width="stretch", hide_index=True,
-        )
+
+live_portfolio_summary()
+
+@st.fragment(run_every="1s")
+def live_wallet():
+    st.markdown("**Tous les actifs Spot Demo**")
+    try:
+        wallet = service.wallet_valuation()
+    except Exception as exc:  # lecture uniquement ; ne masque pas le reste du Dashboard
+        st.warning(f"Valorisation du portefeuille indisponible : {exc}")
     else:
-        st.info("Aucun actif Spot non nul dans ce compte Demo.")
+        st.caption(
+            f"Soldes libres + bloqués · prix indicatifs Binance Demo · "
+            f"{wallet.valued_at.strftime('%d/%m/%Y %H:%M:%S')} UTC"
+        )
+        totals = st.columns(2)
+        totals[0].metric(
+            "Total connu en USDT" if wallet.unpriced_usdt else "Total en USDT",
+            f"{wallet.total_usdt:,.2f}",
+        )
+        totals[1].metric(
+            "Total connu en EUR" if wallet.unpriced_eur else "Total en EUR",
+            f"{wallet.total_eur:,.2f} €",
+        )
+        if wallet.unpriced_usdt or wallet.unpriced_eur:
+            st.warning(
+                "Actifs sans taux Demo : "
+                + ", ".join(sorted(set(wallet.unpriced_usdt + wallet.unpriced_eur)))
+                + ". Ils sont affichés, mais exclus des totaux correspondants."
+            )
+        if wallet.assets:
+            pnl_dataframe(
+                pd.DataFrame([
+                    {
+                        "Actif": row.asset,
+                        "Libre": fmt_qty(row.free),
+                        "Bloqué": fmt_qty(row.locked),
+                        "Total": fmt_qty(row.total),
+                        "Cours USDT": fmt_price(row.price_usdt) if row.price_usdt is not None else "—",
+                        "Cours EUR": fmt_price(row.price_eur) if row.price_eur is not None else "—",
+                        "Valeur USDT": f"{row.value_usdt:,.2f}" if row.value_usdt is not None else "—",
+                        "Valeur EUR": f"{row.value_eur:,.2f}" if row.value_eur is not None else "—",
+                        "Part": (
+                            f"{row.value_usdt / wallet.total_usdt * 100:.1f} %"
+                            if row.value_usdt is not None and wallet.total_usdt > 0 else "—"
+                        ),
+                    }
+                    for row in wallet.assets
+                ]),
+                width="stretch", hide_index=True,
+            )
+        else:
+            st.info("Aucun actif Spot non nul dans ce compte Demo.")
+
+
+live_wallet()
 
 st.divider()
 
@@ -239,57 +251,63 @@ st.divider()
 
 st.subheader("Positions ouvertes")
 
-rows = [
-    r
-    for r in service.position_rows()
-    if r.status in {"DRAFT", "PENDING_ENTRIES", "ACTIVE", "CLOSING"}
-]
+@st.fragment(run_every="1s")
+def live_open_positions():
+    rows = [
+        r
+        for r in service.position_rows()
+        if r.status in {"DRAFT", "PENDING_ENTRIES", "ACTIVE", "CLOSING"}
+    ]
 
-if not rows:
-    st.info("Aucune position ouverte.")
-else:
-    table = pd.DataFrame(
-        [
-            {
-                "Position": r.position_id,
-                "Symbole": r.symbol,
-                "État": r.status,
-                "Sync": r.sync_status,
-                "Prix moyen": fmt_price(r.average_price),
-                "Prix actuel": fmt_price(r.current_price),
-                "Quantité nette": fmt_qty(r.net_qty),
-                "PnL": fmt_price(r.pnl_total),
-                "PnL %": fmt_percent(r.pnl_percent),
-                "SL": fmt_price(r.sl_price),
-                "Prochain TP": (
-                    f"TP{r.next_tp_number} @ {fmt_price(r.next_tp_price)}"
-                    if r.next_tp_price
-                    else "—"
-                ),
-                "Entries": f"{r.entries_filled}/{r.entries_total}",
-                "TP": f"{r.tps_executed}/{r.tps_total}",
-            }
-            for r in rows
-        ]
-    )
-    st.dataframe(table, width="stretch", hide_index=True)
+    if not rows:
+        st.info("Aucune position ouverte.")
+    else:
+        table = pd.DataFrame(
+            [
+                {
+                    "Position": r.position_id,
+                    "Symbole": r.symbol,
+                    "État": r.status,
+                    "Sync": r.sync_status,
+                    "Prix moyen": fmt_price(r.average_price),
+                    "Prix actuel": fmt_price(r.current_price),
+                    "Quantité nette": fmt_qty(r.net_qty),
+                    "PnL": fmt_price(r.pnl_total),
+                    "PnL %": fmt_percent(r.pnl_percent),
+                    "SL": fmt_price(r.sl_price),
+                    "Prochain TP": (
+                        f"TP{r.next_tp_number} @ {fmt_price(r.next_tp_price)}"
+                        if r.next_tp_price
+                        else "—"
+                    ),
+                    "Entries": f"{r.entries_filled}/{r.entries_total}",
+                    "TP": f"{r.tps_executed}/{r.tps_total}",
+                }
+                for r in rows
+            ]
+        )
+        pnl_dataframe(table, width="stretch", hide_index=True)
 
-    for position in service.positions.list_open():
-        if position.oco_exit is not None:
-            oco = position.oco_exit
-            st.caption(
-                f"OCO Demo {position.symbol} · {oco.status} · "
-                f"liste #{oco.order_list_id} · TP #{oco.tp_order_id} · SL #{oco.sl_order_id}"
+        for position in service.positions.list_open():
+            if position.oco_exit is not None:
+                oco = position.oco_exit
+                st.caption(
+                    f"OCO Demo {position.symbol} · {oco.status} · "
+                    f"liste #{oco.order_list_id} · TP #{oco.tp_order_id} · SL #{oco.sl_order_id}"
+                )
+
+        desync = [r for r in rows if r.has_desync]
+        if desync:
+            st.warning(
+                "⚠️ Désynchronisation détectée sur : "
+                + ", ".join(f"{r.symbol} ({r.sync_status})" for r in desync)
+                + " — voir la page Positions pour le détail."
             )
 
-    desync = [r for r in rows if r.has_desync]
-    if desync:
-        st.warning(
-            "⚠️ Désynchronisation détectée sur : "
-            + ", ".join(f"{r.symbol} ({r.sync_status})" for r in desync)
-            + " — voir la page Positions pour le détail."
-        )
 
+live_open_positions()
+
+if service.positions.list_open():
     with st.expander("Prototype OCO Demo — aperçu uniquement"):
         st.caption(
             "Aucun ordre n'est envoyé. Le worker garde sa stratégie TP/SL actuelle. "
@@ -396,7 +414,7 @@ with st.expander("Journal récent"):
     if not events:
         st.caption("Aucun événement enregistré.")
     else:
-        st.dataframe(
+        pnl_dataframe(
             pd.DataFrame(
                 [
                     {

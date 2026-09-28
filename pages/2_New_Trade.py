@@ -66,6 +66,8 @@ from ui_common import (  # noqa: E402
     new_command_confirmation,
 )
 
+from ui_common import colored_pnl, pnl_metric, pnl_dataframe
+
 settings = get_settings()
 service = get_service()
 
@@ -526,7 +528,7 @@ def simulation_panel():
 
     **SL** : {fmt_price(plan.stop_loss.price)} ({fmt_percent(plan.stop_loss.percent_from_average)})
 
-    **Perte max au SL** : {fmt_quote(plan.loss_max_estimated, quote_asset)}
+    **Perte max au SL** : {colored_pnl(-abs(plan.loss_max_estimated), fmt_quote(-abs(plan.loss_max_estimated), quote_asset))}
 
     **Risque** : {plan.risk_percent_of_capital:.2f} % du capital engagé
     """
@@ -547,8 +549,8 @@ def simulation_panel():
                     "SL après": tp.sl_rule_after_hit.value,
                 }
             )
-        st.dataframe(tp_rows, width="stretch", hide_index=True)
-        st.metric("Gain total estimé", fmt_quote(plan.gain_total_estimated, quote_asset))
+        pnl_dataframe(tp_rows, width="stretch", hide_index=True)
+        pnl_metric(st, "Gain total estimé", plan.gain_total_estimated, fmt_quote(plan.gain_total_estimated, quote_asset))
 
     # -- scénarios (section 74) ------------------------------------------------
 

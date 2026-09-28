@@ -25,6 +25,8 @@ from ui_common import (  # noqa: E402
     sidebar_status,
 )
 
+from ui_common import colored_pnl, pnl_metric, pnl_dataframe
+
 settings = get_settings()
 service = get_service()
 
@@ -113,7 +115,7 @@ for position in filtered:
         }
     )
 
-st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+pnl_dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 # ==========================================================================
 # Statistiques (preparation Analytics — section 87)
@@ -132,9 +134,9 @@ cols[1].metric(
     "Win rate",
     f"{len(gains) / len(filtered) * 100:.1f} %" if filtered else "—",
 )
-cols[2].metric("PnL réalisé total", fmt_price(total))
-cols[3].metric("Gain moyen", fmt_price(sum(gains) / len(gains)) if gains else "—")
-cols[4].metric("Perte moyenne", fmt_price(sum(pertes) / len(pertes)) if pertes else "—")
+pnl_metric(cols[2], "PnL réalisé total", total)
+pnl_metric(cols[3], "Gain moyen", sum(gains) / len(gains) if gains else None)
+pnl_metric(cols[4], "Perte moyenne", sum(pertes) / len(pertes) if pertes else None)
 cols[5].metric("Frais payés", fmt_price(fees))
 
 if gains or pertes:
@@ -155,7 +157,7 @@ with col_a:
     by_symbol: dict[str, list[float]] = {}
     for position in filtered:
         by_symbol.setdefault(position.symbol, []).append(position.pnl.realized)
-    st.dataframe(
+    pnl_dataframe(
         pd.DataFrame(
             [
                 {
@@ -177,7 +179,7 @@ with col_b:
     for position in filtered:
         source = position.source_groups[0].source.value if position.source_groups else "manual"
         by_source.setdefault(source, []).append(position.pnl.realized)
-    st.dataframe(
+    pnl_dataframe(
         pd.DataFrame(
             [
                 {
@@ -225,13 +227,13 @@ Capital engagé : {fmt_price(position.metrics.capital_committed)} ·
 Commissions {position.quote_asset} : {fmt_price(position.metrics.commissions_quote)} ·
 Commissions {position.base_asset} : {fmt_qty(position.metrics.commissions_base, 8)}
 
-PnL réalisé : {fmt_price(position.pnl.realized)} ·
+PnL réalisé : {colored_pnl(position.pnl.realized)} ·
 Break-even avec frais : {fmt_price(position.metrics.break_even_with_fees)}
 """
     )
 
     st.markdown("**Entries**")
-    st.dataframe(
+    pnl_dataframe(
         pd.DataFrame(
             [
                 {
@@ -248,7 +250,7 @@ Break-even avec frais : {fmt_price(position.metrics.break_even_with_fees)}
     )
 
     st.markdown("**Take Profits**")
-    st.dataframe(
+    pnl_dataframe(
         pd.DataFrame(
             [
                 {
@@ -266,7 +268,7 @@ Break-even avec frais : {fmt_price(position.metrics.break_even_with_fees)}
     )
 
     st.markdown("**Événements**")
-    st.dataframe(
+    pnl_dataframe(
         pd.DataFrame(
             [
                 {

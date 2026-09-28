@@ -491,6 +491,20 @@ class OcoExit(BSMModel):
 # ==========================================================================
 
 
+class ManualExit(BSMModel):
+    client_order_id: str
+    order_id: Optional[int] = None
+    requested_qty: float = 0.0
+    executed_qty: float = 0.0
+    quote_received: float = 0.0
+    average_fill_price: float = 0.0
+    commissions: list[Commission] = Field(default_factory=list)
+    status: str = "UNKNOWN"
+
+    def commission_total(self, asset: str) -> float:
+        return sum(c.amount for c in self.commissions if c.asset == asset)
+
+
 class Position(BSMModel):
     revision: int = 0
     order_identity_version: int = Field(default=1, ge=1, le=2)
@@ -518,6 +532,7 @@ class Position(BSMModel):
     notifications: NotificationSettings = Field(default_factory=NotificationSettings)
     automation: AutomationSettings = Field(default_factory=AutomationSettings)
     oco_exit: Optional[OcoExit] = None
+    manual_exits: list[ManualExit] = Field(default_factory=list)
     history: list[HistoryEvent] = Field(default_factory=list)
 
     #: prix courant au moment de la creation (reference CURRENT_PRICE_AT_CREATION)

@@ -1,6 +1,6 @@
 # BinanceSpotManager V2
 
-Gestionnaire intelligent de positions Spot Binance. Une paire = une position active.
+Gestionnaire intelligent de positions Spot Binance. Chaque stratégie a son propre ID, même sur une paire identique.
 Développé en **Python + Streamlit**, conçu pour fonctionner **exclusivement sur Binance Demo**
 pendant la phase de développement et de validation.
 
@@ -391,3 +391,25 @@ Telegram (listener, parser, déduplication, validation humaine), TradingView et 
 sources de signaux, statistiques avancées (win rate par source, drawdown, fréquence
 d'atteinte des TP), SMS / WhatsApp, et — après validation complète sur Demo — un mode Live
 avec ses propres contrôles et confirmations renforcées.
+
+## Clôture manuelle au marché (Binance Demo)
+
+Dans **Positions → Clôturer la position au marché**, confirmer puis cliquer sur
+**Annuler les TP/SL et vendre au marché**. Le worker annule les achats en attente
+et les protections de cet ID, vérifie leur état final et vend uniquement sa
+quantité nette (jamais le solde entier de la paire). Une réponse incertaine bloque
+tout nouvel envoi : la reprise interroge Binance sans renvoyer la vente.
+
+Redémarrer le worker après la mise à jour pour activer cette commande. Le résultat
+est estimé avant vente ; les exécutions confirmées alimentent le PnL réalisé.
+Les gains sont verts, les pertes rouges. Le détail de position affiche l'équivalent
+USDT et le pourcentage du capital acheté ; une conversion manquante ou des frais
+BNB non valorisés sont signalés. Les poussières non vendables restent au portefeuille.
+Après annulation des protections, un refus de vente laisse la position en pause,
+sans recréer automatiquement les TP/SL : consulter **Operations** avant de réessayer.
+
+Les blocs de lecture du Dashboard et de Positions s'actualisent chaque seconde :
+prix, PnL, états, quantités, TP/SL, historique et résultat de clôture. Ils relisent
+le stockage du worker ; les champs d'édition ne sont pas réinitialisés par ces
+actualisations. Les lectures REST communes aux blocs sont partagées pendant au
+maximum une seconde et ce cache n'est pas utilisé pour valider les transactions.

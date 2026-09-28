@@ -43,6 +43,7 @@ from ui_common import (  # noqa: E402
     page_header,
     sidebar_status,
     submit_to_worker, new_command_confirmation,
+    colored_pnl, pnl_metric, pnl_dataframe, fresh_position_view,
 )
 
 settings = get_settings()
@@ -57,6 +58,24 @@ positions = service.positions.list_all()
 
 if not positions:
     st.info("Aucune position enregistrée. Crée-en une depuis **New Trade**.")
+    st.stop()
+
+status_groups = {
+    "Pending": {"DRAFT", "PENDING_ENTRIES"},
+    "Active": {"ACTIVE", "CLOSING"},
+    "Closed": {"CLOSED", "CANCELED"},
+}
+status_filter = st.segmented_control(
+    "Filtrer les positions", ["Toutes", "Pending", "Active", "Closed"],
+    default="Toutes", key="position_status_filter",
+    help="Pending : en attente d'achat (ou brouillon). Active : active ou en cours de clôture. "
+         "Closed : clôturée ou annulée. Toutes inclut aussi les positions en erreur.",
+)
+if status_filter in status_groups:
+    positions = [p for p in positions if p.status.value in status_groups[status_filter]]
+st.caption(f"{len(positions)} position(s) correspondant au filtre")
+if not positions:
+    st.info("Aucune position pour ce statut. Sélectionne un autre filtre.")
     st.stop()
 
 labels = {
@@ -108,52 +127,65 @@ def _reorder_tps() -> None:
 # En-tête
 # ==========================================================================
 
-st.subheader(f"{position.symbol}")
-head = st.columns(5)
-head[0].metric("État", position.status.value)
-head[1].metric("Sync", position.sync_status.value)
-head[2].metric("Prix actuel", fmt_price(price))
-head[3].metric("Prix moyen", fmt_price(position.metrics.average_price))
-head[4].metric("Quantité nette", fmt_qty(position.metrics.net_qty))
+@st.fragment(run_every="1s", key="position_summary")
+def live_position_summary(position_id):
+    position, price, returns = fresh_position_view(service, position_id)
+    if position is None:
+        st.info("Position introuvable dans le stockage local.")
+        return
+    st.caption(f"Actualisation automatique chaque seconde · lecture seule · dernière lecture {utcnow().strftime('%H:%M:%S')} UTC")
+    st.subheader(f"{position.symbol}")
+    head = st.columns(5)
+    head[0].metric("État", position.status.value)
+    head[1].metric("Sync", position.sync_status.value)
+    head[2].metric("Prix actuel", fmt_price(price))
+    head[3].metric("Prix moyen", fmt_price(position.metrics.average_price))
+    head[4].metric("Quantité nette", fmt_qty(position.metrics.net_qty))
 
-head2 = st.columns(5)
-head2[0].metric("Capital engagé", fmt_price(position.metrics.capital_committed))
-head2[1].metric("Capital en attente", fmt_price(position.metrics.capital_pending))
-head2[2].metric(
-    "PnL latent", fmt_price(position.pnl.unrealized), fmt_percent(position.pnl.unrealized_percent)
-)
-head2[3].metric("PnL réalisé", fmt_price(position.pnl.realized))
-head2[4].metric("PnL total", fmt_price(position.pnl.total))
+    head2 = st.columns(5)
+    head2[0].metric("Capital engagé", fmt_price(position.metrics.capital_committed))
+    head2[1].metric("Capital en attente", fmt_price(position.metrics.capital_pending))
+    pnl_metric(head2[2], "PnL latent (USDT)", returns["unrealized_usdt"])
+    pnl_metric(head2[3], "PnL réalisé (USDT)", returns["realized_usdt"])
+    pnl_metric(head2[4], "PnL total (USDT / %)", returns["total_usdt"],
+               f"{fmt_price(returns['total_usdt'])} USDT ({fmt_percent(returns['percent'])})")
+    if not returns["complete"]:
+        st.warning("PnL indicatif : conversion indisponible ou frais dans un autre actif (BNB notamment) non valorisés.")
 
-st.caption(
-    f"Position {position.position_id} · source "
-    f"{position.source_groups[0].source.value if position.source_groups else '—'} · "
-    f"créée le {position.created_at.strftime('%d/%m/%Y %H:%M')} UTC · "
-    f"environnement {position.environment}"
-)
+    st.caption(
+        f"Position {position.position_id} · source "
+        f"{position.source_groups[0].source.value if position.source_groups else '—'} · "
+        f"créée le {position.created_at.strftime('%d/%m/%Y %H:%M')} UTC · "
+        f"environnement {position.environment}"
+    )
 
-# ==========================================================================
-# Progression
-# ==========================================================================
+    # ==========================================================================
+    # Progression
+    # ==========================================================================
 
-progress_cols = st.columns(4)
+    progress_cols = st.columns(4)
+    next_tp = position.next_tp
+    progress_cols[0].metric(
+        "Prochain TP",
+        f"TP{next_tp.sequence_number} @ {fmt_price(next_tp.target_price)}" if next_tp else "—",
+    )
+    progress_cols[1].metric("TP atteints", f"{len(position.executed_tps)}/{len(position.take_profits)}")
+    progress_cols[2].metric(
+        "SL", f"{fmt_price(position.stop_loss.resolved_price)} ({position.stop_loss.status.value})"
+    )
+    progress_cols[3].metric(
+        "Référence break-even",
+        fmt_price(position.metrics.break_even_with_fees),
+        help="Prix moyen majoré des commissions d'achat déjà payées (estimation).",
+    )
+
+    if position.take_profits:
+        st.progress(len(position.executed_tps) / len(position.take_profits))
+
+
+live_position_summary(position.position_id)
+
 next_tp = position.next_tp
-progress_cols[0].metric(
-    "Prochain TP",
-    f"TP{next_tp.sequence_number} @ {fmt_price(next_tp.target_price)}" if next_tp else "—",
-)
-progress_cols[1].metric("TP atteints", f"{len(position.executed_tps)}/{len(position.take_profits)}")
-progress_cols[2].metric(
-    "SL", f"{fmt_price(position.stop_loss.resolved_price)} ({position.stop_loss.status.value})"
-)
-progress_cols[3].metric(
-    "Référence break-even",
-    fmt_price(position.metrics.break_even_with_fees),
-    help="Prix moyen majoré des commissions d'achat déjà payées (estimation).",
-)
-
-if position.take_profits:
-    st.progress(len(position.executed_tps) / len(position.take_profits))
 
 with st.expander("Tester le prochain TP sans attendre le prix cible"):
     st.caption(
@@ -201,36 +233,62 @@ with st.expander("Tester le prochain TP sans attendre le prix cible"):
 # Entries
 # ==========================================================================
 
-st.subheader("Entries")
-st.dataframe(
-    pd.DataFrame(
-        [
-            {
-                "N°": e.sequence_number,
-                "Type": e.order_type.value,
-                "Prix résolu": fmt_price(e.resolved_price),
-                "Statut": e.status.value,
-                "Qté demandée": fmt_qty(e.requested_qty),
-                "Qté Binance": fmt_qty(e.binance_qty),
-                "Exécutée": fmt_qty(e.executed_qty),
-                "Prix remplissage": fmt_price(e.average_fill_price),
-                "Dépensé": fmt_quote(e.quote_spent, position.quote_asset),
-                "Capital %": f"{e.capital_percent:.1f}",
-                "orderId": e.order_id or "—",
-                "clientOrderId": e.client_order_id or "—",
-            }
-            for e in position.sorted_entries
-        ]
-    ),
-    width="stretch",
-    hide_index=True,
-)
+@st.fragment(run_every="1s")
+def live_position_entries(position_id):
+    position = service.positions.load(position_id)
+    if position is None:
+        return
+    st.subheader("Entries")
+    pnl_dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "N°": e.sequence_number,
+                    "Type": e.order_type.value,
+                    "Prix résolu": fmt_price(e.resolved_price),
+                    "Statut": e.status.value,
+                    "Qté demandée": fmt_qty(e.requested_qty),
+                    "Qté Binance": fmt_qty(e.binance_qty),
+                    "Exécutée": fmt_qty(e.executed_qty),
+                    "Prix remplissage": fmt_price(e.average_fill_price),
+                    "Dépensé": fmt_quote(e.quote_spent, position.quote_asset),
+                    "Capital %": f"{e.capital_percent:.1f}",
+                    "orderId": e.order_id or "—",
+                    "clientOrderId": e.client_order_id or "—",
+                }
+                for e in position.sorted_entries
+            ]
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+
+
+live_position_entries(position.position_id)
 
 # ==========================================================================
 # Plan de sortie — Take Profits
 # ==========================================================================
 
 st.subheader("Plan de sortie — Take Profits")
+
+
+@st.fragment(run_every="1s")
+def live_take_profit_status(position_id):
+    latest = service.positions.load(position_id)
+    if latest is None or not latest.take_profits:
+        return
+    pnl_dataframe([{"TP": tp.sequence_number, "État": tp.status.value,
+                    "Cible": fmt_price(tp.target_price), "Vente %": tp.sell_percent,
+                    "Quantité exécutée": tp.executed_qty,
+                    "Gain réalisé": fmt_quote(tp.gain_realized, latest.quote_asset),
+                    "Ordre": tp.order_id}
+                   for tp in latest.sorted_tps], hide_index=True, width="stretch",
+                  key=f"live_tp_status_{position_id}")
+
+
+live_take_profit_status(position.position_id)
+st.caption("Les états ci-dessus s'actualisent chaque seconde. Les champs d'édition restent inchangés pendant la saisie.")
 
 pending_tps = [tp for tp in position.sorted_tps if tp.status is TPStatus.PENDING]
 executed_tps = [tp for tp in position.sorted_tps if tp.status is not TPStatus.PENDING]
@@ -354,7 +412,7 @@ if mode == "TP par TP":
                 st.caption(
                     f"Prix cible {fmt_price(tp.target_price)} · "
                     f"vendue {fmt_qty(tp.executed_qty)} · "
-                    f"gain réalisé {fmt_price(tp.gain_realized)}"
+                    f"gain réalisé {colored_pnl(tp.gain_realized)}"
                 )
                 continue
 
@@ -375,7 +433,7 @@ if mode == "TP par TP":
                 step=1.0,
                 key=f"single_sell_{tp.tp_id}",
             )
-            cols[2].metric("Gain estimé", fmt_price(tp.gain_estimated))
+            pnl_metric(cols[2], "Gain estimé", tp.gain_estimated)
 
             confirm_save = st.checkbox(
                 "Confirmer la modification", key=f"confirm_save_{tp.tp_id}"
@@ -446,20 +504,29 @@ if mode == "TP par TP":
 st.subheader("Stop Loss")
 
 sl = position.stop_loss
-sl_cols = st.columns(5)
-sl_cols[0].metric("Mode", sl.mode.value)
-sl_cols[1].metric("Valeur", sl.value)
-sl_cols[2].metric("Prix résolu", fmt_price(sl.resolved_price))
-sl_cols[3].metric("Quantité protégée", fmt_qty(sl.quantity))
-sl_cols[4].metric("Statut", sl.status.value)
+@st.fragment(run_every="1s")
+def live_stop_loss(position_id):
+    position = service.positions.load(position_id)
+    if position is None:
+        return
+    sl = position.stop_loss
+    sl_cols = st.columns(5)
+    sl_cols[0].metric("Mode", sl.mode.value)
+    sl_cols[1].metric("Valeur", sl.value)
+    sl_cols[2].metric("Prix résolu", fmt_price(sl.resolved_price))
+    sl_cols[3].metric("Quantité protégée", fmt_qty(sl.quantity))
+    sl_cols[4].metric("Statut", sl.status.value)
 
-st.caption(
-    f"Remplacements : {sl.replace_count} · orderId {sl.order_id or '—'} · "
-    f"clientOrderId {sl.client_order_id or '—'} · décalage limite "
-    f"{sl.limit_offset_percent} %"
-)
-if sl.last_error:
-    st.error(sl.last_error)
+    st.caption(
+        f"Remplacements : {sl.replace_count} · orderId {sl.order_id or '—'} · "
+        f"clientOrderId {sl.client_order_id or '—'} · décalage limite "
+        f"{sl.limit_offset_percent} %"
+    )
+    if sl.last_error:
+        st.error(sl.last_error)
+
+
+live_stop_loss(position.position_id)
 
 if position.is_open and position.metrics.net_qty > 0 and sl.status is not SLStatus.NONE:
     with st.expander("Modifier / supprimer le SL", expanded=False):
@@ -538,7 +605,7 @@ if error:
     st.info(error)
 
 if orders:
-    st.dataframe(
+    pnl_dataframe(
         pd.DataFrame(
             [
                 {
@@ -623,31 +690,61 @@ if (
 # Historique
 # ==========================================================================
 
-st.subheader("Historique")
-if position.history:
-    st.dataframe(
-        pd.DataFrame(
-            [
-                {
-                    "Date": h.timestamp.strftime("%d/%m/%Y %H:%M:%S"),
-                    "Événement": h.event_type.value,
-                    "Message": h.message,
-                }
-                for h in reversed(position.history)
-            ]
-        ),
-        width="stretch",
-        hide_index=True,
-    )
-else:
-    st.caption("Aucun événement enregistré pour cette position.")
+@st.fragment(run_every="1s")
+def live_position_history(position_id):
+    position = service.positions.load(position_id)
+    if position is None:
+        return
+    st.subheader("Historique")
+    if position.history:
+        pnl_dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Date": h.timestamp.strftime("%d/%m/%Y %H:%M:%S"),
+                        "Événement": h.event_type.value,
+                        "Message": h.message,
+                    }
+                    for h in reversed(position.history)
+                ]
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+    else:
+        st.caption("Aucun événement enregistré pour cette position.")
+
+
+live_position_history(position.position_id)
 
 # ==========================================================================
 # Fermeture manuelle
 # ==========================================================================
 
+@st.fragment(run_every="1s")
+def live_market_close(position_id):
+    position, price, returns = fresh_position_view(service, position_id)
+    if position is None or not position.is_open:
+        st.info("Position clôturée ; aucun nouvel ordre ne sera envoyé.")
+        return
+    with st.expander("Clôturer la position au marché", expanded=False):
+        st.warning("Annule uniquement les achats en attente, TP et SL de cette position, puis vend son solde net au marché. Le prix final dépend de l'exécution Binance Demo.")
+        st.markdown("Résultat estimé avant vente : " + colored_pnl(returns["total_usdt"],
+                    f"{fmt_price(returns['total_usdt'])} USDT ({fmt_percent(returns['percent'])})"))
+        st.caption("Les frais de la vente et le glissement de prix peuvent modifier ce résultat. Les poussières non vendables restent dans le portefeuille.")
+        new_command_confirmation(f"market_close_{position.position_id}")
+        confirm_market = st.checkbox("Je confirme l'annulation des ordres et la vente au marché", key=f"confirm_market_{position.position_id}")
+        if st.button("Annuler les TP/SL et vendre au marché", type="primary",
+                     disabled=not confirm_market or any(s.status not in {"FILLED", "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"} for s in position.manual_exits)):
+            submit_to_worker("CLOSE_MARKET", {"position_id": position.position_id},
+                             confirmation_key=f"market_close_{position.position_id}")
+        if position.status.value == "CLOSING":
+            st.info("Clôture en cours ou suspendue : le worker vérifie la vente sans la renvoyer. Consulte Operations en cas d'erreur.")
+
+
 if position.is_open:
     st.divider()
+    live_market_close(position.position_id)
     with st.expander("Fermer la position (manuel)", expanded=False):
         st.warning(
             "Cette action clôture la position localement et annule les ordres "
@@ -661,11 +758,26 @@ if position.is_open:
                 confirmation_key=f"close_{position.position_id}",
             )
 
-if position.status.value == "CLOSED":
-    st.divider()
-    st.info(
-        f"Position terminée le "
-        f"{position.closed_at.strftime('%d/%m/%Y %H:%M') if position.closed_at else '—'} — "
-        f"raison {position.close_reason.value if position.close_reason else '—'} — "
-        f"PnL réalisé {fmt_quote(position.pnl.realized, position.quote_asset)}"
-    )
+@st.fragment(run_every="1s")
+def live_close_result(position_id):
+    position = service.positions.load(position_id)
+    if position is None:
+        return
+    if position.manual_exits:
+        st.subheader("Ventes de clôture")
+        pnl_dataframe([{"Ordre": sale.order_id, "État": sale.status,
+                        "Quantité vendue": sale.executed_qty, "Prix exécuté": sale.average_fill_price,
+                        f"Reçu ({position.quote_asset})": sale.quote_received}
+                       for sale in position.manual_exits], hide_index=True, width="stretch")
+
+    if position.status.value == "CLOSED":
+        st.divider()
+        st.info(
+            f"Position terminée le "
+            f"{position.closed_at.strftime('%d/%m/%Y %H:%M') if position.closed_at else '—'} — "
+            f"raison {position.close_reason.value if position.close_reason else '—'} — "
+            f"PnL réalisé {fmt_quote(position.pnl.realized, position.quote_asset)}"
+        )
+
+
+live_close_result(position.position_id)

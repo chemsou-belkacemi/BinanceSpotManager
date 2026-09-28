@@ -62,3 +62,35 @@ def test_position_selector_retains_two_same_pair_positions_created_in_same_minut
     assert len(app.selectbox[0].options) == 2
     assert any(first.position_id in label for label in app.selectbox[0].options)
     assert any(second.position_id in label for label in app.selectbox[0].options)
+
+
+def test_position_status_filters_and_empty_results(monkeypatch, tmp_path):
+    store = PositionStore(tmp_path)
+    statuses = [PositionStatus.DRAFT, PositionStatus.PENDING_ENTRIES, PositionStatus.ACTIVE,
+                PositionStatus.CLOSING, PositionStatus.CLOSED, PositionStatus.CANCELED, PositionStatus.ERROR]
+    positions = [Position(symbol="BTCUSDT", status=status) for status in statuses]
+    for position in positions:
+        store.save(position)
+    service = SimpleNamespace(positions=store, rules_cache=SimpleNamespace(get=lambda symbol: st.stop()))
+    monkeypatch.setattr(ui_common, "get_service", lambda: service)
+    monkeypatch.setattr(ui_common, "sidebar_status", lambda settings: None)
+    page = Path(__file__).resolve().parents[1] / "pages" / "3_Positions.py"
+    app = AppTest.from_file(str(page)).run()
+    assert not app.exception
+    assert len(app.selectbox[0].options) == 7
+    for label, expected in (("Pending", positions[:2]), ("Active", positions[2:4]), ("Closed", positions[4:6])):
+        app.segmented_control(key="position_status_filter").set_value(label).run()
+        assert not app.exception
+        assert len(app.selectbox[0].options) == 2
+        assert all(any(p.position_id in option for option in app.selectbox[0].options) for p in expected)
+    # Empty filters remain usable; no Binance calls or position changes.
+    empty = PositionStore(tmp_path / "empty_filter")
+    empty.save(positions[2].model_copy(update={"revision": 0}))
+    service.positions = empty
+    app.run()
+    assert not app.exception
+    assert not app.selectbox
+    assert any("Aucune position pour ce statut" in info.value for info in app.info)
+    app.segmented_control(key="position_status_filter").set_value("Toutes").run()
+    assert not app.exception
+    assert len(app.selectbox[0].options) == 1

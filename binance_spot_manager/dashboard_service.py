@@ -8,6 +8,7 @@ ne parlent jamais directement au client Binance : elles passent par ici.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Optional
@@ -158,6 +159,8 @@ class DashboardService:
             raise ValueError("Redemarrer le worker pour activer les garde-fous des signaux")
         if payload.get("independent_position") and "independent_positions_v1" not in runtime.command_capabilities:
             raise ValueError("Redemarrer le worker pour activer les positions independantes")
+        if action == "CLOSE_MARKET" and "market_close_v1" not in runtime.command_capabilities:
+            raise ValueError("Redemarrer le worker pour activer la cloture au marche")
         return self.commands.enqueue(account_scope(self.settings), action, payload, request_key=request_key)
 
     # ------------------------------------------------------------------
@@ -183,18 +186,38 @@ class DashboardService:
         """Soldes réels libres + bloqués, cotés sur la même API Demo."""
         if not self.settings.is_demo or not self.settings.has_credentials:
             raise ValueError("Compte Binance Demo connecté requis")
-        balances = self.client.get_balances()
-        prices = self.client.get_prices()
+        balances = self._dashboard_read("balances", self.client.get_balances)
+        prices = self._dashboard_read("all_prices", self.client.get_prices)
         return value_wallet(balances, prices)
+
+    def _dashboard_read(self, key, reader):
+        """Share read-only REST snapshots for at most one second across UI panels.
+
+        Trading/risk checks still query the client directly, without this cache.
+        """
+        cache = getattr(self, "_dashboard_read_cache", {})
+        cached = cache.get(key)
+        if cached is not None and time.monotonic() < cached[0]:
+            return cached[1]
+        value = reader()
+        cache[key] = (time.monotonic() + 1.0, value)
+        self._dashboard_read_cache = cache
+        return value
 
     def portfolio(self, *, live: bool = True) -> PortfolioView:
         """Vue portefeuille. `live=False` evite tout appel reseau (tests/DRY_RUN)."""
         view = PortfolioView(quote_asset=self.settings.quote_asset)
         positions = self.positions.list_all()
+        if live and not self.settings.dry_run:
+            prices = self.prices(list({p.symbol for p in positions if p.is_open}))
+            for position in positions:
+                if position.is_open and prices.get(position.symbol):
+                    position.metrics.current_price = prices[position.symbol]
+                    recompute_position(position)
 
         if live and self.settings.has_credentials and not self.settings.dry_run:
             try:
-                balances = self.client.get_balances()
+                balances = self._dashboard_read("balances", self.client.get_balances)
                 quote = balances.get(self.settings.quote_asset, {})
                 view.quote_free = float(quote.get("free", 0.0))
                 view.quote_locked = float(quote.get("locked", 0.0))
@@ -216,7 +239,7 @@ class DashboardService:
         rates = {self.settings.quote_asset: 1.0}
         if quote_assets - rates.keys():
             try:
-                prices = self.client.get_prices() if live else {}
+                prices = self._dashboard_read("all_prices", self.client.get_prices) if live else {}
                 for asset in quote_assets - rates.keys():
                     rate = conversion_rate(asset, self.settings.quote_asset, prices)
                     if rate is None:
@@ -330,7 +353,7 @@ class DashboardService:
             symbols = [p.symbol for p in positions if p.is_open]
             if symbols and not self.settings.dry_run:
                 try:
-                    prices = self.client.get_prices(symbols)
+                    prices = self.prices(symbols)
                 except BinanceError as exc:
                     logger.warning("Prix indisponibles : %s", exc)
 
@@ -466,6 +489,8 @@ class DashboardService:
                     mapping[tp.client_order_id] = f"{position.position_id} · TP {tp.sequence_number}"
             if position.stop_loss.client_order_id:
                 mapping[position.stop_loss.client_order_id] = f"{position.position_id} · SL"
+            for sale in position.manual_exits:
+                mapping[sale.client_order_id] = f"{position.position_id} · Cloture marche"
         return mapping
 
     # ------------------------------------------------------------------

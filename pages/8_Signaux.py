@@ -16,7 +16,7 @@ from binance_spot_manager.signal_parser import ParsedSignal, TEMPLATES, parse_si
 from binance_spot_manager.signal_plan import prepare_signal
 from binance_spot_manager.telegram_signals import chat_allowlist, import_telegram
 from binance_spot_manager.position_store import get_settings_store
-from ui_common import banner, get_service, load_rules, page_header, sidebar_status
+from ui_common import banner, get_service, load_rules, page_header, sidebar_status, colored_pnl
 
 st.set_page_config(page_title="Signaux — Binance Demo", page_icon=":material/description:", layout="wide")
 page_header("Signaux", "Texte → vérification → confirmation → worker Binance Demo")
@@ -139,7 +139,8 @@ if preview and preview[0] == signature:
                    "Montant": entry.notional} for entry in plan.entries], hide_index=True)
     st.dataframe([{"TP": tp.sequence, "Prix": tp.target_price, "Part initiale (%)": tp.sell_percent}
                   for tp in plan.take_profits], hide_index=True)
-    st.write(f"SL : {plan.stop_loss.price} · Perte théorique au SL hors frais/glissement : {plan.loss_max_estimated:.4f} {plan.quote_asset}")
+    st.markdown(f"SL : {plan.stop_loss.price} · Perte théorique au SL hors frais/glissement : "
+                + colored_pnl(-abs(plan.loss_max_estimated), f"{-abs(plan.loss_max_estimated):.4f} {plan.quote_asset}"))
     st.caption("Simulation valable 120 secondes. Le worker recontrôle prix, solde, risque et frais avant tout achat. Une simulation valide peut encore être refusée.")
     confirm = st.checkbox("Je confirme ces achats LIMIT et cette stratégie sur Binance Demo", key=f"confirm_{payload['position']['position_id']}")
     if st.button("Transmettre au worker Demo", disabled=not confirm):

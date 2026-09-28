@@ -270,3 +270,44 @@ def render_kv_table(rows: list[tuple[str, Any]]) -> None:
         col1, col2 = st.columns([2, 3])
         col1.markdown(f"**{label}**")
         col2.markdown(str(value))
+
+
+def colored_pnl(value, text=None):
+    if value is None:
+        return "—"
+    text = text or fmt_price(value)
+    color = "green" if value > 0 else "red" if value < 0 else "gray"
+    return f":{color}[{text}]"
+
+
+def fresh_position_view(service, position_id):
+    """Read a new snapshot on every tick, without saving or mutating editor data."""
+    from binance_spot_manager.position_engine import recompute_position
+    from binance_spot_manager.pnl_display import position_return
+    saved = service.positions.load(position_id)
+    if saved is None:
+        return None, None, None
+    position = saved.model_copy(deep=True)
+    price = service.current_price(position.symbol)
+    if price is not None and price > 0:
+        position.metrics.current_price = price
+    recompute_position(position)
+    rate = 1.0 if position.quote_asset == "USDT" else service.current_price(f"{position.quote_asset}USDT")
+    return position, price, position_return(position, rate)
+
+
+def pnl_metric(container, label, value, text=None):
+    container.caption(label)
+    container.markdown(f"### {colored_pnl(value, text)}")
+
+
+def pnl_dataframe(data, **kwargs):
+    """Keep native table formatting, color only profit/loss columns."""
+    import pandas as pd
+    from binance_spot_manager.pnl_display import pnl_css
+    frame = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
+    columns = [name for name in frame.columns if any(
+        word in str(name).lower() for word in ("pnl", "gain", "perte", "realise", "réalisé"))]
+    if "Frais non convertis" in frame.columns:
+        columns += [name for name in ("Total",) if name in frame.columns]
+    st.dataframe(frame.style.map(pnl_css, subset=columns) if columns else frame, **kwargs)

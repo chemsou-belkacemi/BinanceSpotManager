@@ -17,7 +17,7 @@ from binance_spot_manager.order_journal import OrderJournal
 from binance_spot_manager.backup_manager import build_backup, verify_backup
 from binance_spot_manager.accounting import accounting_snapshot
 from binance_spot_manager.protection_status import protection_overview
-from ui_common import get_service, banner, sidebar_status
+from ui_common import get_service, banner, sidebar_status, pnl_dataframe
 
 st.set_page_config(page_title="Operations — BinanceSpotManager", page_icon=":material/fact_check:", layout="wide")
 st.title("Operations")
@@ -46,7 +46,7 @@ def command_panel():
         return
     labels = {"PENDING": "En attente", "RUNNING": "En cours", "SUCCEEDED": "Traitee",
               "FAILED": "Refusee", "UNCERTAIN": "A verifier", "EXPIRED": "Expiree", "CANCELED": "Retiree"}
-    st.dataframe([{"Demande": c["id"][:12], "Action": c["action"], "Etat": labels[c["state"]],
+    pnl_dataframe([{"Demande": c["id"][:12], "Action": c["action"], "Etat": labels[c["state"]],
                    "Resultat": c["result"].get("message", "")} for c in commands], hide_index=True)
     selected = st.selectbox("Detail d'une demande", [c["id"] for c in commands],
                             format_func=lambda cid: cid[:12], key="operations_command")
@@ -74,7 +74,7 @@ def protection_panel():
             st.error(str(exc))
     positions_now = service.positions.list_all()
     report = st.session_state.get("operations_protection")
-    st.dataframe(protection_overview(positions_now, report), hide_index=True)
+    pnl_dataframe(protection_overview(positions_now, report), hide_index=True)
     for error in service.positions.read_errors:
         st.error(error)
     st.caption("Un controle a plus de 30 secondes est considere perime. Un stop-limit peut se declencher sans s'executer.")
@@ -148,7 +148,7 @@ def alerts_panel():
         return
     matching_count = counts[{"Toutes": "total", "Non lues": "unread", "Lues": "read"}[selected_filter]]
     st.caption(f"{len(alerts)} alerte(s) affichée(s) sur {matching_count}, les plus récentes en premier.")
-    st.dataframe([{"Alerte": a["record"].get("message", ""), "Niveau": a["record"].get("level"),
+    pnl_dataframe([{"Alerte": a["record"].get("message", ""), "Niveau": a["record"].get("level"),
                    "Derniere occurrence": a["last_seen"], "Occurrences": a["occurrences"],
                    "Lue": a["acknowledged_at"] is not None} for a in alerts], hide_index=True)
     by_id = {a["id"]: a for a in alerts}
@@ -166,7 +166,7 @@ alerts_panel()
 st.subheader("Comptabilite detaillee")
 accounting = [accounting_snapshot(p) for p in positions]
 if accounting:
-    st.dataframe(accounting, hide_index=True)
+    pnl_dataframe(accounting, hide_index=True)
     st.caption("Vue au cout moyen net : frais en base et en cotation inclus. Les frais BNB/autres sans taux historique restent explicites ; aucune conversion inventee. Ne pas additionner des devises differentes.")
 
 st.subheader("Sauvegardes verifiables")
