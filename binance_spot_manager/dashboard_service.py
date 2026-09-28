@@ -153,6 +153,11 @@ class DashboardService:
     def runtime(self) -> BotRuntime:
         return self.process_manager.runtime_snapshot()
 
+    def inspect_exit_orders(self) -> dict:
+        from .exit_diagnostics import inspect_exits
+
+        return inspect_exits(self.settings, self.client, self.positions.list_open())
+
     # ------------------------------------------------------------------
     # Portefeuille
     # ------------------------------------------------------------------

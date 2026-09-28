@@ -385,6 +385,22 @@ with tabs[4]:
 
     market_diagnostics_panel()
     st.divider()
+    st.subheader("Contrôle des TP/SL chez Binance Demo")
+    st.caption("Contrôle ponctuel en lecture seule des positions ouvertes. Aucun ordre n'est créé, corrigé ou annulé. Les sorties locales sans ordre Binance sont indiquées séparément.")
+    if st.button("Comparer les sorties avec Binance Demo"):
+        with st.spinner("Lecture des ordres de sortie..."):
+            try:
+                exit_report = service.inspect_exit_orders()
+            except Exception as exc:
+                st.error(str(exc))
+            else:
+                st.caption(f"Instantané du {exit_report['checked_at']} — le worker peut faire évoluer les ordres pendant le contrôle.")
+                if exit_report["rows"]:
+                    st.dataframe(exit_report["rows"], hide_index=True, width="stretch")
+                    st.info("OK confirme uniquement les champs contrôlés sur un ordre ouvert, pas l'exécution future ni la protection globale du portefeuille.")
+                else:
+                    st.info("Aucune sortie à contrôler sur les positions ouvertes.")
+    st.divider()
     st.subheader("Diagnostic du worker")
     worker_status = service.worker_status()
     worker_cols = st.columns(4)
