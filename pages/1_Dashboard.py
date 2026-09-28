@@ -251,6 +251,7 @@ else:
     table = pd.DataFrame(
         [
             {
+                "Position": r.position_id,
                 "Symbole": r.symbol,
                 "État": r.status,
                 "Sync": r.sync_status,

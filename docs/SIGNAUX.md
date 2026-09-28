@@ -3,6 +3,10 @@
 La page **Signaux** conserve les messages dans `data/signals.sqlite3`, séparés
 par compte/mode Demo. Aucun message n'est un ordre à lui seul. Le parseur est
 déterministe : pas de modèle IA ni d'envoi du texte à un service tiers.
+Chaque signal confirmé crée une stratégie avec son propre `position_id`, même
+si d'autres stratégies suivent la même paire. Les entrées d'un même signal
+restent regroupées dans cette stratégie. Les limites de risque cumulent les
+positions de la paire ; les ordres existants ne sont pas transférés.
 
 ## Formats
 

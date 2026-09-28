@@ -76,8 +76,9 @@ def processor(tmp_path):
     }
     def place(position, entry, **kwargs):
         calls.append(entry.client_order_id)
-        entry.order_id, entry.status = 7, EntryStatus.FILLED
-        return OrderResult(success=True, status="FILLED", order_id=7, executed_qty=entry.binance_qty,
+        order_id = 6 + len(calls)
+        entry.order_id, entry.status = order_id, EntryStatus.FILLED
+        return OrderResult(success=True, status="FILLED", order_id=order_id, executed_qty=entry.binance_qty,
                            average_price=84000, cummulative_quote_qty=entry.binance_qty * 84000)
     execution = SimpleNamespace(settings=settings, client=client, rules=lambda *a, **k: rules,
                                 events=EventStore(tmp_path / "events.jsonl"), place_entry=place,
@@ -126,6 +127,76 @@ def test_expired_signal_confirmation_is_refused_before_any_order(processor):
     assert worker.run_one() == "FAILED"
     assert calls == []
     assert not worker.positions.exists(position.position_id)
+
+
+def test_two_trades_on_same_pair_keep_separate_quantities_and_exits(processor):
+    worker, calls = processor
+    first, second = proposed(), proposed()
+    second.stop_loss.resolved_price = 81000
+    second.take_profits[0].target_price = 92000
+    for index, position in enumerate((first, second)):
+        worker.store.enqueue(worker.scope, "SUBMIT_POSITION", {
+            "position": position.model_dump(mode="json"),
+            "entry_ids": [e.entry_id for e in position.entries], "reference_price": 84000,
+            "independent_position": True,
+        }, request_key=f"trade-{index}")
+        assert worker.run_one() == "SUCCEEDED"
+    assert len(set(calls)) == 2
+    loaded = [worker.positions.load(p.position_id) for p in (first, second)]
+    assert [p.metrics.net_qty for p in loaded] == pytest.approx([.001, .001])
+    assert [p.stop_loss.resolved_price for p in loaded] == [80000, 81000]
+    assert [p.take_profits[0].target_price for p in loaded] == [90000, 92000]
+    assert all(len(p.entries) == 1 for p in loaded)
+    assert len(worker.positions.list_open()) == 2
+
+
+def test_multiple_entries_in_one_strategy_each_get_an_order(processor):
+    worker, calls = processor
+    position = proposed()
+    position.entries.append(Entry(sequence_number=2, binance_qty=.001, quote_amount=84, resolved_price=84000))
+    queue_position(worker, position)
+    assert worker.run_one() == "SUCCEEDED"
+    loaded = worker.positions.load(position.position_id)
+    assert len(set(calls)) == 2
+    assert len({e.order_id for e in loaded.entries}) == 2
+    assert loaded.metrics.net_qty == pytest.approx(.002)
+
+
+def test_same_pair_positions_still_share_exposure_limit(processor):
+    worker, calls = processor
+    worker.risk_limits = lambda: RiskLimits(max_exposure_per_symbol_percent=1)
+    for index in range(2):
+        position = proposed()
+        worker.store.enqueue(worker.scope, "SUBMIT_POSITION", {
+            "position": position.model_dump(mode="json"), "entry_ids": [e.entry_id for e in position.entries],
+            "reference_price": 84000, "independent_position": True,
+        }, request_key=f"limited-{index}")
+        assert worker.run_one() == ("SUCCEEDED" if index == 0 else "FAILED")
+    assert len(calls) == 1
+    assert len(worker.positions.list_open()) == 1
+
+
+def test_canceling_one_position_order_leaves_same_pair_sibling_untouched(processor):
+    worker, calls = processor
+    first, second = proposed(), proposed()
+    for order_id, position in zip((101, 102), (first, second)):
+        position.entries[0].order_id = order_id
+        position.entries[0].status = EntryStatus.SUBMITTED
+        worker.positions.save(position)
+    sibling = worker.positions.load(second.position_id).model_dump_json()
+    worker._cancel_order({"symbol": "BTCUSDT", "order_id": 101})
+    assert worker.positions.load(first.position_id).automation.paused
+    assert worker.positions.load(second.position_id).model_dump_json() == sibling
+    assert len(calls) == 1
+
+
+def test_duplicate_entry_sequence_is_rejected_before_post(processor):
+    worker, calls = processor
+    position = proposed()
+    position.entries.append(Entry(sequence_number=1, binance_qty=.001, quote_amount=84, resolved_price=84000))
+    queue_position(worker, position)
+    assert worker.run_one() == "FAILED"
+    assert calls == []
 
 
 def test_old_worker_cannot_receive_signal_commands(monkeypatch, tmp_path):

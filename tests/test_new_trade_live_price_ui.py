@@ -29,7 +29,9 @@ def test_new_trade_market_and_simulation_share_live_price(monkeypatch, tmp_path)
         service, "portfolio",
         lambda: SimpleNamespace(base_balances={}, quote_free=1000.0),
     )
-    monkeypatch.setattr(service, "find_by_symbol", lambda symbol: None)
+    from binance_spot_manager.models import Position
+    existing = Position(symbol="BTCUSDT")
+    monkeypatch.setattr(service, "find_all_by_symbol", lambda symbol: [existing])
     monkeypatch.setattr(
         service, "risk_snapshot",
         lambda quote_free: PortfolioSnapshot(quote_balance=quote_free),
@@ -58,6 +60,10 @@ def test_new_trade_market_and_simulation_share_live_price(monkeypatch, tmp_path)
     assert not app.exception
     assert len(commands.list_recent("test")) == 1
     assert commands.list_recent("test")[0]["state"] == "PENDING"
+    payload = commands.list_recent("test")[0]["payload"]
+    assert payload["position"]["position_id"] != existing.position_id
+    assert payload["existing_id"] is None
+    assert payload["independent_position"]
     # La deuxieme tentative garde la confirmation et ne cree pas un autre achat.
     next(button for button in app.button if button.label == "Lancer la position").click().run()
     assert not app.exception

@@ -12,6 +12,7 @@ Principes non negociables :
 from __future__ import annotations
 
 import logging
+import hashlib
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -97,6 +98,7 @@ def build_client_order_id(
     position_id: str,
     suffix: str,
     environment: str = "DEMO",
+    identity_version: int = 1,
 ) -> str:
     """Construit un identifiant d'ordre tracable et idempotent.
 
@@ -106,7 +108,10 @@ def build_client_order_id(
     base = re.sub(r"[^A-Za-z0-9]", "", symbol.upper())
     suffix = _SANITIZE_RE.sub("", suffix.upper()) or "X"
 
-    short_position = _SANITIZE_RE.sub("", position_id.split("_")[-1])[:8]
+    # Every strategy participates in the ID, including suffixes beyond the old 8-character cut.
+    # Persisted client IDs remain authoritative when recovering existing orders.
+    short_position = (hashlib.sha256(position_id.encode()).hexdigest()[:12]
+                      if identity_version == 2 else _SANITIZE_RE.sub("", position_id.split("_")[-1])[:8])
     env = "D" if environment.upper() == "DEMO" else "L"
 
     prefix = f"{CLIENT_ID_PREFIX}-{env}-"
@@ -321,6 +326,7 @@ class ExecutionEngine:
             position_id=position.position_id,
             suffix=f"E{entry.sequence_number}",
             environment=position.environment,
+            identity_version=position.order_identity_version,
         )
 
         # Idempotence : l'ordre existe-t-il deja cote Binance ?
@@ -440,6 +446,7 @@ class ExecutionEngine:
                 if tp.attempt_count else f"TP{tp.sequence_number}"
             ),
             environment=position.environment,
+            identity_version=position.order_identity_version,
         )
 
         existing = self.find_existing_order(position.symbol, client_order_id)
@@ -533,6 +540,7 @@ class ExecutionEngine:
             position_id=position.position_id,
             suffix=f"TP{tp.sequence_number}GTC",
             environment=position.environment,
+            identity_version=position.order_identity_version,
         )
         existing = self.find_existing_order(position.symbol, client_order_id)
         if existing is not None:
@@ -583,6 +591,7 @@ class ExecutionEngine:
             position_id=position.position_id,
             suffix=suffix,
             environment=position.environment,
+            identity_version=position.order_identity_version,
         )
 
     def place_stop_loss(

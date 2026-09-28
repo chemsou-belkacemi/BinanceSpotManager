@@ -1,4 +1,4 @@
-"""Position Engine — logique metier d'une position (regle : 1 paire = 1 position).
+"""Position Engine — logique metier d'une strategie identifiee par position_id.
 
 Responsabilites :
 - convertir un StrategyPlan en Position persistable ;
@@ -81,6 +81,7 @@ class PositionEngine:
             )
 
         position = Position(
+            order_identity_version=2,
             symbol=plan.symbol,
             base_asset=plan.base_asset,
             quote_asset=plan.quote_asset,
@@ -174,7 +175,7 @@ class PositionEngine:
         *,
         source_group: Optional[SourceGroup] = None,
     ) -> Position:
-        """Ajoute un lot d'Entries (section 44 : pas de seconde position)."""
+        """Ajoute explicitement un lot d'Entries a la position fournie par son ID."""
         if not position.is_open:
             raise PositionEngineError(
                 f"Position {position.position_id} non ouverte : ajout impossible"

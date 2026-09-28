@@ -125,9 +125,10 @@ Si un worker démarre alors qu'un autre est vivant, le démarrage est refusé.
 7. Cocher la confirmation et lancer. Le worker doit être démarré pour que les TP et le
    SL soient surveillés.
 
-Si une position existe déjà sur la paire, **aucune seconde position n'est créée** :
-les nouvelles Entries sont ajoutées à la position existante, sauf en mode OCO :
-l'ajout est refusé tant que le redimensionnement sûr des branches n'est pas implémenté.
+Chaque lancement crée une **position indépendante avec son propre ID**, même
+sur une paire déjà suivie. Ses Entries, TP, SL, quantités et prix moyen restent
+séparés. Les limites de risque cumulent toutefois toutes les positions de la paire.
+Les positions déjà fusionnées restent inchangées ; aucun ordre existant n'est déplacé.
 
 ### Investissement long terme
 
@@ -139,7 +140,7 @@ ni les quantités de la position existante. Les sorties suivies TP/SL acceptent
 les paires cotées en USDT et USDC. Le risque est converti en USDT au taux
 Binance Demo, sans supposer une parité fixe ; si un taux nécessaire manque,
 l'achat avec sortie est refusé.
-Elle exige un worker actif, une paire sans position ouverte, un achat Market et
+Elle exige un worker actif, un achat Market et
 le respect des limites de risque du portefeuille. L'achat est calculé avec une
 marge de 2 % pour éviter de dépasser le budget lors d'un mouvement du cours.
 Après confirmation du fill, le worker place l'ordre de sortie sur Binance Demo :
@@ -263,7 +264,7 @@ Couvrent : arrondis prix/quantité, minQty, minNotional, formatage sans notation
 scientifique, conversions prix ↔ pourcentage, les trois modes de capital, répartitions,
 prix moyen pondéré, scénarios A/B/C, détection de plan invalide, application des fills,
 idempotence du recalcul, les six règles de SL évolutif, le risque portefeuille,
-la règle « une paire = une position », l'écriture atomique, et toute la chaîne
+les positions indépendantes par ID, l'écriture atomique, et toute la chaîne
 d'automation TP/SL avec un client Binance simulé.
 
 Tests d'intégration Demo (lecture seule) :

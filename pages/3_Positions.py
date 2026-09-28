@@ -60,10 +60,11 @@ if not positions:
     st.stop()
 
 labels = {
-    f"{p.symbol} · {p.status.value} · {p.created_at.strftime('%d/%m %H:%M')}": p
+    p.position_id: p
     for p in positions
 }
-choice = st.selectbox("Position", list(labels.keys()))
+choice = st.selectbox("Position", list(labels.keys()), format_func=lambda key:
+    f"{labels[key].symbol} · {key} · {labels[key].status.value} · {labels[key].created_at.strftime('%d/%m %H:%M')}")
 position = labels[choice]
 new_command_confirmation(f"move_sl_{position.position_id}")
 
@@ -572,7 +573,7 @@ raw_orders = [
     }
     for o in orders
 ]
-for finding in audit_open_orders(position, raw_orders):
+for finding in audit_open_orders(position, raw_orders, tracked_positions=service.positions.list_open()):
     st.warning(f"⚠️ {finding.message} — {finding.suggested_action}")
 
 st.markdown("**Réconcilier avec Binance**")

@@ -74,7 +74,7 @@ def main() -> int:
             }
             for o in all_orders
         ]
-        findings = audit_open_orders(position, raw)
+        findings = audit_open_orders(position, raw, tracked_positions=positions)
         if findings:
             orphans_found = True
             print("-" * 78)

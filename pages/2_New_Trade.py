@@ -108,13 +108,11 @@ symbol_status_box(symbol, rules, balances)
 if rules_error:
     st.stop()
 
-existing = service.find_by_symbol(symbol) if symbol else None
-if existing is not None:
-    st.warning(
-        f"⚠️ Position {symbol} déjà active (créée le "
-        f"{existing.created_at.strftime('%d/%m %H:%M')}). "
-        "Le lancement ajoutera les nouvelles Entries à cette position — "
-        "aucune seconde position ne sera créée."
+existing_positions = service.find_all_by_symbol(symbol) if symbol else []
+if existing_positions:
+    st.info(
+        f"{len(existing_positions)} position(s) déjà ouverte(s) sur {symbol}. "
+        "Ce lancement créera une nouvelle position avec son propre ID, ses TP et son SL."
     )
 
 quote_asset = rules.quote_asset
@@ -619,7 +617,7 @@ preset_name = col_a.text_input("Nom du preset (optionnel)", "")
 source_name = col_b.text_input("Source / label", "manual")
 tags_raw = col_c.text_input("Tags", "", help="Séparés par des virgules")
 
-action_label = "Ajouter à la position existante" if existing else "Lancer la position"
+action_label = "Lancer la position"
 ready = risk.accepted and plan.is_valid
 
 new_command_confirmation("new_trade")
@@ -628,9 +626,6 @@ confirm = st.checkbox(
     "Je confirme la simulation (DRY_RUN : aucun ordre ne sera envoyé)"
 )
 if st.button(action_label, type="primary", disabled=not (confirm and ready)):
-    if existing is not None and existing.oco_exit is not None:
-        st.error("Ajout sur OCO non pris en charge : conserver la protection existante.")
-        st.stop()
     spec.preset_name = preset_name
     spec.source_name = source_name or "manual"
     spec.tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
@@ -640,7 +635,7 @@ if st.button(action_label, type="primary", disabled=not (confirm and ready)):
         "SUBMIT_POSITION",
         {"position": proposed.model_dump(mode="json"),
          "entry_ids": [e.entry_id for e in proposed.entries],
-         "existing_id": existing.position_id if existing else None,
+         "existing_id": None, "independent_position": True,
          "reference_price": float(price or 0)},
         confirmation_key="new_trade",
     )

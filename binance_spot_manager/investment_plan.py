@@ -173,6 +173,7 @@ def make_investment_position(preview: InvestmentPreview, *, current_price: float
     if not preview.eligible:
         raise ValueError("Plan d'investissement invalide")
     position = Position(
+        order_identity_version=2,
         symbol=preview.symbol, base_asset=preview.base_asset, quote_asset=preview.quote_asset,
         status=PositionStatus.PENDING_ENTRIES, environment="DEMO",
         creation_price=current_price, planned_capital=preview.estimated_spend,

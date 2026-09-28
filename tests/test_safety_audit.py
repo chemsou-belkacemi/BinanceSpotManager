@@ -126,13 +126,18 @@ def test_stale_position_cannot_overwrite_newer_copy(tmp_path):
     assert json.loads(backup.read_text(encoding="utf-8"))["revision"] == 1
 
 
-def test_store_rejects_traversal_and_second_active_symbol(tmp_path):
+def test_store_rejects_traversal_and_preserves_same_symbol_positions(tmp_path):
     store = PositionStore(tmp_path)
     with pytest.raises(ValueError):
         store.load("../outside")
-    store.save(Position(symbol="BTCUSDT", status=PositionStatus.ACTIVE))
-    with pytest.raises(ValueError, match="active"):
-        store.save(Position(symbol="BTCUSDT", status=PositionStatus.ACTIVE))
+    first = Position(symbol="BTCUSDT", status=PositionStatus.ACTIVE)
+    second = Position(symbol="BTCUSDT", status=PositionStatus.ACTIVE)
+    store.save(first)
+    store.save(second)
+    assert len(store.list_active_by_symbol("BTCUSDT")) == 2
+    stale = Position(position_id=first.position_id, symbol="BTCUSDT", status=PositionStatus.ACTIVE)
+    with pytest.raises(ConcurrentPositionUpdate):
+        store.save(stale)
 
 
 @pytest.mark.parametrize("status,qty,expected", [("NEW", "0", False), ("FILLED", "1", False), ("CANCELED", "0", True), ("CANCELED", "0.5", False)])

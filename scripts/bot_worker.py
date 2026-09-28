@@ -168,7 +168,7 @@ class Worker:
         runtime.run_mode = self.settings.run_mode.value
         runtime.base_url = self.settings.base_url
         runtime.command_scope = account_scope(self.settings)
-        runtime.command_capabilities = ["signal_v1"]
+        runtime.command_capabilities = ["signal_v1", "independent_positions_v1"]
         runtime.last_message = message or runtime.last_message
         runtime.heartbeat_at = utcnow()
         if hasattr(self, "market_prices"):

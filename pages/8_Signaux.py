@@ -119,8 +119,6 @@ signature = (scope, selected, budget, validity, touch)
 if st.button("Vérifier sur Binance Demo et simuler", disabled=not (budget > 0 and validity and touch)):
     st.session_state.pop("signal_preview", None)
     try:
-        if service.find_by_symbol(parsed.symbol):
-            raise ValueError("Une position existe déjà sur cette paire : aucun ajout automatique depuis un signal.")
         rules, error = load_rules(parsed.symbol)
         if error or rules is None:
             raise ValueError(error or "Paire indisponible")
@@ -150,6 +148,8 @@ if preview and preview[0] == signature:
                 raise ValueError("Simulation expirée : relancer la vérification.")
             if "signal_v1" not in service.runtime().command_capabilities:
                 raise ValueError("Redémarrer le worker avant de confirmer un signal (nouveaux garde-fous).")
+            if "independent_positions_v1" not in service.runtime().command_capabilities:
+                raise ValueError("Redémarrer le worker pour activer les positions indépendantes.")
             status = service.worker_status()
             if not status.running or status.heartbeat_age is None or status.heartbeat_age >= 20:
                 raise ValueError("Démarrer le worker avant de confirmer un signal.")

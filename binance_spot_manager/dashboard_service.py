@@ -156,6 +156,8 @@ class DashboardService:
             raise ValueError("Compte du worker different ou ancien worker : le redemarrer")
         if "signal_confirmation_expires_at" in payload and "signal_v1" not in runtime.command_capabilities:
             raise ValueError("Redemarrer le worker pour activer les garde-fous des signaux")
+        if payload.get("independent_position") and "independent_positions_v1" not in runtime.command_capabilities:
+            raise ValueError("Redemarrer le worker pour activer les positions independantes")
         return self.commands.enqueue(account_scope(self.settings), action, payload, request_key=request_key)
 
     # ------------------------------------------------------------------
@@ -375,6 +377,9 @@ class DashboardService:
     def find_by_symbol(self, symbol: str) -> Optional[Position]:
         return self.positions.find_active_by_symbol(symbol)
 
+    def find_all_by_symbol(self, symbol: str) -> list[Position]:
+        return self.positions.list_active_by_symbol(symbol)
+
     # ------------------------------------------------------------------
     # Prix
     # ------------------------------------------------------------------
@@ -455,12 +460,12 @@ class DashboardService:
         for position in self.positions.list_all():
             for entry in position.entries:
                 if entry.client_order_id:
-                    mapping[entry.client_order_id] = f"Entry {entry.sequence_number}"
+                    mapping[entry.client_order_id] = f"{position.position_id} · Entry {entry.sequence_number}"
             for tp in position.take_profits:
                 if tp.client_order_id:
-                    mapping[tp.client_order_id] = f"TP {tp.sequence_number}"
+                    mapping[tp.client_order_id] = f"{position.position_id} · TP {tp.sequence_number}"
             if position.stop_loss.client_order_id:
-                mapping[position.stop_loss.client_order_id] = "SL"
+                mapping[position.stop_loss.client_order_id] = f"{position.position_id} · SL"
         return mapping
 
     # ------------------------------------------------------------------

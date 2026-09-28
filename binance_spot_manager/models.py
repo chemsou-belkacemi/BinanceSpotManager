@@ -2,7 +2,7 @@
 
 Regles structurelles imposees par le cahier des charges :
 - AUCUN champ entry1/entry2/tp1/tp2 : listes de taille 1..N ;
-- une paire = une seule position active ;
+- une strategie = un position_id ; plusieurs strategies par paire ;
 - tout est serialisable en JSON UTF-8.
 """
 
@@ -493,6 +493,7 @@ class OcoExit(BSMModel):
 
 class Position(BSMModel):
     revision: int = 0
+    order_identity_version: int = Field(default=1, ge=1, le=2)
     position_id: str = Field(default_factory=lambda: new_id("pos"))
     symbol: str = ""
     base_asset: str = ""

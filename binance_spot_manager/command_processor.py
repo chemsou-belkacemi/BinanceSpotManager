@@ -131,6 +131,11 @@ class CommandProcessor:
         ):
             raise RejectedCommand("Seules des entrees planifiees non envoyees sont acceptables")
         existing_id = payload.get("existing_id")
+        if payload.get("independent_position") and existing_id:
+            raise RejectedCommand("Une strategie independante ne peut pas etre fusionnee dans une autre position")
+        sequences = [e.sequence_number for e in entries]
+        if len(set(sequences)) != len(sequences) or any(number <= 0 for number in sequences):
+            raise RejectedCommand("Chaque entree doit avoir un numero distinct et positif")
         position = self._position({"position_id": existing_id}) if existing_id else proposed
         if position.symbol != proposed.symbol or position.quote_asset != proposed.quote_asset:
             raise RejectedCommand("La demande ne correspond pas a la position cible")
@@ -140,6 +145,8 @@ class CommandProcessor:
             raise RejectedCommand("Entrees deja presentes : verifier leur execution")
         if not existing_id and self.positions.exists(position.position_id):
             raise RejectedCommand("Position deja creee : verifier sa reprise")
+        if not existing_id:
+            position.order_identity_version = 2
         rules = self.execution.rules(position.symbol, refresh=True)
         if not rules.is_trading or rules.base_asset != position.base_asset or rules.quote_asset != position.quote_asset:
             raise RejectedCommand("Paire ou regles Binance incompatibles")
@@ -182,7 +189,8 @@ class CommandProcessor:
         results = []
         for entry in entries:
             entry.client_order_id = build_client_order_id(symbol=position.symbol, position_id=position.position_id,
-                                                         suffix=f"E{entry.sequence_number}")
+                                                         suffix=f"E{entry.sequence_number}",
+                                                         identity_version=position.order_identity_version)
             if not self.settings.dry_run:
                 entry.status = EntryStatus.SUBMITTED
             self.positions.save(position)

@@ -85,6 +85,23 @@ def test_position_flag_cancels_remaining_entries_after_first_tp(engine, events, 
     assert canceled == [position.position_id]
 
 
+def test_tp_and_stop_replacement_do_not_touch_same_pair_sibling(engine, events):
+    execution, fake, rules = engine
+    first, second = make_position(rules), make_position(rules)
+    second.stop_loss.order_id = SL_ORDER_ID + 1
+    second.stop_loss.client_order_id = SL_CLIENT_ID + "-SECOND"
+    fake.orders[second.stop_loss.client_order_id] = dict(fake.orders[SL_CLIENT_ID],
+        orderId=second.stop_loss.order_id, clientOrderId=second.stop_loss.client_order_id)
+    second_before = second.model_dump_json()
+    automation = build_automation(execution, rules, events)
+    result = automation.run_cycle(first, 86600)
+    assert result.tp_executed == 1
+    assert second.model_dump_json() == second_before
+    assert second.stop_loss.order_id not in fake.cancelled
+    assert fake.orders[second.stop_loss.client_order_id]["status"] == "NEW"
+    assert first.metrics.net_qty < second.metrics.net_qty
+
+
 def test_partial_sl_then_full_fill_accounts_cumulative_fees_once(engine, events):
     execution, fake, rules = engine
     position = make_position(rules)

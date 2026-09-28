@@ -1,4 +1,4 @@
-"""Tests du moteur de risque et de la regle 'une paire = une position'.
+"""Tests du moteur de risque et des strategies independantes par ID.
 
 Aucun appel reseau.
 """
@@ -190,7 +190,7 @@ def test_invalid_plan_is_refused():
 
 
 # ==========================================================================
-# Regle : une paire = une position active (section 3)
+# Plusieurs positions independantes peuvent partager une paire
 # ==========================================================================
 
 
@@ -221,12 +221,15 @@ def test_closed_position_does_not_block_new_one(store):
     assert store.find_active_by_symbol("BTCUSDT") is None
 
 
-def test_no_second_active_position_on_same_symbol(store):
-    store.save(make_open_position("BTCUSDT"))
-    existing = store.find_active_by_symbol("BTCUSDT")
-    assert existing is not None
-    # Un second enregistrement ne doit pas creer d'entree concurrente :
-    assert store.count_active() == 1
+def test_same_symbol_positions_are_separate_and_require_id_for_selection(store):
+    first, second = make_open_position("BTCUSDT"), make_open_position("BTCUSDT")
+    store.save(first)
+    store.save(second)
+    assert store.count_active() == 2
+    assert {p.position_id for p in store.list_active_by_symbol("btcusdt")} == {first.position_id, second.position_id}
+    assert store.load(first.position_id).entries[0].entry_id != store.load(second.position_id).entries[0].entry_id
+    with pytest.raises(ValueError, match="position_id"):
+        store.find_active_by_symbol("BTCUSDT")
 
 
 def test_active_symbols_set(store):

@@ -29,7 +29,7 @@ def test_manual_signal_preview_confirmation_and_deduplication(monkeypatch, tmp_p
         find_by_symbol=lambda symbol: None, commands=commands,
         client=SimpleNamespace(get_balances=lambda: {"USDT": {"free": 1000}}),
         current_price=lambda symbol: 84500, risk_limits=lambda: SimpleNamespace(min_reserve_percent=20),
-        runtime=lambda: SimpleNamespace(command_capabilities=["signal_v1"]),
+        runtime=lambda: SimpleNamespace(command_capabilities=["signal_v1", "independent_positions_v1"]),
         worker_status=lambda: SimpleNamespace(running=True, heartbeat_age=0),
         submit_command=lambda action, payload, request_key: commands.enqueue(scope, action, payload, request_key=request_key),
     )

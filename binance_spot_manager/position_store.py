@@ -79,7 +79,7 @@ def read_json(path: Path) -> Optional[Any]:
 
 
 class PositionStore:
-    """CRUD des positions, une seule position active par symbole."""
+    """CRUD des strategies identifiees ; plusieurs positions peuvent partager une paire."""
 
     def __init__(self, directory: Optional[Path] = None) -> None:
         ensure_directories()
@@ -121,8 +121,6 @@ class PositionStore:
                 existing = self.list_all()
                 if self.read_errors:
                     raise RuntimeError("Creation refusee : positions locales illisibles")
-                if any(p.is_open and p.symbol == position.symbol and p.position_id != position.position_id for p in existing):
-                    raise ValueError(f"Une position active existe deja sur {position.symbol}")
             position.touch()
             payload = position.model_dump(mode="json")
             payload["revision"] = position.revision + 1
@@ -179,20 +177,18 @@ class PositionStore:
     def list_closed(self) -> list[Position]:
         return [p for p in self.list_all() if not p.status.is_open]
 
-    # -- regle "une paire = une position active" ------------------------
+    # -- recherche par paire ; les mutations utilisent position_id ------
+
+    def list_active_by_symbol(self, symbol: str) -> list[Position]:
+        target = symbol.strip().upper()
+        return [p for p in self.list_open() if p.symbol.upper() == target]
 
     def find_active_by_symbol(self, symbol: str) -> Optional[Position]:
-        """Position active sur ce symbole, ou None.
-
-        C'est ce qui empeche la creation d'une seconde position logique
-        (section 3 et 44) : un nouveau signal sur le meme symbole doit
-        enrichir la position existante, jamais en creer une autre.
-        """
-        target = symbol.strip().upper()
-        for position in self.list_all():
-            if position.symbol.upper() == target and position.status.is_open:
-                return position
-        return None
+        """Compatibilite pour une paire non ambigue ; sinon exiger un ID."""
+        matches = self.list_active_by_symbol(symbol)
+        if len(matches) > 1:
+            raise ValueError(f"Plusieurs positions sur {symbol.upper()} : selectionner un position_id")
+        return matches[0] if matches else None
 
     def active_symbols(self) -> set[str]:
         return {p.symbol.upper() for p in self.list_open()}

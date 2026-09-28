@@ -565,6 +565,8 @@ class ReconciliationEngine:
 def audit_open_orders(
     position: Position,
     open_orders: list[dict[str, Any]],
+    *,
+    tracked_positions: Optional[list[Position]] = None,
 ) -> list[Finding]:
     """Detecte les ordres Binance orphelins (non suivis par une position).
 
@@ -574,23 +576,31 @@ def audit_open_orders(
     known_ids: set[Any] = set()
     known_client_ids: set[str] = set()
 
-    for entry in position.entries:
-        if entry.order_id:
-            known_ids.add(entry.order_id)
-        if entry.client_order_id:
-            known_client_ids.add(entry.client_order_id)
-    for tp in position.take_profits:
-        if tp.order_id:
-            known_ids.add(tp.order_id)
-        if tp.client_order_id:
-            known_client_ids.add(tp.client_order_id)
-    if position.stop_loss.order_id:
-        known_ids.add(position.stop_loss.order_id)
-    if position.stop_loss.client_order_id:
-        known_client_ids.add(position.stop_loss.client_order_id)
+    tracked = [position] + list(tracked_positions or [])
+    for owner in tracked:
+        if owner.symbol != position.symbol:
+            continue
+        for entry in owner.entries:
+            if entry.order_id:
+                known_ids.add(entry.order_id)
+            if entry.client_order_id:
+                known_client_ids.add(entry.client_order_id)
+        for tp in owner.take_profits:
+            if tp.order_id:
+                known_ids.add(tp.order_id)
+            if tp.client_order_id:
+                known_client_ids.add(tp.client_order_id)
+        if owner.stop_loss.order_id:
+            known_ids.add(owner.stop_loss.order_id)
+        if owner.stop_loss.client_order_id:
+            known_client_ids.add(owner.stop_loss.client_order_id)
+        if owner.oco_exit:
+            known_ids.update({owner.oco_exit.tp_order_id, owner.oco_exit.sl_order_id})
 
     findings: list[Finding] = []
     for order in open_orders:
+        if order.get("symbol", position.symbol) != position.symbol:
+            continue
         if order.get("orderId") in known_ids:
             continue
         if order.get("clientOrderId") in known_client_ids:
@@ -602,7 +612,7 @@ def audit_open_orders(
                 message=(
                     f"Ordre {order.get('side')} {order.get('type')} "
                     f"{order.get('origQty')} @ {order.get('price')} non suivi "
-                    f"par la position"
+                    f"par les positions de cette paire"
                 ),
                 symbol=position.symbol,
                 position_id=position.position_id,

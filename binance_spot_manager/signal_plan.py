@@ -56,6 +56,7 @@ def prepare_signal(parsed: ParsedSignal, rules, *, budget, available_quote, rese
     for index, tp in enumerate(position.take_profits):
         tp.sell_percent = 100 / (len(targets) - index)
     payload = {"position": position.model_dump(mode="json"),
+               "independent_position": True,
                "entry_ids": [e.entry_id for e in position.entries], "reference_price": current_price,
                "signal_confirmation_expires_at": time.time() + 120}
     return plan, payload

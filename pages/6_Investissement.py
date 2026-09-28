@@ -80,11 +80,11 @@ if purchase_mode.startswith("Achat simple"):
         f"Tu achètes {rules.base_asset} avec {rules.quote_asset}. "
         "Aucun TP, aucun SL et aucune position suivie par le bot ne seront créés."
     )
-    existing_simple = service.find_by_symbol(symbol)
+    existing_simple = service.find_all_by_symbol(symbol)
     if existing_simple:
         st.warning(
-            f"Une stratégie {symbol} existe déjà ({existing_simple.position_id}). "
-            "Cet achat simple ira uniquement dans le portefeuille ; son OCO et sa position ne changent pas."
+            f"{len(existing_simple)} stratégie(s) {symbol} existe(nt) déjà. "
+            "Cet achat simple ira uniquement dans le portefeuille ; les stratégies existantes ne changent pas."
         )
     usable_simple = max(available_quote * (1 - reserve_percent / 100), 0.0)
     budget = st.number_input(
@@ -162,13 +162,12 @@ if rules.quote_asset not in {"USDT", "USDC"}:
     )
     st.stop()
 
-existing = service.find_by_symbol(symbol)
+existing = service.find_all_by_symbol(symbol)
 if existing:
-    st.warning(
-        f"Une position {symbol} existe déjà ({existing.position_id}). "
-        "Cette page ne crée pas de seconde position et ne change pas ses ordres."
+    st.info(
+        f"{len(existing)} position(s) {symbol} déjà ouverte(s). "
+        "Cet investissement aura un nouvel ID et sa propre sortie."
     )
-    st.stop()
 
 st.subheader("1. Achat")
 st.caption(f"Prix indicatif : {fmt_price(price)} {rules.quote_asset} · achat Market uniquement")
@@ -258,9 +257,6 @@ if st.button(
     latest_price = service.current_price(symbol)
     latest_portfolio = service.portfolio()
     latest_worker = service.worker_status()
-    if service.find_by_symbol(symbol):
-        st.error("Une position vient d'être créée sur cette paire. Achat annulé.")
-        st.stop()
     if not settings.dry_run and (
         latest_portfolio.errors or not latest_worker.running
         or latest_worker.heartbeat_age is None or latest_worker.heartbeat_age >= 20
@@ -302,6 +298,6 @@ if st.button(
     submit_to_worker(
         "SUBMIT_POSITION",
         {"position": position.model_dump(mode="json"), "entry_ids": [e.entry_id for e in position.entries],
-         "existing_id": None, "reference_price": latest_price},
+         "existing_id": None, "independent_position": True, "reference_price": latest_price},
         confirmation_key="investment",
     )
