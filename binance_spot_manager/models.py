@@ -186,6 +186,8 @@ class EventType(str, Enum):
     POSITION_FINISHED = "POSITION_FINISHED"
     DRY_RUN_SKIP = "DRY_RUN_SKIP"
     SIMPLE_BUY = "SIMPLE_BUY"
+    FEE_TOKEN_LOW = "FEE_TOKEN_LOW"
+    FEE_TOKEN_RECOVERED = "FEE_TOKEN_RECOVERED"
 
 
 class WorkerState(str, Enum):

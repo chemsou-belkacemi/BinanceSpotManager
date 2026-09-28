@@ -61,8 +61,19 @@ def processor(tmp_path):
                                            {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
                                            {"filterType": "NOTIONAL", "minNotional": "5"}]})
     calls = []
-    client = SimpleNamespace(get_price=lambda symbol: 84000, get_prices=lambda: {"BTCUSDT": 84000, "EURUSDT": 1.1},
-                             get_balances=lambda: {"USDT": {"free": 10000, "locked": 0}}, get_free_balance=lambda asset: 10000)
+    client = SimpleNamespace(get_price=lambda symbol: 84000,
+                             get_prices=lambda: {"BTCUSDT": 84000, "EURUSDT": 1.1, "BNBUSDT": 500},
+                             get_balances=lambda: {"USDT": {"free": 10000, "locked": 0},
+                                                   "BNB": {"free": 1, "locked": 0}},
+                             get_free_balance=lambda asset: 10000)
+    client.get_commission_rates = lambda symbol: {
+        "symbol": symbol,
+        "standardCommission": {"maker": "0.001", "taker": "0.001", "buyer": "0", "seller": "0"},
+        "taxCommission": dict.fromkeys(("maker", "taker", "buyer", "seller"), "0"),
+        "specialCommission": dict.fromkeys(("maker", "taker", "buyer", "seller"), "0"),
+        "discount": {"enabledForAccount": True, "enabledForSymbol": True,
+                     "discountAsset": "BNB", "discount": "0.75"},
+    }
     def place(position, entry, **kwargs):
         calls.append(entry.client_order_id)
         entry.order_id, entry.status = 7, EntryStatus.FILLED
@@ -72,7 +83,8 @@ def processor(tmp_path):
                                 events=EventStore(tmp_path / "events.jsonl"), place_entry=place,
                                 place_simple_buy=lambda **k: (calls.append(k) or OrderResult(success=True, order_id=8, status="FILLED")),
                                 cancel_order=lambda *a, **k: (calls.append(k) or OrderResult(success=True, order_id=k["order_id"], status="CANCELED")))
-    worker = CommandProcessor(CommandStore(tmp_path / "commands.db"), PositionStore(tmp_path / "positions"), execution, RiskLimits)
+    worker = CommandProcessor(CommandStore(tmp_path / "commands.db"), PositionStore(tmp_path / "positions"),
+                              execution, RiskLimits, settings_supplier=lambda: {})
     return worker, calls
 
 
@@ -196,3 +208,55 @@ def test_connection_command_does_not_send_an_order(processor):
     assert worker.run_one() == "SUCCEEDED"
     assert pings == ["ping"]
     assert calls == []
+
+
+def test_low_bnb_rejects_new_buy_before_order(processor):
+    worker, calls = processor
+    worker.settings_supplier = lambda: {
+        "bnb_fee_monitor_enabled": True,
+        "bnb_fee_alert_threshold_usdt": 5,
+        "bnb_fee_block_new_buys": True,
+    }
+    worker.execution.client.get_balances = lambda: {
+        "USDT": {"free": 10000, "locked": 0},
+        "BNB": {"free": 0.001, "locked": 0},
+    }
+    queue_position(worker)
+    assert worker.run_one() == "FAILED"
+    assert calls == []
+
+
+def test_bnb_monitor_can_be_disabled_for_new_buy(processor):
+    worker, calls = processor
+    worker.settings_supplier = lambda: {
+        "bnb_fee_monitor_enabled": False,
+        "bnb_fee_block_new_buys": True,
+    }
+    worker.execution.client.get_balances = lambda: {
+        "USDT": {"free": 10000, "locked": 0},
+        "BNB": {"free": 0, "locked": 0},
+    }
+    queue_position(worker)
+    assert worker.run_one() == "SUCCEEDED"
+    assert len(calls) == 1
+
+
+def test_unavailable_commission_rejects_before_post(processor):
+    worker, calls = processor
+    def unavailable(symbol):
+        raise RuntimeError("Commission endpoint unavailable")
+    worker.execution.client.get_commission_rates = unavailable
+    queue_position(worker)
+    assert worker.run_one() == "FAILED"
+    assert calls == []
+
+
+def test_buy_guard_uses_binance_discount_instead_of_saved_manual_rate(processor):
+    worker, _ = processor
+    worker.settings_supplier = lambda: {"bnb_fee_alert_threshold_usdt": 0, "bnb_fee_estimated_percent": 9}
+    check = worker._check_bnb_for_buy(
+        "BTCUSDT", "USDT", 1000,
+        {"BNB": {"free": 0.002, "locked": 0}}, {"BNBUSDT": 500},
+    )
+    assert check.sufficient
+    assert check.estimated_required_bnb == pytest.approx(0.001875)

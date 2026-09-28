@@ -314,8 +314,17 @@ class BinanceSpotClient:
             return {symbol: self.get_price(symbol)}
         params = {"symbols": json.dumps(wanted, separators=(",", ":"))} if wanted else None
         data = self._request("GET", "/api/v3/ticker/price", params=params)
-        prices = {row["symbol"]: float(row["price"]) for row in data or []}
-        if any(not math.isfinite(value) or value <= 0 for value in prices.values()):
+        prices: dict[str, float] = {}
+        for row in data or []:
+            try:
+                symbol, value = str(row["symbol"]), float(row["price"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            # Le catalogue Demo peut contenir des marches inactifs a prix nul.
+            # Ils ne doivent pas rendre inutilisables tous les prix valides.
+            if math.isfinite(value) and value > 0:
+                prices[symbol] = value
+        if not prices:
             raise BinanceError("Prix Binance invalide", endpoint="/api/v3/ticker/price")
         if symbols is None:
             return prices
@@ -332,6 +341,13 @@ class BinanceSpotClient:
 
     def get_account(self) -> dict[str, Any]:
         return self._request("GET", "/api/v3/account", signed=True)
+
+    def get_commission_rates(self, symbol: str) -> dict[str, Any]:
+        """Commissions et reduction du compte pour une paire, en lecture seule."""
+        return self._request(
+            "GET", "/api/v3/account/commission",
+            params={"symbol": symbol.strip().upper()}, signed=True,
+        )
 
     def get_balances(self) -> dict[str, dict[str, float]]:
         """{asset: {"free": x, "locked": y}} — soldes non nuls seulement."""

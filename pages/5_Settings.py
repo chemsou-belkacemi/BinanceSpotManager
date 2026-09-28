@@ -19,6 +19,8 @@ from binance_spot_manager.config import (  # noqa: E402
     reload_settings,
 )
 from binance_spot_manager.notification_engine import channel_summary  # noqa: E402
+from binance_spot_manager.fee_token import AccountCommission, FeeTokenPolicy, assess_bnb_fees  # noqa: E402
+from binance_spot_manager.command_store import account_scope  # noqa: E402
 from binance_spot_manager.browser_notifications import (  # noqa: E402
     PERMISSION_HTML, browser_alert_preferences, notification_html,
 )
@@ -155,6 +157,91 @@ with tabs[1]:
         value=int(saved.get("capital_reserve_percent", settings.capital_reserve_percent)),
     )
 
+    st.subheader("BNB disponible pour les frais")
+    st.caption("Ton solde BNB libre, valorisé en USDT au cours Binance. Les frais sont payés avec ce BNB.")
+    bnb_monitor = st.toggle(
+        "M'alerter quand la réserve de frais est faible",
+        value=bool(saved.get("bnb_fee_monitor_enabled", True)),
+        help="Ce bouton règle le bot uniquement ; il ne modifie pas l'option correspondante sur Binance.",
+    )
+    bnb_threshold = st.number_input(
+        "M'alerter si mon BNB disponible vaut moins de (USDT)",
+        min_value=0.0,
+        max_value=1_000_000.0,
+        value=FeeTokenPolicy.from_mapping(saved).alert_threshold_usdt,
+        step=1.0,
+        format="%.2f",
+        disabled=not bnb_monitor,
+        help="Exemple : 5 signifie une alerte quand ton BNB disponible vaut moins de 5 USDT.",
+    )
+    @st.fragment(run_every="60s")
+    def fee_reserve_panel():
+        st.button("Actualiser la réserve", key="refresh_fee_reserve")
+        try:
+            check = assess_bnb_fees(
+                service.client.get_balances(), {"BNBUSDT": service.client.get_price("BNBUSDT")},
+                FeeTokenPolicy(alert_threshold_usdt=float(bnb_threshold)),
+            )
+            if not check.conversion_available:
+                st.warning(check.reason)
+                return
+            st.metric("Valeur du BNB disponible pour les frais", f"{check.free_usdt:,.2f} USDT")
+            st.caption(f"Valeur du BNB libre uniquement · {check.locked_usdt:,.2f} USDT de BNB bloqué exclus · actualisé chaque minute.")
+            if bnb_monitor and check.low:
+                st.warning(f"Réserve sous ton seuil de {bnb_threshold:.2f} USDT.")
+        except Exception:
+            st.warning("Réserve indisponible : impossible de lire le solde ou le cours Binance pour le moment.")
+
+    fee_reserve_panel()
+    bnb_block_buys = st.toggle(
+        "Bloquer les achats si la réserve est insuffisante",
+        value=bool(saved.get("bnb_fee_block_new_buys", True)),
+        disabled=not bnb_monitor,
+        help="Vérifie la réserve contre le seuil et les frais estimés de l'achat. Les ventes TP/SL restent autorisées.",
+    )
+    st.caption(
+        "Les taux sont récupérés automatiquement depuis Binance Demo avant chaque achat, "
+        "avec la réduction BNB active sur le compte et la paire."
+    )
+    fee_symbol = st.text_input("Paire pour consulter les frais", "BTCUSDT").strip().upper()
+    if st.button("Lire les frais depuis Binance Demo", disabled=not fee_symbol):
+        try:
+            commission = AccountCommission.from_response(
+                service.client.get_commission_rates(fee_symbol), fee_symbol,
+            )
+            st.session_state["settings_fee_snapshot"] = (
+                fee_symbol, account_scope(settings), commission,
+            )
+        except Exception as exc:
+            st.session_state.pop("settings_fee_snapshot", None)
+            st.error(f"Lecture des commissions impossible : {exc}")
+    fee_snapshot = st.session_state.get("settings_fee_snapshot")
+    if fee_snapshot and fee_snapshot[0] == fee_symbol and fee_snapshot[1] == account_scope(settings):
+        commission = fee_snapshot[2]
+        st.table([
+            {
+                "Sens": "Achat" if side == "BUY" else "Vente",
+                "Exécution": kind.capitalize(),
+                "Sans BNB": f"{commission.percent(side, kind, pay_in_bnb=False):.5f} %",
+                "Avec BNB disponible": f"{commission.percent(side, kind, pay_in_bnb=True):.5f} %",
+            }
+            for side in ("BUY", "SELL") for kind in ("maker", "taker")
+        ])
+        (st.success if commission.bnb_enabled else st.info)(
+            "Paiement des frais en BNB activé pour ce compte et cette paire."
+            if commission.bnb_enabled else "Réduction BNB inactive pour ce compte ou cette paire."
+        )
+    with st.expander("Marge de sécurité avancée"):
+        bnb_safety = st.number_input(
+            "Marge supplémentaire pour prévoir les frais (%)",
+            min_value=0.0,
+            max_value=900.0,
+            value=round((FeeTokenPolicy.from_mapping(saved).safety_multiplier - 1) * 100, 2),
+            step=5.0,
+            disabled=not bnb_monitor,
+            help="25 % signifie prévoir 1,25 USDT de réserve pour des frais estimés à 1 USDT.",
+        )
+
     if st.button("Enregistrer les réglages", type="primary"):
         service.save_user_settings(
             {
@@ -165,13 +252,18 @@ with tabs[1]:
                 "max_open_positions": int(max_positions),
                 "max_exposure_per_symbol_percent": float(max_exposure),
                 "capital_reserve_percent": int(reserve),
+                "bnb_fee_monitor_enabled": bool(bnb_monitor),
+                "bnb_fee_alert_threshold_usdt": float(bnb_threshold),
+                "bnb_fee_block_new_buys": bool(bnb_block_buys),
+                "bnb_fee_safety_multiplier": 1 + float(bnb_safety) / 100,
             }
         )
         st.success(
             "Réglages enregistrés dans data/settings.json. "
             "L'intervalle de boucle s'applique au worker au prochain cycle. "
             "Les limites de risque s'appliquent aux prochaines simulations et validations "
-            "de nouveaux trades ; elles ne modifient pas les positions déjà ouvertes."
+            "de nouveaux trades ; elles ne modifient pas les positions déjà ouvertes. "
+            "La surveillance BNB est relue automatiquement par le worker."
         )
 
     st.divider()

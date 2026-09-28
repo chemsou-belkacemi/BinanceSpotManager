@@ -1,13 +1,16 @@
 """Execute les demandes UI dans le worker, avec validation au dernier moment."""
 
 import math
+from dataclasses import replace
 
 from .command_store import account_scope
 from .execution_engine import build_client_order_id
+from .fee_token import AccountCommission, FeeTokenPolicy, assess_bnb_fees
 from .investment_plan import InvestmentPreview, investment_risk_context
 from .models import EntryStatus, EventType, Position, SLStatus, SyncStatus, TPStatus, CloseReason
 from .position_engine import PositionEngine, finish_position, recompute_position
 from .risk_engine import RiskEngine
+from .position_store import get_settings_store
 
 
 class RejectedCommand(ValueError):
@@ -26,11 +29,41 @@ def positive(value, name):
 
 
 class CommandProcessor:
-    def __init__(self, store, positions, execution, risk_limits):
+    def __init__(self, store, positions, execution, risk_limits, settings_supplier=None):
         self.store, self.positions, self.execution = store, positions, execution
         self.settings = execution.settings
         self.scope = account_scope(self.settings)
         self.risk_limits = risk_limits
+        self.settings_supplier = settings_supplier or (lambda: get_settings_store().load())
+
+    def _check_bnb_for_buy(self, symbol, quote_asset, quote_notional, balances, prices):
+        policy = FeeTokenPolicy.from_mapping(self.settings_supplier())
+        if not policy.enabled:
+            return assess_bnb_fees(balances, prices, policy)
+        try:
+            commission = AccountCommission.from_response(
+                self.execution.client.get_commission_rates(symbol), symbol,
+            )
+        except Exception as exc:
+            if policy.block_new_buys:
+                raise RejectedCommand(f"Commissions Binance non verifiables avant achat : {exc}") from exc
+            self.execution.events.append(EventType.ERROR, f"Controle des frais indisponible : {exc}",
+                                         level="WARNING", symbol=symbol)
+            return None
+        if not commission.bnb_enabled:
+            # Aucun frais BNB n'est prevu pour cette paire sur ce compte.
+            return assess_bnb_fees(balances, prices, replace(policy, enabled=False))
+        policy = replace(policy, estimated_fee_percent=commission.conservative_buy_percent())
+        assessment = assess_bnb_fees(
+            balances, prices, policy,
+            quote_asset=quote_asset, quote_notional=quote_notional,
+        )
+        if not assessment.sufficient and policy.block_new_buys:
+            raise RejectedCommand(
+                assessment.reason
+                + ". Recharger du BNB, reduire le seuil ou desactiver le blocage dans Settings."
+            )
+        return assessment
 
     def run_one(self):
         command = self.store.claim(self.scope)
@@ -135,6 +168,7 @@ class CommandProcessor:
         report = RiskEngine(limits).evaluate(plan, snapshot, symbol=position.symbol)
         if not report.accepted:
             raise RejectedCommand(" ; ".join(report.refusals))
+        self._check_bnb_for_buy(position.symbol, position.quote_asset, cost, balances, prices)
         if existing_id:
             PositionEngine(rules).add_entries(position, entries)
         else:
@@ -165,12 +199,15 @@ class CommandProcessor:
         price = self._fresh_price(symbol, payload["reference_price"])
         quantity = positive(payload["quantity"], "Quantite")
         budget = positive(payload["budget"], "Budget")
-        free = self.execution.client.get_free_balance(rules.quote_asset)
+        balances = self.execution.client.get_balances()
+        prices = self.execution.client.get_prices()
+        free = float(balances.get(rules.quote_asset, {}).get("free") or 0)
         if quantity * price > budget or budget > free * (1 - self.risk_limits().min_reserve_percent / 100):
             raise RejectedCommand("Budget ou reserve depasse : recalculer l'achat")
         errors = rules.validate_order(price, quantity, market=True)
         if not rules.is_trading or errors:
             raise RejectedCommand(" ; ".join(errors) or "Paire non negociable")
+        self._check_bnb_for_buy(symbol, rules.quote_asset, quantity * price, balances, prices)
         result = self.execution.place_simple_buy(symbol=symbol, quantity=quantity, client_order_id=payload["client_order_id"])
         self._check_result(result)
         return {"message": "Demande d'achat traitee", "order_id": result.order_id, "status": result.status,

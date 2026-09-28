@@ -166,3 +166,14 @@ def test_get_prices_requests_only_the_wanted_symbols(monkeypatch):
         {"symbol": "BTCUSDT"},
         {"symbols": '["BTCUSDT","ETHUSDT"]'},
     ]
+
+
+def test_get_prices_ignores_inactive_demo_markets_with_zero_price(monkeypatch):
+    client = BinanceSpotClient(Settings())
+    monkeypatch.setattr(client, "_request", lambda *args, **kwargs: [
+        {"symbol": "BTCUSDT", "price": "85000"},
+        {"symbol": "OLDUSDT", "price": "0"},
+        {"symbol": "BROKEN", "price": "not-a-number"},
+    ])
+
+    assert client.get_prices() == {"BTCUSDT": 85000.0}

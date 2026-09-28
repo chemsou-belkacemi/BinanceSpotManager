@@ -38,13 +38,18 @@ def test_browser_preferences_are_bounded():
     assert browser_alert_preferences({"browser_alert_duration": "invalid"}).duration_seconds == 5
 
 
-def test_controls_live_only_in_settings_and_test_emits_native_script():
+def test_controls_live_only_in_settings_and_test_emits_native_script(monkeypatch):
+    monkeypatch.setattr("binance_spot_manager.binance_client.BinanceSpotClient.get_balances",
+                        lambda self: {"BNB": {"free": 0.1, "locked": 0.02}})
+    monkeypatch.setattr("binance_spot_manager.binance_client.BinanceSpotClient.get_price", lambda self, symbol: 500)
     app = AppTest.from_file(str(APP), default_timeout=20).run()
     assert not app.exception
     assert len(app.get("html")) == 0
     assert not any("Tester le bip" in button.label for button in app.button)
     app.switch_page("pages/5_Settings.py").run()
     assert not app.exception
+    assert any(m.label == "Valeur du BNB disponible pour les frais" and m.value == "50.00 USDT" for m in app.metric)
+    assert any(n.label == "M'alerter si mon BNB disponible vaut moins de (USDT)" for n in app.number_input)
     assert len(app.get("html")) == 1  # controle d'autorisation navigateur
     assert app.get("html")[0].proto.unsafe_allow_javascript
     next(button for button in app.button if "Tester la notification Windows" in button.label).click().run()

@@ -41,6 +41,7 @@ from binance_spot_manager.config import (  # noqa: E402
 )
 from binance_spot_manager.event_store import EventStore, configure_logging, log_error  # noqa: E402
 from binance_spot_manager.execution_engine import ExecutionEngine  # noqa: E402
+from binance_spot_manager.fee_token import FeeTokenMonitor  # noqa: E402
 from binance_spot_manager.models import (  # noqa: E402
     BotRuntime,
     CloseReason,
@@ -98,6 +99,9 @@ class Worker:
         self.commands = CommandStore()
         risk_service = DashboardService(self.settings, position_store=self.positions, client=self.client, events=self.events)
         self.command_processor = CommandProcessor(self.commands, self.positions, self.execution, risk_service.risk_limits)
+        self.fee_token_monitor = FeeTokenMonitor(
+            self.client, self.events, lambda: get_settings_store().load(), interval_seconds=60,
+        )
 
         self._running = True
         self._loop = 0
@@ -238,6 +242,8 @@ class Worker:
     # ------------------------------------------------------------------
 
     def _tick(self) -> int:
+        if hasattr(self, "fee_token_monitor"):
+            self.fee_token_monitor.check()
         if hasattr(self, "command_processor"):
             self.command_processor.run_one()
         positions = self.positions.list_open()
