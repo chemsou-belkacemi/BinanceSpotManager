@@ -20,6 +20,21 @@ from binance_spot_manager.config import Settings
 pytestmark = pytest.mark.unit
 
 
+def test_storage_error_stays_visible_without_skipping_readable_positions():
+    position = Position(symbol="ETHUSDT")
+    worker = Worker.__new__(Worker)
+    worker.positions = SimpleNamespace(
+        list_open=lambda: [position], read_errors=["broken.json : JSON invalide"],
+    )
+    worker._price_provider = lambda symbols: lambda symbol: None
+    processed = []
+    worker._process_position = lambda p, price: processed.append(p)
+    worker._loop = 1
+    with pytest.raises(RuntimeError, match="broken.json"):
+        worker._tick()
+    assert processed == [position]
+
+
 def test_inconsistent_oco_emits_one_critical_event_and_never_sells():
     position = Position(symbol="BTCUSDT", oco_exit=OcoExit(
         order_list_id=1, list_client_order_id="oco", tp_order_id=10,

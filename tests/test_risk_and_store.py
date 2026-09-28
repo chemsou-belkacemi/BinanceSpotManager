@@ -12,7 +12,7 @@ import pytest
 from binance_spot_manager.config import Settings
 from binance_spot_manager.dashboard_service import DashboardService
 from binance_spot_manager.models import Entry, Position, PositionStatus, utcnow
-from binance_spot_manager.position_store import PositionStore
+from binance_spot_manager.position_store import PositionStore, atomic_write_json
 from binance_spot_manager.risk_engine import PortfolioSnapshot, RiskEngine, RiskLimits
 from binance_spot_manager.strategy_engine import (
     ResolvedEntry,
@@ -260,3 +260,37 @@ def test_corrupted_file_is_ignored(tmp_path):
     (tmp_path / "broken.json").write_text("{not json", encoding="utf-8")
     positions = store.list_all()
     assert len(positions) == 1
+    assert len(store.read_errors) == 1
+    assert "broken.json" in store.read_errors[0]
+
+
+def test_invalid_model_is_reported_and_errors_clear_after_repair(tmp_path):
+    store = PositionStore(tmp_path)
+    invalid = tmp_path / "invalid.json"
+    atomic_write_json(invalid, {"entries": "not a list"})
+    before = invalid.read_bytes()
+    assert store.list_all() == []
+    assert len(store.read_errors) == 1
+    assert "modele" in store.read_errors[0]
+    assert invalid.read_bytes() == before
+    atomic_write_json(invalid, make_open_position("BTCUSDT").model_dump(mode="json"))
+    assert len(store.list_all()) == 1
+    assert store.read_errors == []
+
+
+def test_failed_atomic_replace_preserves_previous_position(tmp_path, monkeypatch):
+    store = PositionStore(tmp_path)
+    position = make_open_position("BTCUSDT")
+    path = store.save(position)
+    before = path.read_bytes()
+
+    def fail_replace(*args):
+        raise PermissionError("simulated disk failure")
+
+    monkeypatch.setattr("binance_spot_manager.position_store.os.replace", fail_replace)
+    position.tags.append("not persisted")
+    with pytest.raises(PermissionError):
+        store.save(position)
+    assert path.read_bytes() == before
+    assert list(tmp_path.glob("*.tmp")) == []
+    assert store.load(position.position_id).tags == []

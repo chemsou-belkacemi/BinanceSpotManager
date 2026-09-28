@@ -230,7 +230,10 @@ class Worker:
     def _tick(self) -> int:
         positions = self.positions.list_open()
         price_provider = self._price_provider([p.symbol for p in positions])
-        errors = []
+        errors = [
+            f"Stockage local : {message}"
+            for message in getattr(self.positions, "read_errors", [])
+        ]
         processed = []
         for position in positions:
             try:

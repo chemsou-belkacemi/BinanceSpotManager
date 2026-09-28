@@ -77,6 +77,7 @@ class PositionStore:
     def __init__(self, directory: Optional[Path] = None) -> None:
         ensure_directories()
         self.directory = Path(directory) if directory else POSITIONS_DIR
+        self.read_errors: list[str] = []
 
     # -- chemins --------------------------------------------------------
 
@@ -116,13 +117,16 @@ class PositionStore:
     def list_all(self) -> list[Position]:
         """Toutes les positions, plus recentes d'abord."""
         positions: list[Position] = []
+        self.read_errors = []
         for path in sorted(self.directory.glob("*.json")):
             raw = read_json(path)
             if raw is None:
+                self.read_errors.append(f"{path.name} : fichier vide, illisible ou JSON invalide")
                 continue
             try:
                 positions.append(Position.model_validate(raw))
             except Exception as exc:
+                self.read_errors.append(f"{path.name} : modele de position invalide")
                 logger.error("Position ignoree (%s) : %s", path.name, exc)
         positions.sort(key=lambda p: p.created_at, reverse=True)
         return positions

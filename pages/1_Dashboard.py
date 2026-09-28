@@ -241,14 +241,18 @@ worker_panel()
 def protection_alert_panel() -> None:
     st.subheader("Points de vigilance — protections")
     st.caption("État local actualisé chaque seconde, sans appel Binance. Pour vérifier les ordres réels : Settings → Diagnostic → Comparer les sorties.")
+    positions = service.positions.list_open()
+    storage_errors = service.positions.read_errors
+    for message in storage_errors:
+        st.error(f"Position locale non lisible — {message}. Son suivi ne peut pas être confirmé ; vérifier les ordres chez Binance Demo.")
     if settings.dry_run:
         st.info("DRY_RUN : aucune protection réelle n'est créée chez Binance.")
         return
-    alerts = protection_alerts(service.positions.list_open())
+    alerts = protection_alerts(positions)
     for alert in alerts:
         display = st.error if alert["severity"] == "CRITICAL" else st.warning
         display(f"{alert['symbol']} · {alert['position_id']} — {alert['message']}")
-    if not alerts:
+    if not alerts and not storage_errors:
         st.caption("Aucune anomalie relevée par ces contrôles locaux. Cela ne garantit pas l'exécution future des TP/SL.")
 
 
