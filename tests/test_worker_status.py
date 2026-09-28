@@ -20,6 +20,75 @@ from binance_spot_manager.config import Settings
 pytestmark = pytest.mark.unit
 
 
+def test_inconsistent_oco_emits_one_critical_event_and_never_sells():
+    position = Position(symbol="BTCUSDT", oco_exit=OcoExit(
+        order_list_id=1, list_client_order_id="oco", tp_order_id=10,
+        sl_order_id=11, quantity=0.00035,
+    ))
+    emitted = []
+    worker = Worker.__new__(Worker)
+    worker.execution = SimpleNamespace(fetch_order_status=lambda symbol, order_id: OrderResult(
+        success=True, order_id=order_id, status="FILLED", executed_qty=0.0001,
+    ))  # aucune methode d'ecriture ou de vente disponible
+    worker.events = SimpleNamespace(append=lambda *a, **k: emitted.append((a, k)))
+    worker._monitor_oco(position, None)
+    worker._monitor_oco(position, None)
+    assert position.oco_exit.status == "ERROR"
+    assert position.sync_status is SyncStatus.DESYNC_DETECTED
+    assert len(emitted) == 1
+    assert emitted[0][1]["level"] == "CRITICAL"
+    assert emitted[0][1]["tp_order_id"] == 10
+    assert emitted[0][1]["sl_order_id"] == 11
+
+
+def test_missing_oco_branch_is_rechecked_when_connection_recovers():
+    position = Position(symbol="BTCUSDT", oco_exit=OcoExit(
+        order_list_id=1, list_client_order_id="oco", tp_order_id=10,
+        sl_order_id=11, quantity=0.00035,
+    ))
+    available = [False]
+    queried = []
+
+    def fetch(symbol, order_id):
+        queried.append(order_id)
+        if order_id == 10 and not available[0]:
+            return None
+        return OrderResult(success=True, order_id=order_id, status="NEW")
+
+    worker = Worker.__new__(Worker)
+    worker.execution = SimpleNamespace(fetch_order_status=fetch)
+    emitted = []
+    worker.events = SimpleNamespace(append=lambda *a, **k: emitted.append((a, k)))
+    worker._monitor_oco(position, None)
+    assert position.oco_exit.status == "ACTIVE"
+    assert position.sync_status is SyncStatus.DESYNC_DETECTED
+    # Le marqueur survit a une sauvegarde/relecture et donc a un redemarrage.
+    position = Position.model_validate_json(position.model_dump_json())
+    worker._monitor_oco(position, None)
+    assert len(emitted) == 1
+    assert position.oco_exit.missing_branch_alerted
+    available[0] = True
+    worker._monitor_oco(position, None)
+    assert queried == [10, 11, 10, 11, 10, 11]
+    assert len(emitted) == 2
+    assert emitted[-1][1]["level"] == "INFO"
+    assert not position.oco_exit.missing_branch_alerted
+    # Le retour des lectures ne prouve pas que tous les ecarts ont ete resolus.
+    assert position.sync_status is SyncStatus.DESYNC_DETECTED
+    available[0] = False
+    worker._monitor_oco(position, None)
+    assert len(emitted) == 3
+    assert emitted[-1][1]["level"] == "ERROR"
+
+
+def test_old_oco_without_alert_marker_remains_compatible():
+    oco = OcoExit.model_validate({
+        "order_list_id": 1, "list_client_order_id": "oco", "tp_order_id": 10,
+        "sl_order_id": 11, "quantity": 0.00035,
+    })
+    assert not oco.missing_branch_alerted
+
+
 @pytest.mark.parametrize("error", [BinanceError("offline"), ValueError("invalid position")])
 def test_position_failure_does_not_skip_other_positions_or_hide_error(error):
     from scripts.bot_worker import RECONCILE_EVERY
@@ -202,7 +271,8 @@ def test_reconciliation_persists_recovered_sync_status():
 
 
 @pytest.mark.parametrize("price", [85000, None])
-def test_oco_monitor_records_confirmed_tp_without_second_sell(price):
+@pytest.mark.parametrize("initial_partial", [False, True])
+def test_oco_monitor_records_confirmed_tp_without_second_sell(price, initial_partial):
     rules = parse_symbol_rules({
         "symbol": "BTCUSDT", "baseAsset": "BTC", "quoteAsset": "USDT",
         "status": "TRADING", "filters": [
@@ -244,7 +314,18 @@ def test_oco_monitor_records_confirmed_tp_without_second_sell(price):
         notify_position_event=lambda position, notice: {},
     )
 
+    if initial_partial:
+        final_order = orders[10]
+        orders[10] = OrderResult(
+            success=True, order_id=10, status="PARTIALLY_FILLED", executed_qty=0.0001,
+        )
+        worker._monitor_oco(position, price)
+        assert position.oco_exit.status == "PARTIAL"
+        assert position.take_profits[0].executed_qty == 0
+        orders[10] = final_order
+        emitted.clear()
     worker._monitor_oco(position, price)
+    worker._monitor_oco(position, price)  # aucun fill ni notification en double
 
     assert position.status is PositionStatus.CLOSED
     assert position.take_profits[0].executed_qty == pytest.approx(0.00034)

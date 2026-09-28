@@ -299,17 +299,35 @@ class Worker:
         sl_order = self.execution.fetch_order_status(position.symbol, order_id=oco.sl_order_id)
         if tp_order is None or sl_order is None:
             position.sync_status = SyncStatus.DESYNC_DETECTED
-            self.events.append(
-                EventType.ERROR, "Branche OCO introuvable côté Binance",
-                position_id=position.position_id, symbol=position.symbol, level="ERROR",
-            )
+            if not oco.missing_branch_alerted:
+                oco.missing_branch_alerted = True
+                self.events.append(
+                    EventType.ERROR, "Branche OCO introuvable côté Binance",
+                    position_id=position.position_id, symbol=position.symbol, level="ERROR",
+                )
             return
+
+        if oco.missing_branch_alerted:
+            oco.missing_branch_alerted = False
+            self.events.append(
+                EventType.POSITION_UPDATED,
+                "Lectures des deux branches OCO rétablies ; contrôle des états en cours",
+                position_id=position.position_id, symbol=position.symbol, level="INFO",
+            )
 
         tp_qty = tp_order.executed_qty
         sl_qty = sl_order.executed_qty
         if tp_qty > 0 and sl_qty > 0:
             position.sync_status = SyncStatus.DESYNC_DETECTED
             oco.status = "ERROR"
+            self.events.append(
+                EventType.ERROR,
+                "OCO incoherent : les deux branches indiquent une execution. "
+                "Aucune vente supplementaire ; verification manuelle requise.",
+                position_id=position.position_id, symbol=position.symbol,
+                level="CRITICAL", tp_order_id=oco.tp_order_id,
+                sl_order_id=oco.sl_order_id, tp_qty=tp_qty, sl_qty=sl_qty,
+            )
             return
 
         if tp_qty > 0 or sl_qty > 0:

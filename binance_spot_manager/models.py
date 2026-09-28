@@ -479,6 +479,7 @@ class OcoExit(BSMModel):
     sl_order_id: int
     quantity: float
     status: str = "ACTIVE"
+    missing_branch_alerted: bool = False
 
 
 # ==========================================================================

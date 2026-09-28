@@ -18,6 +18,7 @@ from binance_spot_manager.execution_engine import ExecutionEngine  # noqa: E402
 from binance_spot_manager.models import EntryStatus, EventType, SLStatus, SyncStatus, TPStatus  # noqa: E402
 from binance_spot_manager.oco_preview import preview_oco_sell  # noqa: E402
 from binance_spot_manager.position_engine import recompute_position  # noqa: E402
+from binance_spot_manager.protection_status import protection_alerts  # noqa: E402
 from ui_common import (  # noqa: E402
     banner,
     fmt_percent,
@@ -235,6 +236,23 @@ def worker_panel() -> None:
 
 
 worker_panel()
+
+@st.fragment(run_every="1s")
+def protection_alert_panel() -> None:
+    st.subheader("Points de vigilance — protections")
+    st.caption("État local actualisé chaque seconde, sans appel Binance. Pour vérifier les ordres réels : Settings → Diagnostic → Comparer les sorties.")
+    if settings.dry_run:
+        st.info("DRY_RUN : aucune protection réelle n'est créée chez Binance.")
+        return
+    alerts = protection_alerts(service.positions.list_open())
+    for alert in alerts:
+        display = st.error if alert["severity"] == "CRITICAL" else st.warning
+        display(f"{alert['symbol']} · {alert['position_id']} — {alert['message']}")
+    if not alerts:
+        st.caption("Aucune anomalie relevée par ces contrôles locaux. Cela ne garantit pas l'exécution future des TP/SL.")
+
+
+protection_alert_panel()
 
 st.divider()
 
