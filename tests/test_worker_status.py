@@ -20,6 +20,36 @@ from binance_spot_manager.config import Settings
 pytestmark = pytest.mark.unit
 
 
+@pytest.mark.parametrize("error", [BinanceError("offline"), ValueError("invalid position")])
+def test_position_failure_does_not_skip_other_positions_or_hide_error(error):
+    from scripts.bot_worker import RECONCILE_EVERY
+
+    failed = Position(symbol="BTCUSDT", base_asset="BTC", quote_asset="USDT")
+    healthy = Position(symbol="ETHUSDT", base_asset="ETH", quote_asset="USDT")
+    worker = Worker.__new__(Worker)
+    worker.positions = SimpleNamespace(list_open=lambda: [failed, healthy])
+    worker._price_provider = lambda symbols: lambda symbol: 100.0
+    visited = []
+    reconciled = []
+    balances = []
+
+    def process(position, price):
+        visited.append(position)
+        if position is failed:
+            raise error
+
+    worker._process_position = process
+    worker._reconcile = lambda positions: reconciled.extend(positions)
+    worker._sync_quote_balance = lambda: balances.append(True)
+    worker._loop = RECONCILE_EVERY
+    with pytest.raises(RuntimeError, match="BTCUSDT") as captured:
+        worker._tick()
+    assert str(error) in str(captured.value)
+    assert visited == [failed, healthy]
+    assert reconciled == [healthy]
+    assert balances == [True]
+
+
 def test_tick_checks_oco_without_price_but_skips_local_automation():
     oco_position = Position(symbol="BTCUSDT", base_asset="BTC", quote_asset="USDT")
     oco_position.oco_exit = OcoExit(

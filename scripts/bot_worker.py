@@ -230,54 +230,60 @@ class Worker:
     def _tick(self) -> int:
         positions = self.positions.list_open()
         price_provider = self._price_provider([p.symbol for p in positions])
-
+        errors = []
+        processed = []
         for position in positions:
-            price = price_provider(position.symbol)
-            if position.oco_exit is not None:
-                self._monitor_oco(position, price)
-                self.positions.save(position)
-                continue
-
-            if price is None:
-                continue
-
-            outcome = self.automation.run_cycle(position, price)
-
-            if outcome.tp_executed is not None:
-                executed_tp = next(
-                    (
-                        t
-                        for t in position.take_profits
-                        if t.sequence_number == outcome.tp_executed
-                    ),
-                    None,
+            try:
+                self._process_position(position, price_provider(position.symbol))
+            except Exception as exc:  # noqa: BLE001 - isoler sans masquer l'erreur
+                errors.append(f"{position.symbol} ({position.position_id}) : {exc}")
+                logging.getLogger("bsm.worker").exception(
+                    "Suivi interrompu pour %s (%s)", position.symbol, position.position_id,
                 )
-                if executed_tp is not None:
-                    self.notifications.notify_position_event(
-                        position, self.notifications.tp_executed(position, executed_tp)
-                    )
-
-            if outcome.sl_moved_to is not None and position.notifications.on_sl_moved:
-                self.notifications.notify_position_event(
-                    position,
-                    self.notifications.sl_moved(
-                        position, position.stop_loss.resolved_price or 0.0, outcome.sl_moved_to
-                    ),
-                )
-
-            if outcome.position_finished:
-                self.notifications.notify_position_event(
-                    position, self.notifications.position_finished(position)
-                )
-
-            self.positions.save(position)
+            else:
+                processed.append(position)
 
         # Reconciliation periodique (section 19)
         if self._loop % RECONCILE_EVERY == 0:
-            self._reconcile(positions)
+            # Ne pas reconcilier un objet potentiellement modifie par un cycle echoue.
+            self._reconcile(processed)
             self._sync_quote_balance()
 
+        if errors:
+            raise RuntimeError("Erreur de suivi : " + " ; ".join(errors))
         return len(positions)
+
+    def _process_position(self, position, price: Optional[float]) -> None:
+        """Un seul cycle par position ; aucune relance immediate en cas d'erreur."""
+        if position.oco_exit is not None:
+            self._monitor_oco(position, price)
+            self.positions.save(position)
+            return
+        if price is None:
+            return
+
+        outcome = self.automation.run_cycle(position, price)
+        if outcome.tp_executed is not None:
+            executed_tp = next(
+                (t for t in position.take_profits if t.sequence_number == outcome.tp_executed),
+                None,
+            )
+            if executed_tp is not None:
+                self.notifications.notify_position_event(
+                    position, self.notifications.tp_executed(position, executed_tp)
+                )
+        if outcome.sl_moved_to is not None and position.notifications.on_sl_moved:
+            self.notifications.notify_position_event(
+                position,
+                self.notifications.sl_moved(
+                    position, position.stop_loss.resolved_price or 0.0, outcome.sl_moved_to
+                ),
+            )
+        if outcome.position_finished:
+            self.notifications.notify_position_event(
+                position, self.notifications.position_finished(position)
+            )
+        self.positions.save(position)
 
     def _monitor_oco(self, position, price: Optional[float]) -> None:
         """Lecture seule des deux branches : jamais de deuxième vente locale."""
