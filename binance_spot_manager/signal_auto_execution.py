@@ -1,4 +1,4 @@
-"""Prepare fresh Telegram signals and enqueue them for the guarded worker."""
+"""Prepare fresh Telegram or drop (ML) signals and enqueue them for the guarded worker."""
 
 from __future__ import annotations
 
@@ -6,8 +6,13 @@ import time
 
 from .models import EventType
 from .signal_parser import ParsedSignal
-from .signal_plan import prepare_signal
+from .signal_plan import prepare_signal, signal_sl_after_tp
 from .signal_sizing import SignalSizingPolicy, suggest_signal_budget_from_account
+
+
+#: Libellés des événements et diagnostics selon l'origine du signal.
+SOURCE_LABELS = {"telegram": "Signal Telegram", "api": "Signal ML/dépôt"}
+MESSAGE_LABELS = {"telegram": "Message Telegram", "api": "Signal ML/dépôt"}
 
 
 def _bounded_number(values, key, default, minimum, maximum):
@@ -57,8 +62,11 @@ class AutomaticSignalExecutor:
         if not preferences.get("signal_auto_execute_enabled", False):
             self._update(state="DISABLED", last_detail="")
             return []
-        if not (preferences.get("signal_telegram_enabled", False)
-                and preferences.get("signal_telegram_auto_enabled", False)):
+        telegram_ready = bool(preferences.get("signal_telegram_enabled", False)
+                              and preferences.get("signal_telegram_auto_enabled", False))
+        drop_ready = bool(preferences.get("signal_drop_enabled", False)
+                          and preferences.get("signal_drop_auto_enabled", False))
+        if not (telegram_ready or drop_ready):
             self._update(
                 state="MISCONFIGURED",
                 last_detail="La réception Telegram automatique doit être active.",
@@ -73,6 +81,22 @@ class AutomaticSignalExecutor:
                 last_detail="Réenregistrer l'autorisation d'exécution automatique.",
             )
             return []
+        sources = {}
+        if telegram_ready:
+            sources["telegram"] = enabled_since
+        if drop_ready:
+            # Autorisation séparée : seuls les dépôts reçus après elle sont éligibles.
+            drop_since = _bounded_number(
+                preferences, "signal_drop_auto_enabled_since", 0, 0, self.clock() + 60,
+            )
+            if drop_since > 0:
+                sources["api"] = drop_since
+            elif not telegram_ready:
+                self._update(
+                    state="WAITING_AUTHORIZATION",
+                    last_detail="Réenregistrer l'autorisation d'exécution des signaux ML/dépôt.",
+                )
+                return []
         max_age_minutes = _bounded_number(
             preferences, "signal_auto_max_age_minutes", 5, 1, 60,
         )
@@ -83,6 +107,7 @@ class AutomaticSignalExecutor:
             oldest_source_timestamp=now - max_age_minutes * 60,
             now=now,
             limit=limit,
+            sources=sources,
         )
         processed = []
         for row in rows:
@@ -93,6 +118,8 @@ class AutomaticSignalExecutor:
 
     def _process(self, row, preferences, now, max_age_minutes):
         signal_id = row["id"]
+        source = "api" if row.get("source") == "api" else "telegram"
+        label = SOURCE_LABELS[source]
         request_key = f"signal:{signal_id}"
         existing = self.commands.get_by_request_key(self.scope, request_key)
         if existing:
@@ -109,7 +136,7 @@ class AutomaticSignalExecutor:
                 raise ValueError("Signal non reconnu ou bloqué par le parseur")
             source_timestamp = float(row.get("source_timestamp") or 0)
             if source_timestamp <= 0 or source_timestamp < now - max_age_minutes * 60:
-                raise ValueError("Message Telegram trop ancien pour une exécution automatique")
+                raise ValueError(f"{MESSAGE_LABELS[source]} trop ancien pour une exécution automatique")
             parsed = ParsedSignal(**row["parsed"])
             if row.get("payload"):
                 payload = row["payload"]
@@ -143,7 +170,8 @@ class AutomaticSignalExecutor:
                     reserve_percent=self.risk_limits().min_reserve_percent,
                     current_price=current_price,
                     signal_id=signal_id,
-                    source="telegram",
+                    source=source,
+                    sl_after_tp=signal_sl_after_tp(preferences.get("signal_sl_after_tp")),
                     touch_stop=bool(preferences.get("signal_auto_touch_stop", False)),
                     validity_confirmed=True,
                 )
@@ -157,7 +185,7 @@ class AutomaticSignalExecutor:
             self.inbox.set_auto_state(self.scope, signal_id, "QUEUED", detail)
             self.events.append(
                 EventType.SIGNAL_AUTO_QUEUED,
-                f"Signal Telegram envoyé automatiquement au worker : {parsed.symbol}",
+                f"{label} envoyé automatiquement au worker : {parsed.symbol}",
                 position_id=position["position_id"], symbol=parsed.symbol,
                 signal_id=signal_id, command_id=command["id"],
             )
@@ -175,7 +203,7 @@ class AutomaticSignalExecutor:
             symbol = row["parsed"].get("symbol", "")
             self.events.append(
                 EventType.SIGNAL_AUTO_REJECTED,
-                f"Signal Telegram automatique refusé : {symbol or 'non reconnu'} · {detail}",
+                f"{label} automatique refusé : {symbol or 'non reconnu'} · {detail}",
                 symbol=symbol, level="WARNING", signal_id=signal_id,
             )
             self._update(

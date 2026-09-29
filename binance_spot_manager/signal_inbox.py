@@ -9,6 +9,9 @@ import uuid
 from .config import DATA_DIR
 from .signal_parser import content_hash, parse_signal
 
+#: Origines pouvant alimenter l'exécution automatique : Telegram et dépôt direct (ML).
+AUTO_SOURCES = frozenset({"telegram", "api"})
+
 
 class SignalInbox:
     def __init__(self, path=DATA_DIR / "signals.sqlite3"):
@@ -84,18 +87,21 @@ class SignalInbox:
             if external_id:
                 db.execute("INSERT OR IGNORE INTO signal_origins VALUES (?, ?, ?)", (scope, external_id, row["id"]))
             # A previously reviewed/imported text may be sent again after automatic
-            # execution is enabled. Refresh its Telegram origin while no payload was
-            # ever frozen. A fresh resend may retry a rejected preparation, whereas
-            # confirmed/queued rows remain immutable and cannot create another order.
-            if (source == "telegram" and external_id and source_timestamp
+            # execution is enabled. Refresh its Telegram (or drop) origin while no
+            # payload was ever frozen. A fresh resend may retry a rejected preparation,
+            # whereas confirmed/queued rows remain immutable and cannot create another
+            # order. A drop file re-imported after a crash keeps its external_id and
+            # therefore never resets a previous refusal.
+            if (source in AUTO_SOURCES and external_id and source_timestamp
+                    and (source == "telegram" or row["external_id"] != external_id)
                     and not edited and not revised and row["payload"] is None
                     and (row["auto_state"] or "") in {"", "REJECTED"}):
                 db.execute("""UPDATE signals
-                    SET source='telegram', external_id=?, received=?, source_timestamp=?,
+                    SET source=?, external_id=?, received=?, source_timestamp=?,
                         auto_state='', auto_detail=''
                     WHERE scope=? AND id=? AND payload IS NULL
                       AND auto_state IN ('', 'REJECTED')""",
-                    (external_id, time.time(), float(source_timestamp), scope, row["id"]))
+                    (source, external_id, time.time(), float(source_timestamp), scope, row["id"]))
                 row = db.execute(
                     "SELECT * FROM signals WHERE scope=? AND id=?", (scope, row["id"]),
                 ).fetchone()
@@ -155,20 +161,33 @@ class SignalInbox:
                        (bot, offset))
 
     def auto_candidates(self, scope, *, enabled_since, oldest_source_timestamp,
-                        now, limit=10):
-        """Fresh Telegram signals eligible for automatic preparation.
+                        now, limit=10, sources=("telegram",)):
+        """Fresh signals from `sources` eligible for automatic preparation.
 
+        `sources` is an iterable of source names sharing `enabled_since`, or a
+        mapping {source: enabled_since} when an origin was authorized separately
+        (the effective start is then the latest of both values). Only Telegram
+        and drop ("api") rows can ever be selected.
         PROCESSING rows are included for crash recovery even if their age window
         elapsed; an existing frozen payload or command decides their final state.
         """
+        if isinstance(sources, dict):
+            windows = {str(name): max(float(enabled_since), float(since))
+                       for name, since in sources.items()}
+        else:
+            windows = {str(name): float(enabled_since) for name in sources}
+        windows = sorted((name, since) for name, since in windows.items() if name in AUTO_SOURCES)
+        if not windows:
+            return []
+        clause = " OR ".join(["(source=? AND received>=?)"] * len(windows))
+        params = [value for window in windows for value in window]
         with self.connect() as db:
-            rows = db.execute("""SELECT * FROM signals
-                WHERE scope=? AND source='telegram' AND received>=?
+            rows = db.execute("SELECT * FROM signals WHERE scope=? AND (" + clause + """)
                   AND auto_state IN ('', 'PROCESSING')
                   AND (auto_state='PROCESSING' OR
                        (source_timestamp>=? AND source_timestamp<=?))
                 ORDER BY received, id LIMIT ?""",
-                (scope, float(enabled_since), float(oldest_source_timestamp),
+                (scope, *params, float(oldest_source_timestamp),
                  float(now) + 60, max(1, min(int(limit), 50)))).fetchall()
             return [self.decode(row) for row in rows]
 

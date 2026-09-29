@@ -13,7 +13,7 @@ from binance_spot_manager.command_store import account_scope
 from binance_spot_manager.config import get_settings
 from binance_spot_manager.signal_inbox import SignalInbox
 from binance_spot_manager.signal_parser import ParsedSignal, TEMPLATES, parse_signal
-from binance_spot_manager.signal_plan import prepare_signal
+from binance_spot_manager.signal_plan import prepare_signal, signal_sl_after_tp
 from binance_spot_manager.signal_sizing import (
     SignalSizingPolicy,
     suggest_signal_budget_from_account,
@@ -76,6 +76,15 @@ with st.expander("Recevoir depuis Telegram"):
             st.success(f"{len(items)} message(s) autorisé(s) traité(s). Aucun ordre envoyé.")
         except ValueError as exc:
             st.error(str(exc))
+
+if preferences.get("signal_drop_enabled", False):
+    drop_diagnostics = getattr(service.runtime(), "telegram_diagnostics", {}).get("drop", {})
+    st.caption(
+        f"Dépôt direct (générateur ML) actif · état : {drop_diagnostics.get('state', 'EN ATTENTE')} · "
+        f"importés : {drop_diagnostics.get('imported_total', 0)} · rejetés : {drop_diagnostics.get('rejected_total', 0)}"
+    )
+    if drop_diagnostics.get("last_error"):
+        st.error(drop_diagnostics["last_error"])
 
 rows = inbox.recent(scope)
 if not rows:
@@ -203,7 +212,8 @@ if st.button("Vérifier sur Binance Demo et simuler", disabled=not (budget > 0 a
             available_quote=float(balances.get(rules.quote_asset, {}).get("free", 0)),
             reserve_percent=service.risk_limits().min_reserve_percent,
             current_price=current_price or 0, signal_id=selected, source=row["source"],
-            touch_stop=touch, validity_confirmed=validity)
+            touch_stop=touch, validity_confirmed=validity,
+            sl_after_tp=signal_sl_after_tp(preferences.get("signal_sl_after_tp")))
         st.session_state["signal_preview"] = (signature, plan, payload)
     except Exception as exc:
         st.error(f"Simulation refusée : {exc}")

@@ -101,10 +101,69 @@ annuler les ordres déjà transmis. Elles demandent une vérification manuelle.
 Références : [Bot API getUpdates](https://core.telegram.org/bots/api#getupdates),
 [messages accessibles à un bot](https://core.telegram.org/bots/faq#what-messages-will-my-bot-get).
 
+## Dépôt direct (générateur ML)
+
+Un projet local séparé (« MLSignalGenerator », dans son propre conteneur sur le
+même hôte) peut remettre ses signaux au bot sans passer par Telegram. Il monte le
+volume Docker `binance-spot-manager_bsm-data` et tourne avec l'uid `10001` (bsm).
+
+### Contrat v1
+
+- Répertoire `data/signal_drop/` avec `incoming/`, `processed/` et `rejected/`,
+  créé par le worker au démarrage. Le producteur écrit **uniquement** dans
+  `incoming/`.
+- Un fichier par signal, écrit atomiquement : `*.tmp` puis renommage en `*.json`.
+  Tout fichier ne se terminant pas par `.json` est ignoré ; un fichier de plus de
+  64 Ko est déplacé dans `rejected/`.
+- Schéma :
+
+  ```json
+  {"version": 1, "id": "ml-<hex>", "producer": "mlsignals", "created_at": 1790000000.0,
+   "text": "PAIR: BTC/USDT\nPLATFORM: BINANCE\nENTRY 1: 84000\nT1: 86000\nT2: 88000\nSL: 82000",
+   "meta": {"probability": 0.63, "model_version": "..."}}
+  ```
+
+  `version` vaut 1, `id` respecte `^[A-Za-z0-9_.:-]{1,100}$`, `created_at` est un
+  horodatage Unix fini et `text` un message au format structuré déjà reconnu.
+  Sinon le fichier part dans `rejected/` avec un fichier `<nom>.json.reason.txt`
+  indiquant le motif. `producer` et `meta` sont informatifs et non utilisés.
+
+À chaque cycle, le worker enregistre au plus 20 fichiers dans la boîte des signaux
+(source `api`, identifiant externe `drop:<id>`, date de référence `created_at`) puis
+les déplace dans `processed/`. Le déplacement a lieu après l'enregistrement : un
+arrêt entre les deux provoque une réimportation dédupliquée (hash du texte et
+identifiant externe), jamais un second signal.
+
+### Réglages (Settings → Signaux)
+
+- **Importer les signaux déposés** (`signal_drop_enabled`) : désactivé par défaut ;
+  les fichiers attendent alors dans `incoming/` sans être lus. Le désactiver retire
+  aussi l'exécution automatique des dépôts.
+- **Exécuter aussi les signaux ML/dépôt direct** (`signal_drop_auto_enabled`),
+  dans **Exécution automatique** : exige l'interrupteur général
+  (`signal_auto_execute_enabled`) et une autorisation explicite séparée. Seuls les
+  fichiers reçus après cette autorisation (`signal_drop_auto_enabled_since`) et après
+  l'autorisation générale sont éligibles. L'exécution automatique Telegram reste
+  réglée exactement comme avant et n'active jamais les dépôts.
+- **SL après TP (signaux)** (`signal_sl_after_tp`) : aucun changement (défaut),
+  break-even, break-even frais inclus ou TP précédent, appliqué après chaque TP
+  sauf le dernier, pour les prochains signaux manuels et automatiques de toute
+  origine. Les règles demandant une valeur saisie ne sont pas proposées.
+
+### Sécurité
+
+Le texte passe par le même parseur strict que Telegram : un format ambigu ou hors
+Binance Spot est conservé avec son motif, sans ordre. `created_at` doit rester dans
+la fenêtre de fraîcheur de l'exécution automatique (5 minutes par défaut). La
+déduplication du signal et la clé de commande stable empêchent un second envoi.
+Le worker revalide ensuite prix, soldes, réserve, frais et risque avant toute
+écriture, uniquement sur Binance Demo. Sans exécution automatique, un signal
+déposé se revoit et se confirme dans la page **Signaux** comme un message Telegram.
+
 ## Non activé dans cette version
 
 Suivi des clôtures de bougie, remappage Bitget/forex et apprentissage libre de
 formats. Le mode automatique actuel reste limité aux conversations Telegram
-autorisées et à Binance Demo Spot.
+autorisées, au dépôt direct local et à Binance Demo Spot.
 
 Tests hors réseau : `make test TESTS="tests/test_signal_sizing.py tests/test_signals.py tests/test_signals_ui.py tests/test_commands.py tests/test_automation.py"`.

@@ -64,5 +64,9 @@ services:
     command: ["python", "-m", "pytest", "tests/test_demo_integration.py", "-p", "no:cacheprovider"]
 
 volumes:
+  # Depot direct de signaux (docs/SIGNAUX.md) : le projet externe MLSignalGenerator
+  # monte ce volume sous son nom complet `binance-spot-manager_bsm-data` (volume
+  # externe dans son propre compose) et doit tourner avec l'uid 10001 (bsm). Il
+  # n'ecrit que dans signal_drop/incoming/ ; le worker cree l'arborescence.
   bsm-data:
   bsm-logs:

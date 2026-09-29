@@ -59,6 +59,7 @@ from binance_spot_manager.position_engine import PositionEngine, finish_position
 from binance_spot_manager.position_store import PositionStore, RuntimeStore, get_settings_store  # noqa: E402
 from binance_spot_manager.reconciliation_engine import ReconciliationEngine  # noqa: E402
 from binance_spot_manager.signal_auto_execution import AutomaticSignalExecutor  # noqa: E402
+from binance_spot_manager.signal_drop import SignalDropImporter  # noqa: E402
 from binance_spot_manager.signal_inbox import SignalInbox  # noqa: E402
 from binance_spot_manager.symbol_rules import SymbolRulesCache  # noqa: E402
 from binance_spot_manager.telegram_signals import TelegramSignalPoller  # noqa: E402
@@ -115,6 +116,11 @@ class Worker:
             lambda: get_settings_store().load(),
             inbox=self.signal_inbox,
             pause_requested=self._stop_requested,
+        )
+        # Depot direct du generateur ML local : lecture de data/signal_drop/incoming/.
+        self.signal_drop = SignalDropImporter(
+            self.signal_inbox, account_scope(self.settings),
+            lambda: get_settings_store().load(),
         )
         self.auto_signal_executor = AutomaticSignalExecutor(
             account_scope(self.settings), self.signal_inbox, self.commands,
@@ -196,6 +202,7 @@ class Worker:
         runtime.command_capabilities = [
             "signal_v1", "independent_positions_v1", "market_close_v1",
             "telegram_getupdates_v1", "telegram_auto_execution_v1",
+            "signal_drop_v1",
         ]
         runtime.last_message = message or runtime.last_message
         runtime.heartbeat_at = utcnow()
@@ -208,6 +215,8 @@ class Worker:
                 runtime.telegram_diagnostics["auto_execution"] = (
                     self.auto_signal_executor.snapshot()
                 )
+            if hasattr(self, "signal_drop"):
+                runtime.telegram_diagnostics["drop"] = self.signal_drop.snapshot()
         if runtime.started_at is None or state is WorkerState.STARTING:
             runtime.started_at = utcnow()
         for key, value in fields.items():
@@ -297,6 +306,8 @@ class Worker:
     def _tick(self) -> int:
         if hasattr(self, "fee_token_monitor"):
             self.fee_token_monitor.check()
+        if hasattr(self, "signal_drop"):
+            self.signal_drop.import_pending()
         if hasattr(self, "auto_signal_executor"):
             self.auto_signal_executor.process_pending()
         if hasattr(self, "command_processor"):

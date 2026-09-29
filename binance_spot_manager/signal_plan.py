@@ -2,14 +2,35 @@
 import math
 import time
 
-from .models import OrderType, PriceMode, SLMode, SignalSource
+from .models import OrderType, PriceMode, SLMode, SLRuleAfterTP, SignalSource
 from .position_engine import PositionEngine
 from .signal_parser import ParsedSignal
 from .strategy_engine import EntrySpec, SLSpec, StrategyEngine, StrategySpec, TPSpec
 
+#: Règles de SL après TP proposées pour les signaux : aucune ne demande de valeur.
+SIGNAL_SL_AFTER_TP_RULES = (
+    SLRuleAfterTP.NO_CHANGE,
+    SLRuleAfterTP.BREAK_EVEN,
+    SLRuleAfterTP.BREAK_EVEN_WITH_FEES,
+    SLRuleAfterTP.PREVIOUS_TP,
+)
+
+
+def signal_sl_after_tp(value) -> SLRuleAfterTP:
+    """Règle enregistrée dans les préférences ; toute valeur inconnue → NO_CHANGE."""
+    try:
+        rule = SLRuleAfterTP(value)
+    except ValueError:
+        return SLRuleAfterTP.NO_CHANGE
+    return rule if rule in SIGNAL_SL_AFTER_TP_RULES else SLRuleAfterTP.NO_CHANGE
+
 
 def prepare_signal(parsed: ParsedSignal, rules, *, budget, available_quote, reserve_percent,
-                   current_price, signal_id, source="manual", touch_stop=False, validity_confirmed=False):
+                   current_price, signal_id, source="manual", touch_stop=False, validity_confirmed=False,
+                   sl_after_tp=SLRuleAfterTP.NO_CHANGE):
+    sl_after_tp = SLRuleAfterTP(sl_after_tp)
+    if sl_after_tp not in SIGNAL_SL_AFTER_TP_RULES:
+        raise ValueError("Règle de SL après TP non disponible pour les signaux.")
     if parsed.errors:
         raise ValueError(" ; ".join(parsed.errors))
     if not validity_confirmed:
@@ -32,7 +53,10 @@ def prepare_signal(parsed: ParsedSignal, rules, *, budget, available_quote, rese
         reserve_percent=reserve_percent, current_price=current_price,
         entries=[EntrySpec(order_type=OrderType.LIMIT, price_mode=PriceMode.FIXED_PRICE,
                            price=p, capital_percent=100 / len(entries), expires_hours=24) for p in entries],
-        take_profits=[TPSpec(price_mode=PriceMode.FIXED_PRICE, price=p, sell_percent=100 / len(targets)) for p in targets],
+        # Le dernier TP clôture la position : aucune règle de SL après lui.
+        take_profits=[TPSpec(price_mode=PriceMode.FIXED_PRICE, price=p, sell_percent=100 / len(targets),
+                             sl_rule_after_hit=sl_after_tp if index < len(targets) - 1 else SLRuleAfterTP.NO_CHANGE)
+                      for index, p in enumerate(targets)],
         stop_loss=SLSpec(mode=SLMode.FIXED_PRICE, value=stop),
         source=SignalSource(source), source_name=f"Signal {parsed.template}",
         cancel_remaining_entries_on_first_tp=True, tags=["signal", signal_id],
