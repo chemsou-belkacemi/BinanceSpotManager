@@ -95,6 +95,13 @@ class CommandStore:
         with self.connect() as db:
             return [self.decode(r) for r in db.execute("SELECT * FROM commands WHERE scope=? ORDER BY created_at DESC LIMIT ?", (scope, max(1, min(limit, 500))))]
 
+    def get_by_request_key(self, scope, request_key):
+        with self.connect() as db:
+            return self.decode(db.execute(
+                "SELECT * FROM commands WHERE scope=? AND request_key=?",
+                (scope, request_key),
+            ).fetchone())
+
     def cancel_pending(self, scope, command_id):
         with self.connect() as db, db:
             return db.execute("UPDATE commands SET state='CANCELED', updated_at=? WHERE scope=? AND id=? AND state='PENDING'", (time.time(), scope, command_id)).rowcount == 1

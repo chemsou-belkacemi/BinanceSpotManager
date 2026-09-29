@@ -58,7 +58,10 @@ from binance_spot_manager.market_price_stream import DemoMarketPriceStream  # no
 from binance_spot_manager.position_engine import PositionEngine, finish_position, recompute_position  # noqa: E402
 from binance_spot_manager.position_store import PositionStore, RuntimeStore, get_settings_store  # noqa: E402
 from binance_spot_manager.reconciliation_engine import ReconciliationEngine  # noqa: E402
+from binance_spot_manager.signal_auto_execution import AutomaticSignalExecutor  # noqa: E402
+from binance_spot_manager.signal_inbox import SignalInbox  # noqa: E402
 from binance_spot_manager.symbol_rules import SymbolRulesCache  # noqa: E402
+from binance_spot_manager.telegram_signals import TelegramSignalPoller  # noqa: E402
 from binance_spot_manager.command_store import CommandStore, account_scope
 from binance_spot_manager.command_processor import CommandProcessor
 from binance_spot_manager.dashboard_service import DashboardService
@@ -100,10 +103,23 @@ class Worker:
         self.notifications = NotificationEngine(self.settings, background=True)
         self.market_prices = DemoMarketPriceStream(self.settings)
         self.commands = CommandStore()
+        self.signal_inbox = SignalInbox()
         risk_service = DashboardService(self.settings, position_store=self.positions, client=self.client, events=self.events)
         self.command_processor = CommandProcessor(self.commands, self.positions, self.execution, risk_service.risk_limits)
         self.fee_token_monitor = FeeTokenMonitor(
             self.client, self.events, lambda: get_settings_store().load(), interval_seconds=60,
+        )
+        self.telegram_poller = TelegramSignalPoller(
+            self.settings.telegram_bot_token,
+            account_scope(self.settings),
+            lambda: get_settings_store().load(),
+            inbox=self.signal_inbox,
+            pause_requested=self._stop_requested,
+        )
+        self.auto_signal_executor = AutomaticSignalExecutor(
+            account_scope(self.settings), self.signal_inbox, self.commands,
+            self.client, self.rules_cache, risk_service.risk_limits,
+            lambda: get_settings_store().load(), self.events,
         )
 
         self._running = True
@@ -134,6 +150,7 @@ class Worker:
             EventType.WORKER_STARTED,
             f"Worker demarre (PID {os.getpid()}) — {self.settings.mode_label}",
         )
+        self.telegram_poller.start()
 
         try:
             self._loop_forever()
@@ -158,6 +175,8 @@ class Worker:
                 pass
 
     def _shutdown(self) -> None:
+        if hasattr(self, "telegram_poller"):
+            self.telegram_poller.stop()
         self._set_state(WorkerState.STOPPED, "Worker arrete")
         self.events.append(EventType.WORKER_STOPPED, "Worker arrete")
         self.lock.release()
@@ -174,12 +193,21 @@ class Worker:
         runtime.run_mode = self.settings.run_mode.value
         runtime.base_url = self.settings.base_url
         runtime.command_scope = account_scope(self.settings)
-        runtime.command_capabilities = ["signal_v1", "independent_positions_v1", "market_close_v1"]
+        runtime.command_capabilities = [
+            "signal_v1", "independent_positions_v1", "market_close_v1",
+            "telegram_getupdates_v1", "telegram_auto_execution_v1",
+        ]
         runtime.last_message = message or runtime.last_message
         runtime.heartbeat_at = utcnow()
         if hasattr(self, "market_prices"):
             runtime.price_diagnostics = self.market_prices.snapshot()
             runtime.price_diagnostics["sources"] = getattr(self, "_price_sources", {})
+        if hasattr(self, "telegram_poller"):
+            runtime.telegram_diagnostics = self.telegram_poller.snapshot()
+            if hasattr(self, "auto_signal_executor"):
+                runtime.telegram_diagnostics["auto_execution"] = (
+                    self.auto_signal_executor.snapshot()
+                )
         if runtime.started_at is None or state is WorkerState.STARTING:
             runtime.started_at = utcnow()
         for key, value in fields.items():
@@ -269,6 +297,8 @@ class Worker:
     def _tick(self) -> int:
         if hasattr(self, "fee_token_monitor"):
             self.fee_token_monitor.check()
+        if hasattr(self, "auto_signal_executor"):
+            self.auto_signal_executor.process_pending()
         if hasattr(self, "command_processor"):
             self.command_processor.run_one()
         positions = self.positions.list_open()

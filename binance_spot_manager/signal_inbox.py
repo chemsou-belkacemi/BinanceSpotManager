@@ -25,7 +25,18 @@ class SignalInbox:
                 id TEXT PRIMARY KEY, scope TEXT NOT NULL, hash TEXT NOT NULL,
                 source TEXT NOT NULL, external_id TEXT NOT NULL, received REAL NOT NULL,
                 raw TEXT NOT NULL, parsed TEXT NOT NULL, payload TEXT,
+                source_timestamp REAL NOT NULL DEFAULT 0,
+                auto_state TEXT NOT NULL DEFAULT '',
+                auto_detail TEXT NOT NULL DEFAULT '',
                 UNIQUE(scope, hash))""")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(signals)")}
+            for name, definition in (
+                ("source_timestamp", "REAL NOT NULL DEFAULT 0"),
+                ("auto_state", "TEXT NOT NULL DEFAULT ''"),
+                ("auto_detail", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE signals ADD COLUMN {name} {definition}")
             db.execute("""CREATE TABLE IF NOT EXISTS telegram_offsets (
                 bot TEXT PRIMARY KEY, offset INTEGER NOT NULL)""")
             db.execute("""CREATE TABLE IF NOT EXISTS signal_origins (
@@ -43,7 +54,8 @@ class SignalInbox:
         return dict(row) | {"parsed": json.loads(row["parsed"]),
                             "payload": json.loads(row["payload"]) if row["payload"] else None}
 
-    def receive(self, scope, raw, *, template="auto", source="manual", external_id="", edited=False):
+    def receive(self, scope, raw, *, template="auto", source="manual", external_id="",
+                edited=False, source_timestamp=0.0):
         parsed = parse_signal(raw, template).to_dict()
         if edited:
             parsed["errors"].append("Message édité : vérifier manuellement via New Trade ; aucun ordre remplacé.")
@@ -62,12 +74,29 @@ class SignalInbox:
                     if error not in previous["errors"]:
                         previous["errors"].append(error)
                     db.execute("UPDATE signals SET parsed=? WHERE id=?", (json.dumps(previous), original["id"]))
-            db.execute("INSERT OR IGNORE INTO signals VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+            db.execute("""INSERT OR IGNORE INTO signals
+                (id, scope, hash, source, external_id, received, raw, parsed, payload,
+                 source_timestamp, auto_state, auto_detail)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, '', '')""",
                        (uuid.uuid4().hex, scope, content_hash(raw), source, external_id, time.time(),
-                        raw[:20000], json.dumps(parsed, allow_nan=False)))
+                        raw[:20000], json.dumps(parsed, allow_nan=False), float(source_timestamp or 0)))
             row = db.execute("SELECT * FROM signals WHERE scope=? AND hash=?", (scope, content_hash(raw))).fetchone()
             if external_id:
                 db.execute("INSERT OR IGNORE INTO signal_origins VALUES (?, ?, ?)", (scope, external_id, row["id"]))
+            # A previously reviewed/imported text may be sent again after automatic
+            # execution is enabled. Refresh its Telegram origin only while it has
+            # never been frozen or handled automatically. Confirmed/rejected rows
+            # remain immutable and can never create a second command.
+            if (source == "telegram" and external_id and source_timestamp
+                    and not edited and not revised and row["payload"] is None
+                    and (row["auto_state"] or "") == ""):
+                db.execute("""UPDATE signals
+                    SET source='telegram', external_id=?, received=?, source_timestamp=?
+                    WHERE scope=? AND id=? AND payload IS NULL AND auto_state=''""",
+                    (external_id, time.time(), float(source_timestamp), scope, row["id"]))
+                row = db.execute(
+                    "SELECT * FROM signals WHERE scope=? AND id=?", (scope, row["id"]),
+                ).fetchone()
             if edited or revised:
                 previous = json.loads(row["parsed"])
                 error = "Message édité : vérifier manuellement via New Trade, aucune seconde exécution."
@@ -122,3 +151,45 @@ class SignalInbox:
         with self.connect() as db, db:
             db.execute("INSERT INTO telegram_offsets VALUES (?, ?) ON CONFLICT(bot) DO UPDATE SET offset=MAX(offset, excluded.offset)",
                        (bot, offset))
+
+    def auto_candidates(self, scope, *, enabled_since, oldest_source_timestamp,
+                        now, limit=10):
+        """Fresh Telegram signals eligible for automatic preparation.
+
+        PROCESSING rows are included for crash recovery even if their age window
+        elapsed; an existing frozen payload or command decides their final state.
+        """
+        with self.connect() as db:
+            rows = db.execute("""SELECT * FROM signals
+                WHERE scope=? AND source='telegram' AND received>=?
+                  AND auto_state IN ('', 'PROCESSING')
+                  AND (auto_state='PROCESSING' OR
+                       (source_timestamp>=? AND source_timestamp<=?))
+                ORDER BY received, id LIMIT ?""",
+                (scope, float(enabled_since), float(oldest_source_timestamp),
+                 float(now) + 60, max(1, min(int(limit), 50)))).fetchall()
+            return [self.decode(row) for row in rows]
+
+    def claim_auto(self, scope, signal_id):
+        with self.connect() as db, db:
+            changed = db.execute("""UPDATE signals
+                SET auto_state='PROCESSING', auto_detail=''
+                WHERE scope=? AND id=? AND auto_state=''""",
+                (scope, signal_id)).rowcount
+            if changed:
+                return True
+            row = db.execute(
+                "SELECT auto_state FROM signals WHERE scope=? AND id=?",
+                (scope, signal_id),
+            ).fetchone()
+            return bool(row and row[0] == "PROCESSING")
+
+    def set_auto_state(self, scope, signal_id, state, detail=""):
+        if state not in {"QUEUED", "REJECTED", "PROCESSING"}:
+            raise ValueError("État automatique invalide")
+        with self.connect() as db, db:
+            changed = db.execute("""UPDATE signals SET auto_state=?, auto_detail=?
+                WHERE scope=? AND id=?""",
+                (state, str(detail)[:1000], scope, signal_id)).rowcount
+            if changed != 1:
+                raise ValueError("Signal automatique absent")

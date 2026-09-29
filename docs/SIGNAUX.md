@@ -27,7 +27,11 @@ les messages édités et les signaux déjà confirmés ne peuvent pas être réa
 ## Exécution manuellement confirmée
 
 1. Analyser le texte puis contrôler paire, entrées, TP, SL, date et plateforme.
-2. Choisir le budget en devise de cotation (USDT ou USDC). Pas de budget implicite.
+2. Contrôler le budget proposé en devise de cotation (USDT ou USDC). Il peut être
+   configuré dans **Settings → Signaux** en montant fixe, pourcentage du portefeuille
+   ou mode adaptatif. Par défaut, le mode adaptatif propose 5 % du portefeuille et
+   descend à 2 % lorsque le libre de la devise de la paire passe sous 30 % du total.
+   La réserve de capital reste prioritaire et le montant demeure modifiable.
 3. Pour `SL (1h)` ou `(15min)`, ne rien exécuter si la règle est une clôture
    de bougie. Cette version permet seulement un choix explicite de stop au prix,
    ce qui **change la stratégie source**. Les clôtures de bougie ne sont pas gérées.
@@ -58,7 +62,31 @@ utiliser New Trade pour un nouveau plan, sans modifier les commandes précédent
 **Settings → Signaux** : activer l'import et saisir une liste explicite
 d'identifiants numériques de conversations. Le token existant est utilisé sans
 être affiché ni modifié. Le chat des notifications n'est pas autorisé implicitement.
-**Signaux → Relever les messages Telegram** importe à la demande, sans achat.
+La relève automatique démarre un lecteur `getUpdates` unique dans un thread du
+worker. Il utilise un long polling de 20 secondes : un message est retourné dès
+son arrivée, sans attendre la fin des 20 secondes et sans ralentir la boucle TP/SL.
+En cas d'erreur, la reprise attend successivement 2, 5, 10, 30 puis 60 secondes.
+Le diagnostic est visible dans **Settings → Signaux** et dans la page **Signaux**.
+
+### Exécution automatique optionnelle
+
+**Settings → Signaux → Exécution automatique** permet d'autoriser explicitement
+les nouveaux messages Telegram à passer directement dans la file du worker Demo.
+Le budget fixe, proportionnel ou adaptatif configuré sur la même page est appliqué.
+La date Telegram (ou la date d'origine d'un transfert) doit rester dans la fenêtre
+réglée, 5 minutes par défaut. Les messages reçus avant l'activation, édités, anciens,
+ambigus, hors Binance Spot ou incompatibles avec les règles sont conservés avec un
+motif de refus et ne créent aucune commande.
+
+Un SL portant une mention `1h` ou `15min` reste refusé sauf si l'autorisation
+séparée **Interpréter les SL comme des stops au toucher** est activée. Le worker
+recontrôle ensuite le prix, les soldes, la réserve, les frais BNB et les limites de
+risque avant toute écriture Binance. La déduplication du signal et de la commande
+empêche un second envoi après redémarrage.
+
+Lorsque la relève automatique est désactivée, **Signaux → Relever les messages
+Telegram** conserve l'import ponctuel. Le bouton manuel n'appelle jamais
+`getUpdates` en parallèle du worker automatique.
 
 Le bot doit avoir accès aux messages du groupe/canal, ou recevoir un transfert
 dans une conversation autorisée. Ce n'est pas un accès aux abonnements personnels
@@ -72,9 +100,8 @@ Références : [Bot API getUpdates](https://core.telegram.org/bots/api#getupdate
 
 ## Non activé dans cette version
 
-Réception en tâche de fond, achats automatiques à la réception, suivi des clôtures
-de bougie, remappage Bitget/forex et apprentissage libre de formats. L'automatisation
-sans confirmation nécessite d'abord des politiques par source (budget, durée de
-validité, allocations, interprétation SL et gestion des modifications).
+Suivi des clôtures de bougie, remappage Bitget/forex et apprentissage libre de
+formats. Le mode automatique actuel reste limité aux conversations Telegram
+autorisées et à Binance Demo Spot.
 
-Tests hors réseau : `make test TESTS="tests/test_signals.py tests/test_signals_ui.py tests/test_commands.py tests/test_automation.py"`.
+Tests hors réseau : `make test TESTS="tests/test_signal_sizing.py tests/test_signals.py tests/test_signals_ui.py tests/test_commands.py tests/test_automation.py"`.

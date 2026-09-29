@@ -45,25 +45,201 @@ tabs = st.tabs(["Sécurité", "Worker & risque", "Presets", "Notifications", "Di
 
 with tabs[5]:
     from binance_spot_manager.position_store import get_settings_store
+    from binance_spot_manager.signal_sizing import SignalSizingPolicy
     from binance_spot_manager.telegram_signals import chat_allowlist
 
     st.subheader("Réception des signaux Telegram")
-    st.caption("Import à la demande depuis la page Signaux. Aucun achat automatique à la réception. Le token existant n'est ni affiché ni modifié.")
+    st.caption("Le worker peut relever automatiquement les messages autorisés. L'exécution directe se règle séparément plus bas. Le token existant n'est ni affiché ni modifié.")
     signal_preferences = get_settings_store().load()
     with st.form("telegram_signal_preferences"):
         signal_enabled = st.toggle("Autoriser l'import Telegram", value=bool(signal_preferences.get("signal_telegram_enabled", False)))
+        signal_auto_enabled = st.toggle(
+            "Relever automatiquement avec le worker",
+            value=bool(signal_preferences.get("signal_telegram_auto_enabled", False)),
+            help="Long polling de 20 s dans un thread séparé. Les messages arrivent immédiatement sans ralentir les TP/SL.",
+        )
         signal_chats = st.text_input("Conversations autorisées (identifiants numériques séparés par des virgules)", value=signal_preferences.get("signal_telegram_chats", ""))
-        st.caption("Exemple : -1001234567890, 123456789. Les chats de notification ne sont pas autorisés implicitement. Utiliser un seul lecteur getUpdates pour ce bot ; un webhook actif empêche cet import.")
+        st.caption("Exemple : -1001234567890, 123456789. Un seul lecteur getUpdates est autorisé ; un webhook actif empêche cette réception.")
         if st.form_submit_button("Enregistrer la réception des signaux"):
             try:
+                if signal_auto_enabled and not signal_enabled:
+                    raise ValueError("Activer d'abord l'import Telegram pour utiliser la relève automatique.")
                 if signal_enabled:
                     chat_allowlist(signal_chats)
                     if not settings.telegram_bot_token:
                         raise ValueError("Token Telegram absent de la configuration actuelle.")
-                get_settings_store().update({"signal_telegram_enabled": signal_enabled, "signal_telegram_chats": signal_chats.strip()})
-                st.success("Réglages enregistrés.")
+                get_settings_store().update({
+                    "signal_telegram_enabled": signal_enabled,
+                    "signal_telegram_auto_enabled": signal_auto_enabled,
+                    "signal_telegram_chats": signal_chats.strip(),
+                })
+                st.success("Réglages enregistrés. Le worker les relit automatiquement.")
             except ValueError as exc:
                 st.error(str(exc))
+
+    telegram_diagnostics = getattr(service.runtime(), "telegram_diagnostics", {})
+    if telegram_diagnostics:
+        with st.container(border=True):
+            state = telegram_diagnostics.get("state", "INCONNU")
+            st.write(f"**État du lecteur** : `{state}`")
+            st.caption(
+                f"Messages importés depuis le démarrage : {telegram_diagnostics.get('received_total', 0)} · "
+                f"Dernier lot : {telegram_diagnostics.get('last_batch_count', 0)} · "
+                f"Échecs consécutifs : {telegram_diagnostics.get('failures', 0)}"
+            )
+            if telegram_diagnostics.get("last_error"):
+                st.error(telegram_diagnostics["last_error"])
+
+    st.divider()
+    st.subheader("Budget des signaux")
+    st.caption(
+        "Ce réglage propose le budget lors de la simulation. Il ne supprime jamais "
+        "la vérification du signal ni la confirmation manuelle avant l'ordre Demo."
+    )
+    sizing = SignalSizingPolicy.from_mapping(signal_preferences)
+    mode_labels = {
+        "FIXED": "Montant fixe",
+        "PERCENT": "% du portefeuille",
+        "ADAPTIVE": "Adaptatif",
+    }
+    sizing_mode = st.segmented_control(
+        "Méthode de calcul",
+        list(mode_labels),
+        default=sizing.mode,
+        required=True,
+        format_func=mode_labels.get,
+        key="signal_sizing_mode_choice",
+        width="stretch",
+    )
+    with st.form("signal_sizing_preferences"):
+        fixed_budget = st.number_input(
+            "Montant fixe par signal (devise de la paire)",
+            min_value=0.01,
+            max_value=1_000_000_000.0,
+            value=float(sizing.fixed_budget),
+            step=10.0,
+            key="signal_fixed_budget_input",
+            disabled=sizing_mode != "FIXED",
+        )
+        capital_percent = st.number_input(
+            "Part normale du portefeuille (%)",
+            min_value=0.01,
+            max_value=100.0,
+            value=float(sizing.capital_percent),
+            step=0.5,
+            disabled=sizing_mode == "FIXED",
+        )
+        low_threshold = st.number_input(
+            "Activer la part réduite si le capital libre passe sous (%)",
+            min_value=0.01,
+            max_value=100.0,
+            value=float(sizing.low_balance_threshold_percent),
+            step=1.0,
+            disabled=sizing_mode != "ADAPTIVE",
+            help="Capital libre de la devise de la paire ÷ valeur totale du portefeuille.",
+        )
+        low_percent = st.number_input(
+            "Part réduite du portefeuille (%)",
+            min_value=0.01,
+            max_value=100.0,
+            value=float(sizing.low_balance_budget_percent),
+            step=0.5,
+            disabled=sizing_mode != "ADAPTIVE",
+        )
+        st.caption(
+            "Exemple adaptatif : 5 % normalement ; si le libre passe sous 30 % du "
+            "portefeuille, le budget descend à 2 %. La réserve de capital reste prioritaire."
+        )
+        if st.form_submit_button("Enregistrer le budget des signaux", type="primary"):
+            if sizing_mode == "ADAPTIVE" and low_percent > capital_percent:
+                st.error("La part réduite doit être inférieure ou égale à la part normale.")
+            else:
+                get_settings_store().update({
+                    "signal_sizing_mode": sizing_mode,
+                    "signal_fixed_budget": float(fixed_budget),
+                    "signal_capital_percent": float(capital_percent),
+                    "signal_low_balance_threshold_percent": float(low_threshold),
+                    "signal_low_balance_budget_percent": float(low_percent),
+                })
+                st.success("Stratégie de budget enregistrée pour les prochains signaux.")
+
+    st.divider()
+    st.subheader("Exécution automatique")
+    auto_was_enabled = bool(signal_preferences.get("signal_auto_execute_enabled", False))
+    auto_execute = st.toggle(
+        "Envoyer automatiquement les signaux Telegram valides au worker",
+        value=auto_was_enabled,
+        key="signal_auto_execute_toggle",
+        help=(
+            "Chaque nouveau signal autorisé peut créer immédiatement ses ordres LIMIT "
+            "sur Binance Demo avec le budget défini ci-dessus."
+        ),
+    )
+    auto_touch_stop = st.toggle(
+        "Interpréter les SL (1h/15min) comme des stops au toucher",
+        value=bool(signal_preferences.get("signal_auto_touch_stop", False)),
+        disabled=not auto_execute,
+        key="signal_auto_touch_stop_toggle",
+        help="Active cette option seulement si cette interprétation correspond à ta stratégie.",
+    )
+    auto_max_age = st.number_input(
+        "Âge maximal d'un message automatique (minutes)",
+        min_value=1,
+        max_value=60,
+        value=int(signal_preferences.get("signal_auto_max_age_minutes", 5)),
+        disabled=not auto_execute,
+        key="signal_auto_max_age_input",
+        help="Les anciens messages et les anciens transferts sont conservés sans ordre.",
+    )
+    if auto_execute:
+        st.warning(
+            "Après activation, un nouveau signal reconnu provenant d'un chat autorisé "
+            "sera simulé puis envoyé au worker sans confirmation sur la page Signaux. "
+            "Le worker contrôle encore le prix, le solde, les frais et le risque."
+        )
+    authorization = True
+    if auto_execute and not auto_was_enabled:
+        authorization = st.checkbox(
+            "J'autorise l'envoi automatique d'ordres sur Binance Demo",
+            key="signal_auto_execute_authorization",
+        )
+    if st.button("Enregistrer l'exécution automatique", type="primary"):
+        try:
+            if auto_execute and not authorization:
+                raise ValueError("Cocher l'autorisation explicite avant l'activation.")
+            if auto_execute and not (
+                signal_preferences.get("signal_telegram_enabled", False)
+                and signal_preferences.get("signal_telegram_auto_enabled", False)
+            ):
+                raise ValueError(
+                    "Activer et enregistrer d'abord l'import Telegram automatique plus haut."
+                )
+            enabled_since = (
+                float(signal_preferences.get("signal_auto_execute_enabled_since") or time.time())
+                if auto_execute and auto_was_enabled else time.time() if auto_execute else 0.0
+            )
+            get_settings_store().update({
+                "signal_auto_execute_enabled": bool(auto_execute),
+                "signal_auto_execute_enabled_since": enabled_since,
+                "signal_auto_touch_stop": bool(auto_touch_stop),
+                "signal_auto_max_age_minutes": int(auto_max_age),
+            })
+            st.success(
+                "Exécution automatique activée pour les nouveaux messages Telegram."
+                if auto_execute else "Exécution automatique désactivée."
+            )
+        except ValueError as exc:
+            st.error(str(exc))
+
+    auto_diagnostics = telegram_diagnostics.get("auto_execution", {})
+    if auto_diagnostics:
+        st.caption(
+            f"État : {auto_diagnostics.get('state', 'INCONNU')} · "
+            f"mis en file : {auto_diagnostics.get('queued_total', 0)} · "
+            f"refusés : {auto_diagnostics.get('rejected_total', 0)}"
+        )
+        if auto_diagnostics.get("last_detail"):
+            st.caption(f"Dernier résultat : {auto_diagnostics['last_detail']}")
 
 # ==========================================================================
 # Sécurité

@@ -14,6 +14,10 @@ from binance_spot_manager.config import get_settings
 from binance_spot_manager.signal_inbox import SignalInbox
 from binance_spot_manager.signal_parser import ParsedSignal, TEMPLATES, parse_signal
 from binance_spot_manager.signal_plan import prepare_signal
+from binance_spot_manager.signal_sizing import (
+    SignalSizingPolicy,
+    suggest_signal_budget_from_account,
+)
 from binance_spot_manager.telegram_signals import chat_allowlist, import_telegram
 from binance_spot_manager.position_store import get_settings_store
 from ui_common import banner, get_service, load_rules, page_header, sidebar_status, colored_pnl
@@ -29,8 +33,15 @@ if not settings.is_demo:
 scope = account_scope(settings)
 inbox = SignalInbox()
 service = get_service()
+preferences = get_settings_store().load()
 
-st.info("Aucun message n'est exécuté dès sa réception. Le budget et la validité du signal doivent être confirmés. Un seul signal par texte.")
+if preferences.get("signal_auto_execute_enabled", False):
+    st.warning(
+        "Exécution Telegram automatique active : les nouveaux signaux valides peuvent "
+        "être envoyés au worker sans confirmation sur cette page."
+    )
+else:
+    st.info("Aucun message n'est exécuté dès sa réception. Le budget et la validité du signal doivent être confirmés. Un seul signal par texte.")
 with st.form("signal_input"):
     template = st.selectbox("Modèle", list(TEMPLATES), format_func=TEMPLATES.get)
     raw = st.text_area("Coller le signal", height=220, max_chars=20000)
@@ -46,9 +57,17 @@ if analyze:
         st.success("Analyse enregistrée. Les doublons retrouvent le même signal.")
 
 with st.expander("Recevoir depuis Telegram"):
-    st.caption("Réception à la demande, sans envoi de messages. Activer et définir les conversations autorisées dans Settings → Signaux. Le bot doit avoir accès aux messages, ou les recevoir par transfert.")
-    if st.button("Relever les messages Telegram"):
-        preferences = get_settings_store().load()
+    automatic = bool(preferences.get("signal_telegram_auto_enabled", False))
+    st.caption("Le bot doit avoir accès aux messages, ou les recevoir par transfert. La réception seule ne crée jamais d'ordre.")
+    if automatic:
+        diagnostics = getattr(service.runtime(), "telegram_diagnostics", {})
+        state = diagnostics.get("state", "EN ATTENTE")
+        st.info(f"Relève automatique assurée par le worker · état : {state}")
+        if diagnostics.get("last_error"):
+            st.error(diagnostics["last_error"])
+        if st.button("Actualiser la boîte de réception", icon=":material/refresh:"):
+            st.rerun()
+    elif st.button("Relever les messages Telegram"):
         try:
             if not preferences.get("signal_telegram_enabled", False):
                 raise ValueError("Réception désactivée dans Settings → Signaux.")
@@ -68,6 +87,10 @@ ids = list(by_id)
 selected = st.selectbox("Signal à examiner", ids, index=ids.index(selected) if selected in ids else 0,
     format_func=lambda key: f"{by_id[key]['parsed']['symbol'] or 'Non reconnu'} · {by_id[key]['source']} · {key[:8]}")
 row = by_id[selected]
+if row.get("auto_state") == "REJECTED":
+    st.warning(f"Exécution automatique refusée : {row.get('auto_detail') or 'raison indisponible'}")
+elif row.get("auto_state") == "PROCESSING":
+    st.info("Exécution automatique en cours de préparation par le worker.")
 if row["payload"] is None and st.button("Réanalyser ce signal", help="Reprendre le texte enregistré avec les formats actuellement reconnus."):
     try:
         inbox.reanalyse(scope, selected)
@@ -111,7 +134,59 @@ st.subheader("Préparer l'exécution")
 st.caption("Entrées LIMIT : budget réparti également, expiration après 24 h. TP répartis également sur la position, dernier TP à 100 % du restant. Les entrées encore ouvertes sont annulées après TP1. Les TP sont surveillés par le worker : cette page ne crée pas un OCO par tranche.")
 st.warning("Une limite d'achat au-dessus du marché peut être exécutée immédiatement. Les fills partiels et les frais peuvent réduire les quantités réellement vendables. Le worker doit rester actif pour la stratégie.")
 quote_asset = "USDC" if parsed.symbol.endswith("USDC") else "USDT"
-budget = st.number_input(f"Budget total ({quote_asset})", min_value=0.0, value=0.0, step=10.0, key=f"budget_{selected}")
+sizing_policy = SignalSizingPolicy.from_mapping(preferences)
+sizing_suggestion = None
+sizing_warning = ""
+try:
+    sizing_balances = service.client.get_balances()
+    sizing_prices = service.client.get_prices()
+    sizing_suggestion, unpriced_assets = suggest_signal_budget_from_account(
+        sizing_policy,
+        balances=sizing_balances,
+        prices=sizing_prices,
+        quote_asset=quote_asset,
+        reserve_percent=service.risk_limits().min_reserve_percent,
+    )
+    if unpriced_assets:
+        sizing_warning = (
+            "Valorisation partielle : actifs sans cours USDT exclus du capital total : "
+            + ", ".join(unpriced_assets)
+        )
+except Exception as exc:
+    sizing_warning = f"Budget automatique indisponible : {exc}"
+
+default_budget = sizing_suggestion.budget if sizing_suggestion else 0.0
+budget_key = f"budget_{selected}"
+if sizing_suggestion and st.button(
+    "Recalculer le budget proposé",
+    icon=":material/calculate:",
+    help="Relit les soldes et réapplique la stratégie enregistrée.",
+):
+    st.session_state[budget_key] = float(default_budget)
+budget = st.number_input(
+    f"Budget total ({quote_asset})",
+    min_value=0.0,
+    value=float(default_budget),
+    step=10.0,
+    key=budget_key,
+)
+if sizing_suggestion:
+    if sizing_policy.mode == "FIXED":
+        sizing_text = f"montant fixe de {sizing_policy.fixed_budget:.2f} {quote_asset}"
+    else:
+        sizing_text = f"{sizing_suggestion.applied_percent:.2f} % du portefeuille"
+        if sizing_suggestion.reduced:
+            sizing_text += " (part réduite active)"
+    st.caption(
+        f"Proposition automatique : {sizing_suggestion.budget:.2f} {quote_asset} · "
+        f"{sizing_text} · libre : {sizing_suggestion.free_capital_percent:.1f} % · "
+        f"réserve conservée : {service.risk_limits().min_reserve_percent:.1f} %. "
+        "Tu peux modifier ce montant avant la simulation."
+    )
+    if sizing_suggestion.capped_by_reserve:
+        st.warning("Le budget proposé a été plafonné pour conserver la réserve de capital.")
+if sizing_warning:
+    st.warning(sizing_warning)
 validity = st.checkbox("J'ai vérifié la date source et ce signal est encore valable maintenant", key=f"valid_{selected}")
 touch = st.checkbox(f"Je choisis un stop au prix {parsed.stop}, sans attendre une clôture {parsed.stop_timeframe}",
                     key=f"touch_{selected}") if parsed.stop_timeframe else True

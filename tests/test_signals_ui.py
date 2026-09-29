@@ -10,6 +10,7 @@ from binance_spot_manager.signal_inbox import SignalInbox
 from binance_spot_manager.symbol_rules import parse_symbol_rules
 import binance_spot_manager.config as config
 import binance_spot_manager.signal_inbox as signal_inbox
+import binance_spot_manager.position_store as position_store
 import ui_common
 
 
@@ -88,3 +89,33 @@ def test_existing_unrecognized_signal_can_be_reanalysed_from_page(monkeypatch, t
     assert len(saved) == 1
     assert saved[0]["id"] == row["id"]
     assert saved[0]["payload"] is None
+
+
+def test_automatic_telegram_reader_hides_competing_manual_getupdates(monkeypatch, tmp_path):
+    settings = Settings(run_mode=RunMode.DEMO_MANUAL, demo_api_key="test", demo_api_secret="test")
+    inbox = SignalInbox(tmp_path / "inbox.db")
+    preferences = {
+        "signal_telegram_enabled": True,
+        "signal_telegram_auto_enabled": True,
+        "signal_telegram_chats": "99",
+    }
+    monkeypatch.setattr(config, "get_settings", lambda: settings)
+    monkeypatch.setattr(signal_inbox, "SignalInbox", lambda: inbox)
+    monkeypatch.setattr(
+        position_store, "get_settings_store",
+        lambda: SimpleNamespace(load=lambda: preferences),
+    )
+    monkeypatch.setattr(
+        ui_common, "get_service",
+        lambda: SimpleNamespace(runtime=lambda: SimpleNamespace(
+            telegram_diagnostics={"state": "POLLING", "last_error": ""},
+        )),
+    )
+    monkeypatch.setattr(ui_common, "sidebar_status", lambda settings: None)
+
+    app = AppTest.from_file(str(PAGE)).run()
+
+    assert not app.exception
+    labels = [button.label for button in app.button]
+    assert "Actualiser la boîte de réception" in labels
+    assert "Relever les messages Telegram" not in labels

@@ -1,5 +1,6 @@
 """Offline parser, durable deduplication and preparation safety tests."""
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -7,7 +8,11 @@ import pytest
 from binance_spot_manager.signal_parser import parse_signal
 from binance_spot_manager.signal_inbox import SignalInbox
 from binance_spot_manager.signal_plan import prepare_signal
-from binance_spot_manager.telegram_signals import chat_allowlist, import_telegram
+from binance_spot_manager.telegram_signals import (
+    TelegramSignalPoller,
+    chat_allowlist,
+    import_telegram,
+)
 from binance_spot_manager.symbol_rules import parse_symbol_rules
 
 
@@ -244,6 +249,58 @@ def test_telegram_never_exposes_token(tmp_path):
     with pytest.raises(ValueError) as exc:
         import_telegram("SECRET", {1}, SignalInbox(tmp_path / "inbox.db"), "demo", session=SimpleNamespace(get=fail))
     assert "SECRET" not in str(exc.value)
+
+
+def test_telegram_long_poll_uses_durable_inbox_and_reports_diagnostics(tmp_path):
+    inbox = SignalInbox(tmp_path / "inbox.db")
+    update = {
+        "update_id": 7,
+        "message": {"chat": {"id": 99}, "message_id": 4, "text": SIMPLE},
+    }
+    calls = []
+    session = SimpleNamespace(get=lambda url, **kwargs: calls.append(kwargs) or SimpleNamespace(
+        status_code=200, json=lambda: {"ok": True, "result": [update]},
+    ))
+    poller = TelegramSignalPoller(
+        "secret", "demo",
+        lambda: {
+            "signal_telegram_enabled": True,
+            "signal_telegram_auto_enabled": True,
+            "signal_telegram_chats": "99",
+        },
+        inbox=inbox, session=session, poll_timeout=20, clock=lambda: 1234.0,
+    )
+
+    received = poller.poll_once()
+
+    assert len(received) == 1
+    assert calls[0]["params"]["timeout"] == 20
+    assert calls[0]["timeout"] == (3, 25)
+    assert inbox.offset(hashlib.sha256(b"secret").hexdigest()) == 8
+    assert poller.snapshot() == {
+        "state": "CONNECTED", "running": True,
+        "last_poll_at": 1234.0, "last_received_at": 1234.0,
+        "last_batch_count": 1, "received_total": 1,
+        "failures": 0, "last_error": "", "poll_timeout_seconds": 20,
+    }
+
+
+def test_telegram_poller_does_not_call_api_when_automatic_reader_is_disabled(tmp_path):
+    calls = []
+    session = SimpleNamespace(get=lambda *args, **kwargs: calls.append(1))
+    preferences = {
+        "signal_telegram_enabled": True,
+        "signal_telegram_auto_enabled": False,
+        "signal_telegram_chats": "99",
+    }
+    poller = TelegramSignalPoller(
+        "secret", "demo", lambda: preferences,
+        inbox=SignalInbox(tmp_path / "inbox.db"), session=session,
+    )
+
+    assert poller.poll_once() == []
+    assert calls == []
+    assert poller.snapshot()["state"] == "MANUAL"
 
 
 def test_edited_message_invalidates_both_versions_even_if_new_text_already_imported(tmp_path):

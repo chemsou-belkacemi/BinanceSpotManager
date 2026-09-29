@@ -373,8 +373,12 @@ affiche le détail.
 
 - **Mode Live non implémenté.** L'architecture est prête (configuration séparée, URL
   distincte, clés distinctes) mais l'exécution Live est refusée par le code.
-- **Analyse de signaux Telegram non implémentée.** L'abstraction existe (canal, déduplication
-  prévue par `content_hash`), l'intégration viendra après le cœur du bot.
+- **Signaux Telegram avec exécution automatique optionnelle.** Le worker peut recevoir en tâche de fond
+  les conversations explicitement autorisées avec `getUpdates`, dédupliquer et analyser les
+  textes. Il propose un budget fixe, proportionnel ou adaptatif (5 % du portefeuille, réduit
+  à 2 % lorsque le capital libre passe sous 30 % par défaut). Une autorisation séparée dans
+  Settings peut envoyer les nouveaux signaux valides directement au worker Demo. L'âge du
+  message, la réserve, les frais et les limites de risque restent contrôlés.
 - **SMS et WhatsApp** : interfaces présentes, envoi désactivé.
 - **Le montant engagé dans le sizing dépend du solde lu au moment du calcul.** Si le solde
   change entre la simulation et l'exécution, les quantités envoyées peuvent différer.
@@ -438,8 +442,8 @@ ni une restauration automatique. Voir [l'état d'avancement](docs/OPERATIONS_V2.
 
 ## 14. Évolutions prévues
 
-Telegram (listener, parser, déduplication, validation humaine), TradingView et autres
-sources de signaux, statistiques avancées (win rate par source, drawdown, fréquence
+Politiques automatiques distinctes par source, TradingView et
+autres sources, statistiques avancées (win rate par source, drawdown, fréquence
 d'atteinte des TP), SMS / WhatsApp, et — après validation complète sur Demo — un mode Live
 avec ses propres contrôles et confirmations renforcées.
 

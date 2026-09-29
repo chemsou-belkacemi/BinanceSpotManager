@@ -189,6 +189,8 @@ class EventType(str, Enum):
     SIMPLE_BUY = "SIMPLE_BUY"
     FEE_TOKEN_LOW = "FEE_TOKEN_LOW"
     FEE_TOKEN_RECOVERED = "FEE_TOKEN_RECOVERED"
+    SIGNAL_AUTO_QUEUED = "SIGNAL_AUTO_QUEUED"
+    SIGNAL_AUTO_REJECTED = "SIGNAL_AUTO_REJECTED"
 
 
 class WorkerState(str, Enum):
@@ -639,6 +641,7 @@ class BotRuntime(BSMModel):
     last_error: str = ""
     last_message: str = ""
     price_diagnostics: dict[str, Any] = Field(default_factory=dict)
+    telegram_diagnostics: dict[str, Any] = Field(default_factory=dict)
 
     def is_alive(self, stale_after_seconds: int = 20) -> bool:
         if self.state in {WorkerState.STOPPED, WorkerState.ERROR}:
