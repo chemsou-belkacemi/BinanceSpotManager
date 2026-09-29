@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from datetime import datetime, timezone
 
 from binance_spot_manager.command_store import CommandStore
 from binance_spot_manager.event_store import EventStore
@@ -116,3 +117,34 @@ def test_conditional_stop_requires_saved_touch_authorization(tmp_path):
     assert saved["auto_state"] == "REJECTED"
     assert "SL conditionnel" in saved["auto_detail"]
     assert commands.list_recent("demo") == []
+
+
+def test_telegram_timestamp_is_authoritative_over_text_timezone(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    now = datetime(2026, 9, 29, 1, 15, tzinfo=timezone.utc).timestamp()
+    dated = SIMPLE + "\nDate: Monday - 2026-09-28\nIndicatorTime :- 23:56 GMT+2"
+    row = inbox.receive(
+        "demo", dated, source="telegram", external_id="fresh-telegram",
+        source_timestamp=now - 5,
+    )
+    assert row["parsed"]["published_at"] == "2026-09-28T21:56:00+00:00"
+    worker, commands = executor(tmp_path, inbox, enabled_preferences(), now=now)
+
+    assert worker.process_pending() == ["QUEUED"]
+    assert commands.get_by_request_key("demo", f"signal:{row['id']}") is not None
+
+
+def test_fresh_resend_can_retry_rejected_signal_without_existing_payload(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    row = inbox.receive(
+        "demo", SIMPLE, source="telegram", external_id="first", source_timestamp=990,
+    )
+    inbox.set_auto_state("demo", row["id"], "REJECTED", "Ancienne règle de date")
+
+    resent = inbox.receive(
+        "demo", SIMPLE, source="telegram", external_id="second", source_timestamp=998,
+    )
+    assert resent["id"] == row["id"]
+    assert resent["source_timestamp"] == 998
+    assert resent["auto_state"] == ""
+    assert resent["auto_detail"] == ""

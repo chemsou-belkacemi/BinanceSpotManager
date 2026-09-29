@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 import time
 
 from .models import EventType
@@ -112,10 +111,6 @@ class AutomaticSignalExecutor:
             if source_timestamp <= 0 or source_timestamp < now - max_age_minutes * 60:
                 raise ValueError("Message Telegram trop ancien pour une exécution automatique")
             parsed = ParsedSignal(**row["parsed"])
-            if parsed.published_at:
-                published = datetime.fromisoformat(parsed.published_at).timestamp()
-                if published < now - max_age_minutes * 60 or published > now + 60:
-                    raise ValueError("Date contenue dans le signal hors de la fenêtre autorisée")
             if row.get("payload"):
                 payload = row["payload"]
                 if float(payload.get("signal_confirmation_expires_at") or 0) <= now:

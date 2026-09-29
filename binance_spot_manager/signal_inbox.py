@@ -84,15 +84,17 @@ class SignalInbox:
             if external_id:
                 db.execute("INSERT OR IGNORE INTO signal_origins VALUES (?, ?, ?)", (scope, external_id, row["id"]))
             # A previously reviewed/imported text may be sent again after automatic
-            # execution is enabled. Refresh its Telegram origin only while it has
-            # never been frozen or handled automatically. Confirmed/rejected rows
-            # remain immutable and can never create a second command.
+            # execution is enabled. Refresh its Telegram origin while no payload was
+            # ever frozen. A fresh resend may retry a rejected preparation, whereas
+            # confirmed/queued rows remain immutable and cannot create another order.
             if (source == "telegram" and external_id and source_timestamp
                     and not edited and not revised and row["payload"] is None
-                    and (row["auto_state"] or "") == ""):
+                    and (row["auto_state"] or "") in {"", "REJECTED"}):
                 db.execute("""UPDATE signals
-                    SET source='telegram', external_id=?, received=?, source_timestamp=?
-                    WHERE scope=? AND id=? AND payload IS NULL AND auto_state=''""",
+                    SET source='telegram', external_id=?, received=?, source_timestamp=?,
+                        auto_state='', auto_detail=''
+                    WHERE scope=? AND id=? AND payload IS NULL
+                      AND auto_state IN ('', 'REJECTED')""",
                     (external_id, time.time(), float(source_timestamp), scope, row["id"]))
                 row = db.execute(
                     "SELECT * FROM signals WHERE scope=? AND id=?", (scope, row["id"]),

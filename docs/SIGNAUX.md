@@ -73,8 +73,11 @@ Le diagnostic est visible dans **Settings → Signaux** et dans la page **Signau
 **Settings → Signaux → Exécution automatique** permet d'autoriser explicitement
 les nouveaux messages Telegram à passer directement dans la file du worker Demo.
 Le budget fixe, proportionnel ou adaptatif configuré sur la même page est appliqué.
-La date Telegram (ou la date d'origine d'un transfert) doit rester dans la fenêtre
-réglée, 5 minutes par défaut. Les messages reçus avant l'activation, édités, anciens,
+La date Telegram (ou la date d'origine Telegram d'un transfert) est la référence de
+fraîcheur et doit rester dans la fenêtre réglée, 5 minutes par défaut. Elle est exprimée
+en temps Unix et ne dépend pas du fuseau du conteneur. La date écrite dans le texte reste
+informative car les fournisseurs n'utilisent pas tous correctement les fuseaux horaires.
+Les messages reçus avant l'activation, édités, anciens,
 ambigus, hors Binance Spot ou incompatibles avec les règles sont conservés avec un
 motif de refus et ne créent aucune commande.
 
