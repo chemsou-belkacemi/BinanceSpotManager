@@ -131,6 +131,26 @@ def test_importing_the_same_text_again_refreshes_a_stale_analysis_but_never_a_fr
     assert inbox.receive("demo", BICO)["parsed"]["errors"] == edited["parsed"]["errors"] != []
 
 
+def test_signals_refused_by_an_older_parser_are_re_read_without_reopening_automation(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    stale = {"errors": ["Objectif ambigu (ancien parseur)."], "entries": []}
+    refused = inbox.receive("demo", GALA, source="telegram", external_id="chat:1", source_timestamp=1000)
+    inbox.set_auto_state("demo", refused["id"], "REJECTED", "ancien refus")
+    confirmed = inbox.receive("demo", ARK)
+    inbox.freeze("demo", confirmed["id"], {"plan": 1})
+    edited = inbox.receive("demo", BICO, source="telegram", external_id="chat:2", edited=True)
+    with inbox.connect() as db, db:
+        for row in (refused, confirmed):
+            db.execute("UPDATE signals SET parsed=? WHERE id=?", (json.dumps(dict(row["parsed"], **stale)), row["id"]))
+
+    assert inbox.refresh_refused("demo") == 1
+    assert inbox.refresh_refused("other") == 0
+    rows = {row["id"]: row for row in inbox.recent("demo")}
+    assert rows[refused["id"]]["parsed"]["errors"] == [] and rows[refused["id"]]["auto_state"] == "REJECTED"
+    assert rows[confirmed["id"]]["parsed"]["errors"] == stale["errors"]
+    assert rows[edited["id"]]["parsed"]["errors"] == edited["parsed"]["errors"] != []
+
+
 def test_reanalysis_preserves_source_edit_blocks_and_account_scope(tmp_path):
     inbox = SignalInbox(tmp_path / "signals.db")
     row = inbox.receive("demo", GALA, source="telegram", external_id="chat:1", edited=True)

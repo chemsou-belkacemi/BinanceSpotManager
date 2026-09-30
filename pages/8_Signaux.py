@@ -79,6 +79,10 @@ with st.expander("Recevoir depuis Telegram"):
         except ValueError as exc:
             st.error(str(exc))
 
+# Once per session (a new version restarts sessions): signals refused by an older parser are re-read.
+if not st.session_state.get("signals_refreshed"):
+    inbox.refresh_refused(scope)
+    st.session_state["signals_refreshed"] = True
 rows = inbox.recent(scope)
 if not rows:
     st.caption("Aucun signal reçu pour ce compte Demo.")

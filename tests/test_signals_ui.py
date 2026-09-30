@@ -66,7 +66,7 @@ def test_manual_signal_preview_confirmation_and_deduplication(monkeypatch, tmp_p
     assert not any(b.label == "Transmettre au worker Demo" for b in app.button)
 
 
-def test_existing_unrecognized_signal_can_be_reanalysed_from_page(monkeypatch, tmp_path):
+def test_signal_refused_by_an_older_parser_is_re_read_when_the_page_opens(monkeypatch, tmp_path):
     import json
     settings = Settings(run_mode=RunMode.DEMO_MANUAL, demo_api_key="test", demo_api_secret="test")
     inbox = SignalInbox(tmp_path / "inbox.db")
@@ -82,11 +82,11 @@ def test_existing_unrecognized_signal_can_be_reanalysed_from_page(monkeypatch, t
     monkeypatch.setattr(ui_common, "sidebar_status", lambda settings: None)
     app = AppTest.from_file(str(PAGE)).run()
     assert not app.exception
-    assert app.error
+    assert not app.error
+    assert any("clôture 1h" in c.label for c in app.checkbox)
     next(b for b in app.button if b.label == "Réanalyser ce signal").click().run()
     assert not app.exception
     assert not app.error
-    assert any("clôture 1h" in c.label for c in app.checkbox)
     saved = inbox.recent(account_scope(settings))
     assert len(saved) == 1
     assert saved[0]["id"] == row["id"]

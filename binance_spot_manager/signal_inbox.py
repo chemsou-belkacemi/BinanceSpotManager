@@ -159,6 +159,28 @@ class SignalInbox:
                        (json.dumps(parsed, allow_nan=False), scope, signal_id))
             return self.decode(db.execute("SELECT * FROM signals WHERE scope=? AND id=?", (scope, signal_id)).fetchone())
 
+    def refresh_refused(self, scope):
+        """Re-read signals an older parser refused; confirmed, edited or valid ones never change.
+
+        The automatic state is kept: a Telegram signal rejected at reception stays REJECTED and
+        can only be confirmed by hand, never sent automatically later.
+        """
+        refreshed = 0
+        with self.connect() as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute("SELECT id, raw, parsed FROM signals WHERE scope=? AND payload IS NULL",
+                              (scope,)).fetchall()
+            for row in rows:
+                stored = json.loads(row["parsed"])
+                if not stored["errors"] or any(error.startswith(EDIT_BLOCKS) for error in stored["errors"]):
+                    continue
+                parsed = parse_signal(row["raw"]).to_dict()
+                if parsed != stored:
+                    db.execute("UPDATE signals SET parsed=? WHERE scope=? AND id=?",
+                               (json.dumps(parsed, allow_nan=False), scope, row["id"]))
+                    refreshed += 1
+        return refreshed
+
     def freeze(self, scope, signal_id, payload):
         """First confirmation wins, including random IDs; never overwrite a sent/uncertain plan."""
         encoded = json.dumps(payload, sort_keys=True, allow_nan=False)
