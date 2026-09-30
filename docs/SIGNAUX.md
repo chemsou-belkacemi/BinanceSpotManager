@@ -14,8 +14,8 @@ positions de la paire ; les ordres existants ne sont pas transférés.
 - Coin / Entry Zone / Target 1… / Stop Loss : ABK.
 - #PAIRE / Entry1 / TP1… / Stop : Al-Mahwashi, y compris `Stop: prix(1h)`.
 - Paire explicite, BUY, Entry Price, TP1… et SL : format simple.
-- `SIGNAL_VERSION=2` en première ligne : contrat TXT V2 de CryptoSignalIntelligence
-  (voir [Contrat v2](#contrat-v2-txt-cryptosignalintelligence)). Ce texte n'est jamais
+- `SIGNAL_VERSION=3` en première ligne : contrat TXT V3 de CryptoSignalIntelligence
+  (voir [Contrat CSI V3](#contrat-csi-v3-txt-cryptosignalintelligence)). Ce texte n'est jamais
   interprété par les modèles ci-dessus, et réciproquement.
 
 Les exemples BICO, ARK et LSK sont reconnus. METIS/Bitget est analysé mais bloqué,
@@ -115,10 +115,10 @@ Arborescence, créée par le worker au démarrage :
 
 ```
 data/signal_drop/
-├── incoming/     écrit par le producteur uniquement (*.json v1, *.txt v2)
+├── incoming/     écrit par le producteur uniquement (*.json v1, *.txt CSI V3)
 ├── processed/    fichiers enregistrés dans la boîte des signaux
 ├── rejected/     fichiers refusés + <nom>.reason.txt (motif)
-└── outgoing/     execution_events.jsonl : retour d'exécution des signaux v2
+└── outgoing/     execution_events.jsonl : retour d'exécution v2 des signaux CSI
 ```
 
 ### Contrat v1
@@ -146,93 +146,157 @@ les déplace dans `processed/`. Le déplacement a lieu après l'enregistrement :
 arrêt entre les deux provoque une réimportation dédupliquée (hash du texte et
 identifiant externe), jamais un second signal.
 
-### Contrat v2 (TXT CryptoSignalIntelligence)
+### Contrat CSI V3 (TXT CryptoSignalIntelligence)
 
 Le producteur publie chaque signal dans `incoming/<SIGNAL_ID>.txt` : écriture de
 `<SIGNAL_ID>.txt.tmp`, flush + fsync, puis renommage atomique. Le worker ne lit que
-les `*.txt` (jamais `*.txt.tmp`), sans enveloppe JSON. Le texte suit
-`docs/SIGNAL_FORMAT_V2.md` du producteur : `SIGNAL_VERSION=2` en première ligne,
-une clé `CLE=VALEUR` par ligne, clés en majuscules, **clé inconnue ou dupliquée =
-refus**, `NONE` pour les valeurs optionnelles absentes, décimales à point,
-horodatages `YYYY-MM-DDTHH:MM:SSZ`, prose libre après `---ANALYSIS---` (ignorée, elle
-ne peut rien changer au contrat).
+les `*.txt` (jamais `*.txt.tmp`), sans enveloppe JSON. Le texte suit le contrat V3
+du producteur (`signals/txt.py` pour l'ordre et le type des clés, `signals/schema.py`
+pour la cohérence) : `SIGNAL_VERSION=3` en première ligne, une clé `CLE=VALEUR` par
+ligne, clés en majuscules, **clé inconnue ou dupliquée = refus** (dont l'ancienne
+`INTENDED_EXECUTION_ENVIRONMENT`, remplacée par `ENVIRONMENT`), `NONE` pour les
+valeurs optionnelles absentes, décimales à point, horodatages `YYYY-MM-DDTHH:MM:SSZ`,
+prose libre après `---ANALYSIS---` (ignorée, elle ne peut rien changer au contrat).
+`SIGNAL_VERSION=2` (jamais consommée en production) est refusée avec le motif
+« version 2 retirée » ; toute autre version aussi.
 
-Le parseur `parse_signal_v2` reproduit les règles du modèle producteur et bloque
-tout écart : `INTENDED_EXECUTION_ENVIRONMENT=DEMO`, `MARKET_TYPE=SPOT`, `ACTION=BUY`,
-`ENTRY_MODE=LIMIT`, `ENTRY_2=NONE`, paire USDT/USDC, `STOP_LOSS < ENTRY_1 < TP_1 < …`
-strictement croissants, `TP_COUNT` cohérent avec les `TP_n`, `TP_WEIGHTS` strictement
-positifs sommant à 1 (tolérance 1e-9), `RR_TPn_GROSS` recalculé
-((TP_n − ENTRY_1) / (ENTRY_1 − STOP_LOSS), 3 décimales, toute autre valeur refusée),
-`DATA_AS_OF ≤ CREATED_AT ≤ VALID_FROM < EXPIRES_AT`. Un signal
-`VALIDATION_STATUS=SCHEMA_EXAMPLE_ONLY` (exemple de la spécification) est conforme
-mais refusé : il n'est jamais exécuté.
+`parse_csi_signal` (module `signal_parser.py`, bibliothèque standard seulement : le
+test de contrat du producteur `tests/test_bsm_contract.py` le charge par chemin)
+reproduit les règles du modèle producteur et bloque tout écart :
+
+- `ENVIRONMENT=DEMO`, `MARKET_TYPE=SPOT`, `ACTION=BUY`, `ENTRY_MODE=LIMIT`, paire
+  USDT/USDC, `NEWS_STATUS` parmi `OFF`, `OBSERVE`, `GATE_CLEAR` ;
+- `DATA_AS_OF ≤ DECISION_AT ≤ CREATED_AT ≤ VALID_FROM < EXPIRES_AT ≤ ENTRY_EXPIRES_AT` ;
+- `ENTRY_COUNT` de 1 à 2, `ENTRY_2=NONE` si et seulement si `ENTRY_COUNT=1`,
+  `STOP_LOSS < ENTRY_2 < ENTRY_1`, un poids `ENTRY_WEIGHTS` par entrée sommant à 1 ;
+- `STOP_LOSS < ENTRY_1 < TP_1 < …` strictement croissants, `TP_COUNT` cohérent,
+  `TP_WEIGHTS` strictement positifs sommant à 1 (tolérance 1e-9) ;
+- `RR_REFERENCE` = `ENTRY_1` (obligatoire avec une seule entrée) ou `WEIGHTED_ENTRY`
+  (prix moyen prévu : moyenne pondérée en `BASE_QUANTITY`, harmonique en
+  `QUOTE_BUDGET`) ; chaque `RR_TPn_GROSS` est **recalculé** sur ce prix de référence
+  (3 décimales), toute autre valeur est refusée ;
+- `ML_PROBABILITY`, `MODEL_ID`, `ML_TARGET_ID`, `ML_HORIZON_MINUTES`,
+  `ML_CALIBRATION_ID` tous renseignés (probabilité dans [0, 1]) ou tous `NONE` ;
+- `VALIDATION_STATUS=SCHEMA_EXAMPLE_ONLY` (exemple de la spécification) est refusé ;
+  les autres statuts sont lus (l'exécution automatique n'accepte que
+  `DEMO_ELIGIBLE`, voir plus bas).
+
+#### Politiques de sortie (identifiant ET empreinte)
+
+Le registre du producteur est copié dans `binance_spot_manager/csi_exit_policies.json`
+(un test le compare au fichier `config/exit_policies.json` de CSI quand le dossier
+voisin est présent, et recalcule chaque empreinte : sha256 du JSON canonique, clés
+triées, sans espaces, 16 premiers caractères). BSM n'accepte que les politiques qu'il
+exécute réellement, avec l'empreinte exacte ; toute autre politique, une empreinte
+différente, `ENTRY_COUNT=2` (`max_entries=1`) ou `MAX_HOLD_MINUTES` renseigné (aucune
+sortie temporelle) produit une erreur contenant `EXIT_POLICY` :
+
+| Politique | Empreinte | Règle de SL appliquée par BSM |
+|---|---|---|
+| `BSM_MARKET_TP_FIXED_SL_V1` | `26367cfb1c063bb4` | aucun changement |
+| `BSM_MARKET_TP_BREAK_EVEN_V1` | `54baf617eccc613d` | break-even (prix moyen d'achat) après chaque TP sauf le dernier |
+
+Règles communes vérifiées dans le code : TP vendu **au marché** dès que le dernier
+prix atteint le niveau (`MARKET_ON_TRIGGER`), stop `STOP_LOSS_LIMIT` avec une limite
+à 30 points de base sous le stop, aucune sortie temporelle, stop déplacé seulement
+après la confirmation du fill du TP, parts de TP appliquées à la quantité achetée,
+dernier TP = tout le restant, **tranche sous les minimums Binance reportée sur le TP
+suivant** (le TP suivant vend `1 − (1 − p)(1 − q)` du restant, soit exactement la
+part cumulée), entrée annulée à `ENTRY_EXPIRES_AT` ou au premier TP, une seule entrée.
+Le report des tranches n'est actif que pour les positions issues d'un signal CSI
+(`automation.merge_below_minimum_tp`) ; les autres stratégies gardent leur
+comportement. Écarts connus : voir la section Limites.
+
+#### Réception, deux expirations, exécution
 
 Réception (chaque cycle du worker) :
 
 - fichier accepté → boîte des signaux, source `api`, identifiant externe
   `csi:<SIGNAL_ID>`, date de référence `CREATED_AT`, puis `processed/` ;
-- `EXPIRES_AT` déjà atteint, texte non conforme, ou clé d'idempotence / `SIGNAL_ID`
-  déjà connu → `rejected/` avec `<nom>.txt.reason.txt`. Le registre
-  `signal_keys` (table de `data/signals.sqlite3`, écrite dans la même transaction que
-  le signal) garantit qu'une `IDEMPOTENCY_KEY` n'est acceptée qu'une fois par compte,
-  même sous un autre `SIGNAL_ID` ou un autre texte ; un `SIGNAL_ID` est lui aussi
-  unique. Le rejeu strict d'un fichier déjà enregistré (même identifiant, même
-  texte : arrêt avant le déplacement) retrouve la ligne existante et part dans
-  `processed/`.
+- `EXPIRES_AT` déjà atteint, texte non conforme (dont version 2, politique non
+  exécutée), ou clé d'idempotence / `SIGNAL_ID` déjà connu → `rejected/` avec
+  `<nom>.txt.reason.txt`. Le registre `signal_keys` (table de `data/signals.sqlite3`,
+  écrite dans la même transaction que le signal) garantit qu'une `IDEMPOTENCY_KEY`
+  n'est acceptée qu'une fois par compte, même sous un autre `SIGNAL_ID` ou un autre
+  texte ; un `SIGNAL_ID` est lui aussi unique. Le rejeu strict d'un fichier déjà
+  enregistré (même identifiant, même texte) retrouve la ligne existante.
+
+Deux expirations distinctes :
+
+- `EXPIRES_AT` borne l'**acceptation du message** : refus à la réception au-delà,
+  refus de l'exécution automatique au-delà, et recontrôle par le worker juste avant
+  l'envoi de l'ordre d'entrée (valeur gelée dans la commande) ;
+- `ENTRY_EXPIRES_AT` borne l'**ordre d'entrée** : c'est l'expiration locale de
+  l'entrée LIMIT, annulée sur Binance à cette heure si elle n'est pas remplie. Une
+  position déjà ouverte continue de suivre sa politique (TP et stop) sans limite de
+  durée.
 
 Exécution automatique (mêmes interrupteurs que le contrat v1) :
 
+- `VALIDATION_STATUS` autre que `DEMO_ELIGIBLE` → refus motivé (double sécurité : le
+  producteur ne publie hors shadow que du `DEMO_ELIGIBLE`) ; une confirmation
+  manuelle dans **Signaux** reste possible, avec un avertissement ;
 - la fenêtre `VALID_FROM ≤ maintenant < EXPIRES_AT` remplace l'âge maximal de
-  5 minutes : un signal pas encore valide attend sans être réclamé, un signal
-  expiré est refusé avec le motif ;
+  5 minutes : un signal pas encore valide attend sans être réclamé ;
 - l'écart `|prix / ENTRY_1 − 1| × 10⁴` doit rester ≤ `MAX_ENTRY_DEVIATION_BPS`,
   sinon refus avec l'écart mesuré ;
-- `EXIT_POLICY_ID` impose la règle de SL après chaque TP (sauf le dernier), à la
-  place du réglage `signal_sl_after_tp` : `FIXED_SL_ONE_TP_V1` et
-  `FIXED_SL_FOUR_TP_V1` → aucun changement, `BREAK_EVEN_AFTER_TP1_V1` → break-even,
-  `TRAIL_PREVIOUS_TP_V1` → TP précédent ; toute autre politique est refusée ;
+- la politique de sortie impose la règle de SL (tableau ci-dessus), à la place du
+  réglage `signal_sl_after_tp` ;
 - `TP_WEIGHTS` fixe la part initiale de chaque TP ; le moteur reçoit la part du
   restant (`w_i / (1 − Σ_{j<i} w_j) × 100`, dernier TP à 100 %). Le contrôle de
   quantité minimale des tranches utilise le plus petit poids ;
-- l'entrée LIMIT expire à `EXPIRES_AT` (et non 24 h après la préparation) ;
-  `EXPIRES_AT`, `MAX_ENTRY_DEVIATION_BPS` et `ENTRY_1` sont gelés dans la commande
-  et **recontrôlés par le worker juste avant l'achat** (en plus du prix à ±1 %, des
-  soldes, de la réserve, des frais et du risque). Une confirmation manuelle dans
-  **Signaux** passe par les mêmes gels et recontrôles.
+- `EXPIRES_AT`, `ENTRY_EXPIRES_AT`, `MAX_ENTRY_DEVIATION_BPS`, `ENTRY_1` et la
+  politique (identifiant, empreinte) sont gelés dans la commande ; expiration et
+  écart sont **recontrôlés par le worker juste avant l'achat** (en plus du prix à
+  ±1 %, des soldes, de la réserve, des frais et du risque).
 
 Une entrée expirée sans aucun achat est annulée sur Binance puis la position est
 terminée (`CANCELED_BEFORE_FILL`) : elle ne compte plus comme ouverte.
 
-### Retour d'exécution (`outgoing/execution_events.jsonl`)
+### Retour d'exécution v2 (`outgoing/execution_events.jsonl`)
 
-Pour chaque signal v2, le worker ajoute une ligne JSON par événement, UTF-8, ajout
-en fin de fichier (flush + fsync), au format `FEEDBACK_FORMAT.md` du producteur :
-`event_id`, `signal_id` (le `SIGNAL_ID`), `event_type`, `occurred_at`
-(`…Z`, à la seconde), `environment` (`DEMO`), `producer` (`BinanceSpotManager`),
-`symbol`, `quantity`, `price`, `quote_quantity`, `fee`, `fee_asset`, `order_id`,
-`target_index`, `reason` ; nombres en chaînes décimales, `null` pour les champs
-absents, `fee` et `fee_asset` toujours ensemble.
+Pour chaque signal CSI, le worker ajoute une ligne JSON par événement, UTF-8, ajout
+en fin de fichier (flush + fsync), au format du retour v2 du producteur
+(`feedback/schema.py`) : `event_id`, `signal_id` (le `SIGNAL_ID`), `event_type`,
+`occurred_at` (`…Z`, à la seconde), `environment` (`DEMO`), `producer`
+(`BinanceSpotManager`), `symbol`, `quantity`, `price`, `quote_quantity`, `fee`,
+`fee_asset`, `order_id`, `target_index`, `reason`, `exit_policy_hash` ; nombres en
+chaînes décimales, `null` pour les champs absents, `fee` et `fee_asset` ensemble.
 
 | Événement | Origine |
 |---|---|
-| `RECEIVED` | commande `signal:<ligne>` mise en file (signal non expiré, écart d'entrée contrôlé) |
-| `REJECTED` (`reason`) | refus à la réception (expiré, non conforme, doublon d'une autre clé), refus de l'exécution automatique (`auto_detail`), commande échouée/expirée/annulée, ou signal jamais traité 60 s après `EXPIRES_AT` |
+| `RECEIVED` (`exit_policy_hash`) | message accepté : commande `signal:<ligne>` mise en file ; porte l'empreinte de politique vérifiée par BSM |
+| `REJECTED` (`reason`) | refus à la réception (expiré, non conforme, version 2, politique, doublon d'une autre clé), refus de l'exécution automatique (statut, expiration, écart…), commande échouée/expirée/annulée, ou signal jamais traité 60 s après `EXPIRES_AT` |
+| `ORDER_PLACED` | ordre d'entrée accepté par Binance : `order_id`, `quantity` commandée, `price` limite |
 | `ENTRY_PARTIAL` / `ENTRY_FILLED` | achats réellement remplis, par **incrément** depuis le dernier cumul rapporté |
-| `TP_FILLED` (`target_index`) / `STOP_FILLED` | ventes réelles ; une vente au marché hors stop Binance (stop franchi, fermeture manuelle) est rapportée en `STOP_FILLED` avec un `reason` explicite |
+| `TP_FILLED` (`target_index`) / `STOP_FILLED` | ventes réelles par TP ou par le stop Binance |
+| `MARKET_EXIT_FILLED` (`reason`) | vente au marché hors stop et hors TP : stop refusé car déjà franchi puis vente au marché, ou fermeture manuelle au marché |
 | `EXPIRED` / `CANCELLED` (`reason`) | entrées terminées sans aucun achat |
 | `CLOSED` | position terminée après au moins un achat |
+
+Frais réels : pour chaque remplissage, le worker lit `GET /api/v3/myTrades?orderId=…`
+(lecture seule, Binance Demo) ; `occurred_at` prend alors l'heure de la dernière
+exécution Binance. Tant que les exécutions visibles ne couvrent pas la quantité
+remplie, l'événement est retardé (30 s au plus), puis écrit sans frais. À défaut de
+myTrades, les commissions déjà reçues avec l'ordre sont utilisées ; sinon `fee` et
+`fee_asset` sont **omis** (jamais 0). Plusieurs devises de commission sur un même
+remplissage : la devise la plus fréquente parmi les exécutions de l'ordre est écrite
+(égalité : plus grand montant, puis ordre alphabétique) ; les autres sont journalisées
+et omises, pour ne jamais écrire deux événements (donc deux quantités) pour un même
+remplissage.
 
 Les identifiants sont déterministes (`BSM-<SIGNAL_ID>-<TYPE>-<n>`) et enregistrés dans
 `data/signal_feedback.sqlite3` après l'écriture de la ligne : au pire, une reprise
 réécrit la même ligne avec le même identifiant, que le producteur ignore
 (`import-feedback` dédoublonne sur `event_id`). Chaque ligne est validée contre les
 règles du modèle producteur avant écriture ; une ligne non conforme est journalisée
-et jamais écrite. Le retour est désactivé en `DRY_RUN` (aucun ordre réel). Limites :
-les remplissages d'entrée LIMIT sont détectés par la réconciliation (toutes les
-12 boucles) — `occurred_at` est alors l'instant de détection ; les frais ne sont
-rapportés que lorsqu'un seul actif de commission est en jeu ; le SL est un
-`STOP_LOSS_LIMIT` avec une limite 0,3 % sous le stop, son prix de vente peut donc
-différer de `STOP_LOSS`.
+et jamais écrite. Le retour est désactivé en `DRY_RUN` (aucun ordre réel).
+
+Limites : un remplissage d'entrée LIMIT survenu après l'envoi n'est vu que par la
+réconciliation (toutes les 12 boucles) ; le stop n'est posé qu'après cette
+détection. Le SL est un `STOP_LOSS_LIMIT` (limite 0,3 % sous le stop) : son prix de
+vente peut différer de `STOP_LOSS`, et un stop déjà franchi est vendu au marché
+(`MARKET_EXIT_FILLED`). Un seul TP est traité par cycle.
 
 ### Réglages (Settings → Signaux)
 
@@ -255,7 +319,7 @@ différer de `STOP_LOSS`.
 Le texte passe par le même parseur strict que Telegram : un format ambigu ou hors
 Binance Spot est conservé avec son motif, sans ordre. `created_at` doit rester dans
 la fenêtre de fraîcheur de l'exécution automatique (5 minutes par défaut) ; un
-signal v2 obéit à sa propre fenêtre `VALID_FROM` / `EXPIRES_AT`. La
+signal CSI obéit à sa propre fenêtre `VALID_FROM` / `EXPIRES_AT`. La
 déduplication du signal et la clé de commande stable empêchent un second envoi.
 Le worker revalide ensuite prix, soldes, réserve, frais et risque avant toute
 écriture, uniquement sur Binance Demo. Sans exécution automatique, un signal
@@ -267,4 +331,4 @@ Suivi des clôtures de bougie, remappage Bitget/forex et apprentissage libre de
 formats. Le mode automatique actuel reste limité aux conversations Telegram
 autorisées, au dépôt direct local et à Binance Demo Spot.
 
-Tests hors réseau : `make test TESTS="tests/test_signal_sizing.py tests/test_signals.py tests/test_signals_ui.py tests/test_signal_drop.py tests/test_signal_v2.py tests/test_commands.py tests/test_automation.py"`.
+Tests hors réseau : `make test TESTS="tests/test_signal_sizing.py tests/test_signals.py tests/test_signals_ui.py tests/test_signal_drop.py tests/test_signal_csi.py tests/test_commands.py tests/test_automation.py"`.
