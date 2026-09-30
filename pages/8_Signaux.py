@@ -115,13 +115,19 @@ st.write(f"Modèle : {TEMPLATES.get(parsed.template, parsed.template)} · Direct
 st.write({"Paire": parsed.symbol, "Entrées": parsed.entries, "TP": parsed.targets,
           "SL": parsed.stop, "Mention SL": parsed.stop_timeframe or "aucune",
           "Date source (UTC)": parsed.published_at or "non vérifiée"})
-if parsed.is_v2:
-    # Contrat V2 : la fenêtre et l'écart sont recontrôlés par le worker avant l'achat.
-    st.write({"SIGNAL_ID": parsed.signal_id,
-              "Valide de (UTC)": datetime.fromtimestamp(parsed.valid_from, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-              "Expire (UTC)": datetime.fromtimestamp(parsed.expires_at, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+if parsed.is_csi:
+    # Contrat CSI : la fenêtre et l'écart sont recontrôlés par le worker avant l'achat.
+    def _utc(stamp):
+        return datetime.fromtimestamp(stamp, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    st.write({"SIGNAL_ID": parsed.signal_id, "Valide de (UTC)": _utc(parsed.valid_from),
+              "Acceptation jusqu'à (UTC)": _utc(parsed.expires_at),
+              "Entrée valable jusqu'à (UTC)": _utc(parsed.entry_expires_at),
               "Écart max à ENTRY_1 (bps)": parsed.max_entry_deviation_bps,
-              "Poids des TP": parsed.tp_weights, "Politique de sortie": parsed.exit_policy_id})
+              "Poids des TP": parsed.tp_weights,
+              "Politique de sortie": f"{parsed.exit_policy_id} ({parsed.exit_policy_hash})",
+              "Statut de validation": parsed.validation_status, "Actualités": parsed.news_status})
+    if parsed.validation_status != "DEMO_ELIGIBLE":
+        st.warning("Statut de validation autre que DEMO_ELIGIBLE : jamais exécuté automatiquement.")
 for warning in parsed.warnings:
     st.warning(warning)
 for error in parsed.errors:

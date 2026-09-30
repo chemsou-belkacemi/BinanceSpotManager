@@ -5,7 +5,7 @@ import time
 
 from .models import OrderType, PriceMode, SLMode, SLRuleAfterTP, SignalSource
 from .position_engine import PositionEngine
-from .signal_parser import ParsedSignal
+from .signal_parser import BSM_EXIT_POLICIES, BSM_EXIT_POLICY_HASHES, ParsedSignal
 from .strategy_engine import EntrySpec, SLSpec, StrategyEngine, StrategySpec, TPSpec
 
 #: Règles de SL après TP proposées pour les signaux : aucune ne demande de valeur.
@@ -16,13 +16,12 @@ SIGNAL_SL_AFTER_TP_RULES = (
     SLRuleAfterTP.PREVIOUS_TP,
 )
 
-#: Politiques de sortie du contrat V2 → règle de SL après TP du moteur existant.
-#: Toute politique absente d'ici est refusée : aucune règle n'est devinée.
-EXIT_POLICY_RULES = {
-    "FIXED_SL_ONE_TP_V1": SLRuleAfterTP.NO_CHANGE,
-    "FIXED_SL_FOUR_TP_V1": SLRuleAfterTP.NO_CHANGE,
-    "BREAK_EVEN_AFTER_TP1_V1": SLRuleAfterTP.BREAK_EVEN,
-    "TRAIL_PREVIOUS_TP_V1": SLRuleAfterTP.PREVIOUS_TP,
+#: Règle d'arrêt d'une politique CSI → règle de SL après TP du moteur existant.
+#: Seules les politiques réellement exécutées par BSM (signal_parser.BSM_EXIT_POLICIES)
+#: sont reconnues : aucune règle n'est devinée.
+STOP_RULE_SL_AFTER_TP = {
+    "FIXED": SLRuleAfterTP.NO_CHANGE,
+    "BREAK_EVEN_AFTER_TP1": SLRuleAfterTP.BREAK_EVEN,
 }
 
 
@@ -35,12 +34,14 @@ def signal_sl_after_tp(value) -> SLRuleAfterTP:
     return rule if rule in SIGNAL_SL_AFTER_TP_RULES else SLRuleAfterTP.NO_CHANGE
 
 
-def exit_policy_sl_rule(policy_id) -> SLRuleAfterTP:
-    """Règle de SL imposée par EXIT_POLICY_ID (V2) ; politique inconnue → ValueError."""
-    try:
-        return EXIT_POLICY_RULES[str(policy_id)]
-    except KeyError:
-        raise ValueError(f"EXIT_POLICY_ID inconnu : {policy_id} ; aucune règle de SL déduite") from None
+def exit_policy_sl_rule(policy_id, policy_hash=None) -> SLRuleAfterTP:
+    """Règle de SL imposée par EXIT_POLICY_ID ; politique non exécutée ou empreinte différente → ValueError."""
+    rules = BSM_EXIT_POLICIES.get(str(policy_id))
+    if rules is None:
+        raise ValueError(f"EXIT_POLICY_ID {policy_id} non exécutée par BinanceSpotManager ; aucune règle de SL déduite")
+    if policy_hash is not None and policy_hash != BSM_EXIT_POLICY_HASHES[str(policy_id)]:
+        raise ValueError(f"EXIT_POLICY_HASH {policy_hash} différent de l'empreinte exécutée pour {policy_id}")
+    return STOP_RULE_SL_AFTER_TP[rules["stop_rule"]]
 
 
 def tp_sell_percents(weights) -> list[float]:
@@ -68,11 +69,16 @@ def prepare_signal(parsed: ParsedSignal, rules, *, budget, available_quote, rese
         raise ValueError("Règle de SL après TP non disponible pour les signaux.")
     if parsed.errors:
         raise ValueError(" ; ".join(parsed.errors))
-    if parsed.is_v2:
-        # Le contrat porte sa propre politique de sortie et sa fenêtre de validité.
-        sl_after_tp = exit_policy_sl_rule(parsed.exit_policy_id)
-        if not math.isfinite(parsed.expires_at) or parsed.expires_at <= 0:
-            raise ValueError("EXPIRES_AT absent du signal V2.")
+    if parsed.signal_version not in {1, 3}:
+        raise ValueError(f"Contrat CSI version {parsed.signal_version} retiré : seul SIGNAL_VERSION=3 est exécuté.")
+    if parsed.is_csi:
+        # Le contrat porte sa propre politique de sortie et ses deux expirations.
+        sl_after_tp = exit_policy_sl_rule(parsed.exit_policy_id, parsed.exit_policy_hash)
+        if len(parsed.entries) != 1:
+            raise ValueError("EXIT_POLICY : une seule entrée exécutée par BinanceSpotManager.")
+        if not (math.isfinite(parsed.expires_at) and parsed.expires_at > 0
+                and math.isfinite(parsed.entry_expires_at) and parsed.entry_expires_at >= parsed.expires_at):
+            raise ValueError("EXPIRES_AT / ENTRY_EXPIRES_AT absents ou incohérents.")
         if not math.isfinite(parsed.max_entry_deviation_bps) or parsed.max_entry_deviation_bps < 0:
             raise ValueError("MAX_ENTRY_DEVIATION_BPS invalide.")
     if not validity_confirmed:
@@ -90,8 +96,8 @@ def prepare_signal(parsed: ParsedSignal, rules, *, budget, available_quote, rese
         raise ValueError("Prix arrondis incohérents, SL ou premier TP déjà atteint.")
     if len(set(targets)) != len(targets):
         raise ValueError("Deux TP se confondent après arrondi Binance.")
-    # Parts initiales de chaque TP : TP_WEIGHTS du contrat V2, sinon parts égales.
-    weights = [float(w) for w in parsed.tp_weights] if parsed.is_v2 else []
+    # Parts initiales de chaque TP : TP_WEIGHTS du contrat CSI, sinon parts égales.
+    weights = [float(w) for w in parsed.tp_weights] if parsed.is_csi else []
     if weights and (len(weights) != len(targets) or any(w <= 0 for w in weights)
                     or abs(sum(weights) - 1) > 1e-9):
         raise ValueError("TP_WEIGHTS incohérents avec les TP du signal.")
@@ -100,10 +106,10 @@ def prepare_signal(parsed: ParsedSignal, rules, *, budget, available_quote, rese
     spec = StrategySpec(
         symbol=parsed.symbol, capital_amount=budget, available_quote=available_quote,
         reserve_percent=reserve_percent, current_price=current_price,
-        # V2 : l'entrée expire à EXPIRES_AT (posé plus bas), pas 24 h après la préparation.
+        # CSI : l'entrée expire à ENTRY_EXPIRES_AT (posé plus bas), pas 24 h après la préparation.
         entries=[EntrySpec(order_type=OrderType.LIMIT, price_mode=PriceMode.FIXED_PRICE,
                            price=p, capital_percent=100 / len(entries),
-                           expires_hours=None if parsed.is_v2 else 24) for p in entries],
+                           expires_hours=None if parsed.is_csi else 24) for p in entries],
         # Le dernier TP clôture la position : aucune règle de SL après lui.
         take_profits=[TPSpec(price_mode=PriceMode.FIXED_PRICE, price=p, sell_percent=weights[index] * 100,
                              sl_rule_after_hit=sl_after_tp if index < len(targets) - 1 else SLRuleAfterTP.NO_CHANGE)
@@ -135,16 +141,23 @@ def prepare_signal(parsed: ParsedSignal, rules, *, budget, available_quote, rese
                "independent_position": True,
                "entry_ids": [e.entry_id for e in position.entries], "reference_price": current_price,
                "signal_confirmation_expires_at": time.time() + 120}
-    if parsed.is_v2:
-        expiry = datetime.fromtimestamp(parsed.expires_at, tz=timezone.utc)
+    if parsed.is_csi:
+        # Deux expirations : EXPIRES_AT borne l'acceptation (gelée, recontrôlée avant
+        # l'achat), ENTRY_EXPIRES_AT borne l'ordre d'entrée non rempli.
+        expiry = datetime.fromtimestamp(parsed.entry_expires_at, tz=timezone.utc)
         for entry in position.entries:
             entry.expires_at = expiry
+        # Politique : une tranche de TP sous les minimums Binance est reportée sur le TP suivant.
+        position.automation.merge_below_minimum_tp = True
         payload["position"] = position.model_dump(mode="json")
         # Gelés dans la commande : le worker les recontrôle juste avant l'achat.
         payload |= {
             "signal_expires_at": parsed.expires_at,
+            "entry_expires_at": parsed.entry_expires_at,
             "max_entry_deviation_bps": parsed.max_entry_deviation_bps,
             "signal_entry_price": parsed.entries[0],
             "signal_external_id": parsed.signal_id,
+            "exit_policy_id": parsed.exit_policy_id,
+            "exit_policy_hash": parsed.exit_policy_hash,
         }
     return plan, payload

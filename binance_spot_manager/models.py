@@ -473,6 +473,8 @@ class AutomationSettings(BSMModel):
     tp_execution_policy: TPExecutionPolicy = TPExecutionPolicy.MARKET_ON_TRIGGER
     maintain_single_sl: bool = True
     cancel_remaining_entries_on_first_tp: bool = False
+    #: Tranche de TP sous les minimums Binance reportée sur le TP suivant (politiques CSI).
+    merge_below_minimum_tp: bool = False
     paused: bool = False
     last_run_at: Optional[datetime] = None
 

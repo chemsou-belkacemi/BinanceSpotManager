@@ -121,7 +121,7 @@ class CommandProcessor:
 
     @staticmethod
     def _check_signal_window(payload, price=None):
-        """Contrat V2 gelé dans la commande : EXPIRES_AT et écart maximal à ENTRY_1.
+        """Contrat CSI gelé dans la commande : EXPIRES_AT et écart maximal à ENTRY_1.
 
         Appelé avant le contrôle de prix (expiration) puis juste avant l'envoi
         de l'entrée (expiration et écart), toujours depuis le payload gelé.
@@ -211,7 +211,7 @@ class CommandProcessor:
         if not report.accepted:
             raise RejectedCommand(" ; ".join(report.refusals))
         self._check_bnb_for_buy(position.symbol, position.quote_asset, cost, balances, prices)
-        # Dernier contrôle du contrat V2 avant tout envoi : expiration et écart de prix.
+        # Dernier contrôle du contrat CSI avant tout envoi : expiration et écart de prix.
         self._check_signal_window(payload, price)
         if existing_id:
             PositionEngine(rules).add_entries(position, entries)

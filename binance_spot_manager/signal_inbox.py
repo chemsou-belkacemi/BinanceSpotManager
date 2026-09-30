@@ -14,7 +14,7 @@ AUTO_SOURCES = frozenset({"telegram", "api"})
 
 
 class DuplicateSignal(ValueError):
-    """Clé d'idempotence ou SIGNAL_ID V2 déjà enregistré pour ce compte.
+    """Clé d'idempotence ou SIGNAL_ID CSI déjà enregistré pour ce compte.
 
     ``same_signal`` : le doublon porte le même SIGNAL_ID (rejeu d'un fichier
     déjà pris en compte) ; sinon il s'agit d'un autre identifiant réutilisant
@@ -52,7 +52,7 @@ class SignalInbox:
                 ("source_timestamp", "REAL NOT NULL DEFAULT 0"),
                 ("auto_state", "TEXT NOT NULL DEFAULT ''"),
                 ("auto_detail", "TEXT NOT NULL DEFAULT ''"),
-                # Contrat V2 : EXPIRES_AT (Unix) ; 0 pour les formats historiques.
+                # Contrat CSI : EXPIRES_AT (Unix, fin d'acceptation) ; 0 pour les formats historiques.
                 ("expires_at", "REAL NOT NULL DEFAULT 0"),
             ):
                 if name not in columns:
@@ -62,7 +62,7 @@ class SignalInbox:
             db.execute("""CREATE TABLE IF NOT EXISTS signal_origins (
                 scope TEXT NOT NULL, external_id TEXT NOT NULL, signal_id TEXT NOT NULL,
                 PRIMARY KEY(scope, external_id, signal_id))""")
-            # Registre d'idempotence du contrat V2 : une clé logique et un
+            # Registre d'idempotence du contrat CSI : une clé logique et un
             # SIGNAL_ID ne sont acceptés qu'une seule fois par compte.
             db.execute("""CREATE TABLE IF NOT EXISTS signal_keys (
                 scope TEXT NOT NULL, idempotency_key TEXT NOT NULL, signal_id TEXT NOT NULL,
@@ -114,7 +114,7 @@ class SignalInbox:
                 edited=False, source_timestamp=0.0, idempotency_key="", producer_signal_id=""):
         """Enregistre un texte ; les doublons retrouvent la même ligne.
 
-        ``idempotency_key`` / ``producer_signal_id`` (contrat V2) sont inscrits
+        ``idempotency_key`` / ``producer_signal_id`` (contrat CSI) sont inscrits
         dans ``signal_keys`` dans la même transaction : une clé ou un SIGNAL_ID
         déjà connu lève DuplicateSignal, sauf rejeu strict du même fichier
         (même identifiant, même texte) qui rend simplement la ligne existante.
@@ -196,7 +196,7 @@ class SignalInbox:
                 "SELECT * FROM signals WHERE scope=? AND id=?", (scope, signal_id)).fetchone())
 
     def signal_keys(self, scope, limit=500):
-        """Signaux V2 enregistrés (clé, SIGNAL_ID, ligne), du plus récent au plus ancien."""
+        """Signaux CSI enregistrés (clé, SIGNAL_ID, ligne), du plus récent au plus ancien."""
         with self.connect() as db:
             return [dict(row) for row in db.execute(
                 "SELECT * FROM signal_keys WHERE scope=? ORDER BY registered DESC, signal_id LIMIT ?",
@@ -253,7 +253,7 @@ class SignalInbox:
         and drop ("api") rows can ever be selected.
         PROCESSING rows are included for crash recovery even if their age window
         elapsed; an existing frozen payload or command decides their final state.
-        Rows carrying a V2 EXPIRES_AT ignore the age window: the executor applies
+        Rows carrying a CSI EXPIRES_AT ignore the age window: the executor applies
         VALID_FROM <= now < EXPIRES_AT itself and records an explicit refusal.
         """
         if isinstance(sources, dict):

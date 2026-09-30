@@ -94,9 +94,9 @@ with tabs[5]:
     st.subheader("Dépôt direct (générateur ML)")
     st.caption(
         "Le worker relit `data/signal_drop/incoming/` à chaque cycle. Un fichier JSON (v1) "
-        "passe par le même parseur strict que Telegram ; un fichier TXT `SIGNAL_VERSION=2` "
-        "(CryptoSignalIntelligence) est contrôlé par le contrat V2 (expiration, écart d'entrée, "
-        "idempotence). La réception seule ne crée aucun ordre."
+        "passe par le même parseur strict que Telegram ; un fichier TXT `SIGNAL_VERSION=3` "
+        "(CryptoSignalIntelligence) est contrôlé par le contrat CSI V3 (expirations, écart "
+        "d'entrée, politique de sortie, idempotence). La réception seule ne crée aucun ordre."
     )
     with st.form("signal_drop_preferences"):
         drop_enabled = st.toggle(

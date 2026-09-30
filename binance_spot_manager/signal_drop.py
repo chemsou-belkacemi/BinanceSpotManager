@@ -7,10 +7,11 @@ Répertoire ``DATA_DIR / "signal_drop"`` avec ``incoming/``, ``processed/`` et
 * **v1 (JSON)** : ``*.json`` = ``{"version": 1, "id": "ml-<hex>", "producer": "...",
   "created_at": <unix>, "text": "<signal structuré>", "meta": {...}}`` ; le texte
   passe par les modèles historiques du parseur ;
-* **v2 (TXT)** : ``*.txt`` = contrat ``SIGNAL_VERSION=2`` de CryptoSignalIntelligence,
+* **v2 (TXT)** : ``*.txt`` = contrat ``SIGNAL_VERSION=3`` de CryptoSignalIntelligence,
   sans enveloppe JSON (``*.txt.tmp`` en cours d'écriture : ignoré). Identifiant
   externe ``csi:<SIGNAL_ID>``, date de référence ``CREATED_AT``. Un fichier expiré
-  à la réception (``EXPIRES_AT`` atteint), mal formé ou dont la clé d'idempotence /
+  à la réception (``EXPIRES_AT`` atteint), mal formé (dont ``SIGNAL_VERSION=2``,
+  retirée), à politique de sortie non exécutée ou dont la clé d'idempotence /
   le SIGNAL_ID est déjà connu part dans ``rejected/`` avec ``<nom>.reason.txt``.
 
 Les autres extensions sont ignorées, un fichier > 64 Ko est rejeté. Un fichier
@@ -35,7 +36,7 @@ import time
 
 from .config import DATA_DIR
 from .signal_inbox import DuplicateSignal
-from .signal_parser import parse_signal_v2
+from .signal_parser import parse_csi_signal
 
 logger = logging.getLogger("bsm.signal_drop")
 
@@ -44,7 +45,7 @@ MAX_FILE_BYTES = 64 * 1024
 SCHEMA_VERSION = 1
 ID_PATTERN = re.compile(r"[A-Za-z0-9_.:-]{1,100}")
 SUBDIRECTORIES = ("incoming", "processed", "rejected", "outgoing")
-#: Préfixe de l'identifiant externe des signaux du contrat V2.
+#: Préfixe de l'identifiant externe des signaux du contrat CSI.
 V2_EXTERNAL_PREFIX = "csi:"
 
 
@@ -87,7 +88,7 @@ def parse_drop_document(data: bytes) -> dict:
 
 
 def _lenient_v2_value(text: str, key: str) -> str:
-    """Valeur brute d'une clé V2 dans un texte refusé (retour d'exécution uniquement)."""
+    """Valeur brute d'une clé CSI dans un texte refusé (retour d'exécution uniquement)."""
     match = re.search(rf"^{key}=(\S+)\s*$", text, re.M)
     return match.group(1) if match else ""
 
@@ -177,7 +178,7 @@ class SignalDropImporter:
                 continue
             try:
                 if name.endswith(".txt"):
-                    row = self._receive_v2(data)
+                    row = self._receive_csi(data)
                 else:
                     document = parse_drop_document(data)
                     row = self.inbox.receive(
@@ -201,15 +202,15 @@ class SignalDropImporter:
             logger.info("%s signal(aux) déposé(s) importé(s)", len(received))
         return received
 
-    def _receive_v2(self, data: bytes):
-        """Contrat TXT V2 : contrôle strict, expiration à la réception, idempotence."""
+    def _receive_csi(self, data: bytes):
+        """Contrat TXT V3 : contrôle strict, expiration à la réception, idempotence."""
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError:
             raise DropFileRejected("UTF-8 invalide") from None
-        parsed = parse_signal_v2(text)
+        parsed = parse_csi_signal(text)
         if parsed.errors:
-            reason = "Contrat V2 refusé : " + " ; ".join(parsed.errors)
+            reason = "Contrat CSI refusé : " + " ; ".join(parsed.errors)
             self._feedback_rejection(text, parsed, reason)
             raise DropFileRejected(reason)
         now = self.clock()

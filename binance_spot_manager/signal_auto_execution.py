@@ -140,11 +140,11 @@ class AutomaticSignalExecutor:
                          last_detail=f"Commande {existing['id']}", last_processed_at=now)
             return "QUEUED"
         valid_from = float(row["parsed"].get("valid_from") or 0)
-        if (row["parsed"].get("signal_version") == 2 and not row["parsed"].get("errors")
+        if (row["parsed"].get("signal_version") == 3 and not row["parsed"].get("errors")
                 and now < valid_from):
             # Pas encore valide : la ligne reste disponible, sans être réclamée.
             self._update(state="ARMED", last_signal_id=signal_id,
-                         last_detail=f"Signal V2 en attente de VALID_FROM ({_iso_utc(valid_from)})")
+                         last_detail=f"Signal CSI en attente de VALID_FROM ({_iso_utc(valid_from)})")
             return "WAITING"
         if not self.inbox.claim_auto(self.scope, signal_id):
             return "SKIPPED"
@@ -152,11 +152,19 @@ class AutomaticSignalExecutor:
             if row["parsed"].get("errors"):
                 raise ValueError("Signal non reconnu ou bloqué par le parseur")
             parsed = ParsedSignal(**row["parsed"])
-            if parsed.is_v2:
-                # Contrat V2 : VALID_FROM <= maintenant < EXPIRES_AT remplace la fenêtre d'âge.
+            if parsed.signal_version not in {1, 3}:
+                raise ValueError(f"Contrat CSI version {parsed.signal_version} retiré : aucune exécution")
+            if parsed.is_csi:
+                # Double sécurité : CSI ne publie hors shadow que du DEMO_ELIGIBLE.
+                if parsed.validation_status != "DEMO_ELIGIBLE":
+                    raise ValueError(
+                        f"VALIDATION_STATUS={parsed.validation_status or 'absent'} : seul DEMO_ELIGIBLE "
+                        "est exécuté automatiquement"
+                    )
+                # Contrat CSI : VALID_FROM <= maintenant < EXPIRES_AT remplace la fenêtre d'âge.
                 if now >= parsed.expires_at:
                     raise ValueError(
-                        f"Signal V2 expiré (EXPIRES_AT {_iso_utc(parsed.expires_at)}) : aucune exécution"
+                        f"Signal CSI expiré (EXPIRES_AT {_iso_utc(parsed.expires_at)}) : aucune exécution"
                     )
             else:
                 source_timestamp = float(row.get("source_timestamp") or 0)
@@ -184,14 +192,14 @@ class AutomaticSignalExecutor:
                 if suggestion.budget <= 0:
                     raise ValueError("Budget automatique nul après application de la réserve")
                 current_price = self.client.get_price(parsed.symbol)
-                if parsed.is_v2:
+                if parsed.is_csi:
                     deviation = entry_deviation_bps(current_price, parsed.entries[0])
                     if deviation > parsed.max_entry_deviation_bps:
                         raise ValueError(
                             f"Écart de prix {deviation:.1f} bps > MAX_ENTRY_DEVIATION_BPS "
                             f"{parsed.max_entry_deviation_bps:g} (prix {current_price}, ENTRY_1 {parsed.entries[0]})"
                         )
-                # V2 : prepare_signal remplace la règle enregistrée par EXIT_POLICY_ID.
+                # CSI : prepare_signal remplace la règle enregistrée par EXIT_POLICY_ID.
                 _, payload = prepare_signal(
                     parsed,
                     rules,
