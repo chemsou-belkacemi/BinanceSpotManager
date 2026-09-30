@@ -64,6 +64,13 @@ def test_auto_execution_requires_authorization_and_persists_activation(monkeypat
 
     app.get_by_key("signal_auto_execute_toggle").set_value(True).run()
     app.get_by_key("signal_auto_execute_authorization").set_value(True).run()
+    app.get_by_key("signal_auto_touch_stop_toggle").set_value(True).run()
+    app.number_input(key="signal_auto_entry_count_input").set_value(2).run()
+    app.get_by_key("signal_auto_entry_distribution_choice").set_value("CUSTOM").run()
+    app.get_by_key("signal_auto_entry_custom_input").set_value("30;70").run()
+    app.number_input(key="signal_auto_tp_count_input").set_value(2).run()
+    app.get_by_key("signal_auto_tp_distribution_choice").set_value("CUSTOM").run()
+    app.get_by_key("signal_auto_tp_custom_input").set_value("80;20").run()
     next(b for b in app.button if b.label == "Enregistrer l'exécution automatique").click().run()
 
     assert not app.exception
@@ -71,3 +78,10 @@ def test_auto_execution_requires_authorization_and_persists_activation(monkeypat
     assert saved["signal_auto_execute_enabled"] is True
     assert saved["signal_auto_execute_enabled_since"] > 0
     assert saved["signal_auto_max_age_minutes"] == 5
+    assert saved["signal_auto_touch_stop"] is True
+    assert saved["signal_auto_entry_count"] == 2
+    assert saved["signal_auto_entry_distribution"] == "CUSTOM"
+    assert saved["signal_auto_entry_custom_percentages"] == "30;70"
+    assert saved["signal_auto_tp_count"] == 2
+    assert saved["signal_auto_tp_distribution"] == "CUSTOM"
+    assert saved["signal_auto_tp_custom_percentages"] == "80;20"

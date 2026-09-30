@@ -45,6 +45,10 @@ tabs = st.tabs(["Sécurité", "Worker & risque", "Presets", "Notifications", "Di
 
 with tabs[5]:
     from binance_spot_manager.position_store import get_settings_store
+    from binance_spot_manager.signal_plan import (
+        automatic_entry_allocations,
+        automatic_tp_allocations,
+    )
     from binance_spot_manager.signal_sizing import SignalSizingPolicy
     from binance_spot_manager.telegram_signals import chat_allowlist
 
@@ -176,11 +180,86 @@ with tabs[5]:
         ),
     )
     auto_touch_stop = st.toggle(
-        "Interpréter les SL (1h/15min) comme des stops au toucher",
+        "Interpréter les SL temporisés (15min, 1h, 4h…) comme des stops au toucher",
         value=bool(signal_preferences.get("signal_auto_touch_stop", False)),
         disabled=not auto_execute,
         key="signal_auto_touch_stop_toggle",
-        help="Active cette option seulement si cette interprétation correspond à ta stratégie.",
+        help="Exemple : « Stop: 0.93 (4h) » déclenchera la protection dès que le prix touche 0.93, sans attendre la clôture 4h.",
+    )
+    auto_entry_count = st.number_input(
+        "Nombre maximal d'entrées repris du signal",
+        min_value=1,
+        max_value=20,
+        value=int(signal_preferences.get("signal_auto_entry_count", 1)),
+        disabled=not auto_execute,
+        key="signal_auto_entry_count_input",
+        help="Les premières entrées sont conservées. Avec 1, Entry2 et les suivantes sont ignorées.",
+    )
+    entry_distribution_labels = {
+        "EQUAL": "Répartition égale",
+        "CUSTOM": "Personnalisée",
+    }
+    saved_entry_distribution = str(
+        signal_preferences.get("signal_auto_entry_distribution", "EQUAL")
+    )
+    if saved_entry_distribution not in entry_distribution_labels:
+        saved_entry_distribution = "EQUAL"
+    auto_entry_distribution = st.segmented_control(
+        "Répartition du budget entre les entrées retenues",
+        list(entry_distribution_labels),
+        default=saved_entry_distribution,
+        required=True,
+        format_func=entry_distribution_labels.get,
+        key="signal_auto_entry_distribution_choice",
+        disabled=not auto_execute,
+        width="stretch",
+    )
+    auto_entry_custom = st.text_input(
+        "Pourcentages personnalisés des entrées",
+        value=str(signal_preferences.get("signal_auto_entry_custom_percentages", "100")),
+        key="signal_auto_entry_custom_input",
+        disabled=not auto_execute or auto_entry_distribution != "CUSTOM",
+        help="Une valeur par entrée retenue, séparée par ; ou /. Exemple : 30;70.",
+    )
+    auto_tp_count = st.number_input(
+        "Nombre maximal de TP repris du signal",
+        min_value=1,
+        max_value=20,
+        value=int(signal_preferences.get("signal_auto_tp_count", 2)),
+        disabled=not auto_execute,
+        key="signal_auto_tp_count_input",
+        help="Les premiers objectifs sont conservés afin de viser une sortie plus proche.",
+    )
+    distribution_labels = {
+        "EARLY": "Sécuriser tôt",
+        "EQUAL": "Répartition égale",
+        "CUSTOM": "Personnalisée",
+    }
+    saved_tp_distribution = str(
+        signal_preferences.get("signal_auto_tp_distribution", "EARLY")
+    )
+    if saved_tp_distribution not in distribution_labels:
+        saved_tp_distribution = "EARLY"
+    auto_tp_distribution = st.segmented_control(
+        "Répartition des ventes entre les TP retenus",
+        list(distribution_labels),
+        default=saved_tp_distribution,
+        required=True,
+        format_func=distribution_labels.get,
+        key="signal_auto_tp_distribution_choice",
+        disabled=not auto_execute,
+        width="stretch",
+    )
+    if auto_tp_distribution == "EARLY":
+        st.caption("Par défaut : 1 TP = 100 % · 2 TP = 70/30 · 3 TP = 50/30/20. Au-delà, la répartition reste dégressive.")
+    elif auto_tp_distribution == "EQUAL":
+        st.caption("Chaque TP reçoit la même part de la position initiale.")
+    auto_tp_custom = st.text_input(
+        "Pourcentages personnalisés des TP",
+        value=str(signal_preferences.get("signal_auto_tp_custom_percentages", "70;30")),
+        key="signal_auto_tp_custom_input",
+        disabled=not auto_execute or auto_tp_distribution != "CUSTOM",
+        help="Une valeur par TP retenu, séparée par ; ou /. Exemple : 70;30.",
     )
     auto_max_age = st.number_input(
         "Âge maximal d'un message automatique (minutes)",
@@ -218,11 +297,27 @@ with tabs[5]:
                 float(signal_preferences.get("signal_auto_execute_enabled_since") or time.time())
                 if auto_execute and auto_was_enabled else time.time() if auto_execute else 0.0
             )
+            entry_allocations = automatic_entry_allocations(
+                int(auto_entry_count), auto_entry_distribution, auto_entry_custom,
+            )
+            tp_allocations = automatic_tp_allocations(
+                int(auto_tp_count), auto_tp_distribution, auto_tp_custom,
+            )
             get_settings_store().update({
                 "signal_auto_execute_enabled": bool(auto_execute),
                 "signal_auto_execute_enabled_since": enabled_since,
                 "signal_auto_touch_stop": bool(auto_touch_stop),
                 "signal_auto_max_age_minutes": int(auto_max_age),
+                "signal_auto_entry_count": int(auto_entry_count),
+                "signal_auto_entry_distribution": auto_entry_distribution,
+                "signal_auto_entry_custom_percentages": ";".join(
+                    f"{value:g}" for value in entry_allocations
+                ),
+                "signal_auto_tp_count": int(auto_tp_count),
+                "signal_auto_tp_distribution": auto_tp_distribution,
+                "signal_auto_tp_custom_percentages": ";".join(
+                    f"{value:g}" for value in tp_allocations
+                ),
             })
             st.success(
                 "Exécution automatique activée pour les nouveaux messages Telegram."

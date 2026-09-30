@@ -7,7 +7,13 @@ import pytest
 
 from binance_spot_manager.signal_parser import parse_signal
 from binance_spot_manager.signal_inbox import SignalInbox
-from binance_spot_manager.signal_plan import prepare_signal
+from binance_spot_manager.signal_plan import (
+    automatic_entry_allocations,
+    automatic_signal_selection,
+    automatic_tp_allocations,
+    custom_signal_allocations,
+    prepare_signal,
+)
 from binance_spot_manager.telegram_signals import (
     TelegramSignalPoller,
     chat_allowlist,
@@ -200,6 +206,45 @@ def test_preparation_preserves_levels_and_converts_remaining_percentages(rules):
     assert position["automation"]["cancel_remaining_entries_on_first_tp"]
     assert position["source_groups"][0]["signal_id"] == "test"
     assert position["entries"][0]["signal_id"] == "test"
+
+
+def test_automatic_selection_and_tp_allocations_do_not_mutate_parsed_signal(rules):
+    text = SIMPLE.replace(
+        "ENTRY 1: 84000",
+        "ENTRY 1: 84000\nENTRY 2: 83000",
+    ).replace(
+        "T1: 90000",
+        "T1: 90000\nT2: 95000\nT3: 100000",
+    )
+    parsed = parse_signal(text)
+    selected = automatic_signal_selection(parsed, entry_count=1, tp_count=2)
+    assert selected.entries == [84000]
+    assert selected.targets == [90000, 95000]
+    assert parsed.entries == [84000, 83000]
+    assert parsed.targets == [90000, 95000, 100000]
+    assert automatic_tp_allocations(1) == [100]
+    assert automatic_tp_allocations(2) == [70, 30]
+    assert automatic_tp_allocations(3) == [50, 30, 20]
+    assert automatic_tp_allocations(2, "EQUAL") == [50, 50]
+    assert automatic_entry_allocations(2, "CUSTOM", "30;70") == [30, 70]
+    assert automatic_tp_allocations(3, "CUSTOM", "50/30/20") == [50, 30, 20]
+    assert custom_signal_allocations("33,3;66,7", 2, "entrées") == [33.3, 66.7]
+
+    _, payload = prepare_signal(
+        selected, rules, budget=200, available_quote=1000,
+        reserve_percent=20, current_price=84500, signal_id="policy",
+        validity_confirmed=True, touch_stop=True,
+        tp_allocations=automatic_tp_allocations(2),
+    )
+    assert [tp["sell_percent"] for tp in payload["position"]["take_profits"]] == pytest.approx([70, 100])
+
+
+@pytest.mark.parametrize("raw,count", [
+    ("70;20", 2), ("70;30", 3), ("70;-30;60", 3), ("abc;30", 2),
+])
+def test_custom_allocations_are_strictly_validated(raw, count):
+    with pytest.raises(ValueError):
+        custom_signal_allocations(raw, count, "TP")
 
 
 @pytest.mark.parametrize("overrides", [

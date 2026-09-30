@@ -6,7 +6,12 @@ import time
 
 from .models import EventType
 from .signal_parser import ParsedSignal
-from .signal_plan import prepare_signal
+from .signal_plan import (
+    automatic_entry_allocations,
+    automatic_signal_selection,
+    automatic_tp_allocations,
+    prepare_signal,
+)
 from .signal_sizing import SignalSizingPolicy, suggest_signal_budget_from_account
 
 
@@ -110,7 +115,11 @@ class AutomaticSignalExecutor:
             source_timestamp = float(row.get("source_timestamp") or 0)
             if source_timestamp <= 0 or source_timestamp < now - max_age_minutes * 60:
                 raise ValueError("Message Telegram trop ancien pour une exécution automatique")
-            parsed = ParsedSignal(**row["parsed"])
+            parsed = automatic_signal_selection(
+                ParsedSignal(**row["parsed"]),
+                entry_count=preferences.get("signal_auto_entry_count", 1),
+                tp_count=preferences.get("signal_auto_tp_count", 2),
+            )
             if row.get("payload"):
                 payload = row["payload"]
                 if float(payload.get("signal_confirmation_expires_at") or 0) <= now:
@@ -146,6 +155,16 @@ class AutomaticSignalExecutor:
                     source="telegram",
                     touch_stop=bool(preferences.get("signal_auto_touch_stop", False)),
                     validity_confirmed=True,
+                    entry_allocations=automatic_entry_allocations(
+                        len(parsed.entries),
+                        preferences.get("signal_auto_entry_distribution", "EQUAL"),
+                        preferences.get("signal_auto_entry_custom_percentages", ""),
+                    ),
+                    tp_allocations=automatic_tp_allocations(
+                        len(parsed.targets),
+                        preferences.get("signal_auto_tp_distribution", "EARLY"),
+                        preferences.get("signal_auto_tp_custom_percentages", ""),
+                    ),
                 )
                 payload = self.inbox.freeze(self.scope, signal_id, payload)
             command = self.commands.enqueue(

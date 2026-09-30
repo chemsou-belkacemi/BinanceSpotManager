@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 from datetime import datetime, timezone
 
+import pytest
+
 from binance_spot_manager.command_store import CommandStore
 from binance_spot_manager.event_store import EventStore
 from binance_spot_manager.signal_auto_execution import AutomaticSignalExecutor
@@ -117,6 +119,59 @@ def test_conditional_stop_requires_saved_touch_authorization(tmp_path):
     assert saved["auto_state"] == "REJECTED"
     assert "SL conditionnel" in saved["auto_detail"]
     assert commands.list_recent("demo") == []
+
+
+def test_saved_policy_limits_entries_and_targets_with_early_sales(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    text = (
+        "PAIR: BTC/USDT\nENTRY 1: 84000\nENTRY 2: 83000\n"
+        "T1: 90000\nT2: 95000\nT3: 100000\nSL: 80000 (4h)"
+    )
+    row = inbox.receive(
+        "demo", text, source="telegram", external_id="policy", source_timestamp=995,
+    )
+    preferences = enabled_preferences(
+        signal_auto_touch_stop=True,
+        signal_auto_entry_count=1,
+        signal_auto_tp_count=2,
+        signal_auto_tp_distribution="EARLY",
+    )
+    worker, commands = executor(tmp_path, inbox, preferences)
+
+    assert worker.process_pending() == ["QUEUED"]
+    command = commands.get_by_request_key("demo", f"signal:{row['id']}")
+    position = command["payload"]["position"]
+    assert len(position["entries"]) == 1
+    assert position["entries"][0]["resolved_price"] == 84000
+    assert [tp["target_price"] for tp in position["take_profits"]] == [90000, 95000]
+    assert [tp["sell_percent"] for tp in position["take_profits"]] == pytest.approx([70, 100])
+
+
+def test_saved_custom_policy_applies_to_entries_and_targets(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    text = (
+        "PAIR: BTC/USDT\nENTRY 1: 84000\nENTRY 2: 83000\n"
+        "T1: 90000\nT2: 95000\nSL: 80000"
+    )
+    row = inbox.receive(
+        "demo", text, source="telegram", external_id="custom", source_timestamp=995,
+    )
+    preferences = enabled_preferences(
+        signal_auto_entry_count=2,
+        signal_auto_entry_distribution="CUSTOM",
+        signal_auto_entry_custom_percentages="30;70",
+        signal_auto_tp_count=2,
+        signal_auto_tp_distribution="CUSTOM",
+        signal_auto_tp_custom_percentages="80;20",
+    )
+    worker, commands = executor(tmp_path, inbox, preferences)
+
+    assert worker.process_pending() == ["QUEUED"]
+    position = commands.get_by_request_key(
+        "demo", f"signal:{row['id']}"
+    )["payload"]["position"]
+    assert [entry["capital_percent"] for entry in position["entries"]] == [30, 70]
+    assert [tp["sell_percent"] for tp in position["take_profits"]] == pytest.approx([80, 100])
 
 
 def test_telegram_timestamp_is_authoritative_over_text_timezone(tmp_path):

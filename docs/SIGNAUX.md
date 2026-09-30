@@ -73,6 +73,12 @@ Le diagnostic est visible dans **Settings → Signaux** et dans la page **Signau
 **Settings → Signaux → Exécution automatique** permet d'autoriser explicitement
 les nouveaux messages Telegram à passer directement dans la file du worker Demo.
 Le budget fixe, proportionnel ou adaptatif configuré sur la même page est appliqué.
+La politique automatique peut limiter le signal aux premières entrées et aux
+premiers TP. Par défaut, elle conserve Entry1 et TP1/TP2, puis vend 70 % au
+premier objectif et le reliquat au second. Le mode égal reste disponible.
+Les répartitions des entrées et des TP peuvent aussi être personnalisées dans
+Settings. Il faut fournir une valeur positive par niveau retenu et un total de
+100 %, par exemple `30;70` pour deux entrées ou `70;30` pour deux TP.
 La date Telegram (ou la date d'origine Telegram d'un transfert) est la référence de
 fraîcheur et doit rester dans la fenêtre réglée, 5 minutes par défaut. Elle est exprimée
 en temps Unix et ne dépend pas du fuseau du conteneur. La date écrite dans le texte reste
