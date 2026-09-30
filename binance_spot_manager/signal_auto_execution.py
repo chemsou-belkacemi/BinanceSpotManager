@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import time
 
 from .models import EventType
@@ -21,6 +22,15 @@ def _bounded_number(values, key, default, minimum, maximum):
     except (TypeError, ValueError):
         return default
     return value if minimum <= value <= maximum else default
+
+
+def _iso_utc(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def entry_deviation_bps(price: float, entry_price: float) -> float:
+    """Écart absolu du prix courant à ENTRY_1, en points de base."""
+    return abs(price / entry_price - 1.0) * 10_000.0
 
 
 class AutomaticSignalExecutor:
@@ -129,15 +139,29 @@ class AutomaticSignalExecutor:
             self._update(state="QUEUED", last_signal_id=signal_id,
                          last_detail=f"Commande {existing['id']}", last_processed_at=now)
             return "QUEUED"
+        valid_from = float(row["parsed"].get("valid_from") or 0)
+        if (row["parsed"].get("signal_version") == 2 and not row["parsed"].get("errors")
+                and now < valid_from):
+            # Pas encore valide : la ligne reste disponible, sans être réclamée.
+            self._update(state="ARMED", last_signal_id=signal_id,
+                         last_detail=f"Signal V2 en attente de VALID_FROM ({_iso_utc(valid_from)})")
+            return "WAITING"
         if not self.inbox.claim_auto(self.scope, signal_id):
             return "SKIPPED"
         try:
             if row["parsed"].get("errors"):
                 raise ValueError("Signal non reconnu ou bloqué par le parseur")
-            source_timestamp = float(row.get("source_timestamp") or 0)
-            if source_timestamp <= 0 or source_timestamp < now - max_age_minutes * 60:
-                raise ValueError(f"{MESSAGE_LABELS[source]} trop ancien pour une exécution automatique")
             parsed = ParsedSignal(**row["parsed"])
+            if parsed.is_v2:
+                # Contrat V2 : VALID_FROM <= maintenant < EXPIRES_AT remplace la fenêtre d'âge.
+                if now >= parsed.expires_at:
+                    raise ValueError(
+                        f"Signal V2 expiré (EXPIRES_AT {_iso_utc(parsed.expires_at)}) : aucune exécution"
+                    )
+            else:
+                source_timestamp = float(row.get("source_timestamp") or 0)
+                if source_timestamp <= 0 or source_timestamp < now - max_age_minutes * 60:
+                    raise ValueError(f"{MESSAGE_LABELS[source]} trop ancien pour une exécution automatique")
             if row.get("payload"):
                 payload = row["payload"]
                 if float(payload.get("signal_confirmation_expires_at") or 0) <= now:
@@ -160,6 +184,14 @@ class AutomaticSignalExecutor:
                 if suggestion.budget <= 0:
                     raise ValueError("Budget automatique nul après application de la réserve")
                 current_price = self.client.get_price(parsed.symbol)
+                if parsed.is_v2:
+                    deviation = entry_deviation_bps(current_price, parsed.entries[0])
+                    if deviation > parsed.max_entry_deviation_bps:
+                        raise ValueError(
+                            f"Écart de prix {deviation:.1f} bps > MAX_ENTRY_DEVIATION_BPS "
+                            f"{parsed.max_entry_deviation_bps:g} (prix {current_price}, ENTRY_1 {parsed.entries[0]})"
+                        )
+                # V2 : prepare_signal remplace la règle enregistrée par EXIT_POLICY_ID.
                 _, payload = prepare_signal(
                     parsed,
                     rules,

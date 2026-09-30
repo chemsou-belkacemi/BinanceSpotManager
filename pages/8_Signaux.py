@@ -1,4 +1,5 @@
 """Text signal inbox, explicit preview and guarded Demo submission."""
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 import time
@@ -114,6 +115,13 @@ st.write(f"Modèle : {TEMPLATES.get(parsed.template, parsed.template)} · Direct
 st.write({"Paire": parsed.symbol, "Entrées": parsed.entries, "TP": parsed.targets,
           "SL": parsed.stop, "Mention SL": parsed.stop_timeframe or "aucune",
           "Date source (UTC)": parsed.published_at or "non vérifiée"})
+if parsed.is_v2:
+    # Contrat V2 : la fenêtre et l'écart sont recontrôlés par le worker avant l'achat.
+    st.write({"SIGNAL_ID": parsed.signal_id,
+              "Valide de (UTC)": datetime.fromtimestamp(parsed.valid_from, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "Expire (UTC)": datetime.fromtimestamp(parsed.expires_at, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "Écart max à ENTRY_1 (bps)": parsed.max_entry_deviation_bps,
+              "Poids des TP": parsed.tp_weights, "Politique de sortie": parsed.exit_policy_id})
 for warning in parsed.warnings:
     st.warning(warning)
 for error in parsed.errors:

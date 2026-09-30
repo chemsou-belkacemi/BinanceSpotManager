@@ -119,11 +119,34 @@ class CommandProcessor:
                 raise UncertainCommand(result.error)
             raise RejectedCommand(result.error or "Operation refusee")
 
+    @staticmethod
+    def _check_signal_window(payload, price=None):
+        """Contrat V2 gelé dans la commande : EXPIRES_AT et écart maximal à ENTRY_1.
+
+        Appelé avant le contrôle de prix (expiration) puis juste avant l'envoi
+        de l'entrée (expiration et écart), toujours depuis le payload gelé.
+        """
+        if "signal_expires_at" in payload:
+            expiry = positive(payload["signal_expires_at"], "Expiration du signal (EXPIRES_AT)")
+            if time.time() >= expiry:
+                raise RejectedCommand("Signal expiré (EXPIRES_AT atteint) ; aucun ordre envoyé")
+        if price is not None and "max_entry_deviation_bps" in payload:
+            reference = positive(payload.get("signal_entry_price"), "Prix ENTRY_1 du signal")
+            max_bps = float(payload["max_entry_deviation_bps"])
+            if not math.isfinite(max_bps) or max_bps < 0:
+                raise RejectedCommand("MAX_ENTRY_DEVIATION_BPS invalide")
+            deviation = abs(price / reference - 1) * 10_000
+            if deviation > max_bps:
+                raise RejectedCommand(
+                    f"Écart de prix {deviation:.1f} bps > {max_bps:g} bps autorisés par le signal ; aucun ordre envoyé"
+                )
+
     def _submit_position(self, payload):
         if "signal_confirmation_expires_at" in payload:
             deadline = positive(payload["signal_confirmation_expires_at"], "Expiration du signal")
             if deadline <= time.time() or deadline > time.time() + 125:
                 raise RejectedCommand("Confirmation du signal expirée ou invalide ; aucun ordre envoyé")
+        self._check_signal_window(payload)
         proposed = Position.model_validate(payload["position"])
         if proposed.environment != "DEMO" or proposed.quote_asset not in {"USDT", "USDC"}:
             raise RejectedCommand("Position Demo USDT/USDC requise")
@@ -188,6 +211,8 @@ class CommandProcessor:
         if not report.accepted:
             raise RejectedCommand(" ; ".join(report.refusals))
         self._check_bnb_for_buy(position.symbol, position.quote_asset, cost, balances, prices)
+        # Dernier contrôle du contrat V2 avant tout envoi : expiration et écart de prix.
+        self._check_signal_window(payload, price)
         if existing_id:
             PositionEngine(rules).add_entries(position, entries)
         else:
