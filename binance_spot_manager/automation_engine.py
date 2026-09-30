@@ -520,6 +520,8 @@ class AutomationEngine:
             )
 
         quantity = self._sell_quantity(position, next_tp)
+        if self._merge_below_minimum(position, next_tp, quantity, current_price, result):
+            return
         if quantity <= 0:
             next_tp.status = TPStatus.FAILED
             next_tp.last_error = "Quantite a vendre nulle ou sous minQty"
@@ -612,6 +614,52 @@ class AutomationEngine:
             return
 
         self._apply_confirmed_tp(position, next_tp, confirmed, result)
+
+    def _merge_below_minimum(
+        self, position: Position, tp: TakeProfit, quantity: float, current_price: float,
+        result: CycleResult,
+    ) -> bool:
+        """Politique MERGE_INTO_NEXT_TP : une tranche invendable est reportée sur le TP suivant.
+
+        Active seulement si la position le prévoit (signaux CSI). Vendre p puis q du
+        restant équivaut à vendre 1 − (1 − p)(1 − q) du restant en une fois : le TP
+        suivant reprend ainsi exactement la part du TP reporté. Le dernier TP n'est
+        jamais reporté (il vend le restant). Aucun ordre n'est envoyé ici.
+        """
+        if not position.automation.merge_below_minimum_tp:
+            return False
+        later = [t for t in position.sorted_tps
+                 if t.sequence_number > tp.sequence_number and t.is_pending]
+        if not later:
+            return False
+        rules = self._rules(position)
+        min_qty = float(rules.market_min_qty or rules.min_qty)
+        min_notional = float(rules.min_notional)
+        if quantity > 0 and quantity >= min_qty and (min_notional <= 0 or quantity * current_price >= min_notional):
+            return False
+        target = later[0]
+        kept, carried = tp.sell_percent / 100.0, target.sell_percent / 100.0
+        target.sell_percent = min(100.0, (1.0 - (1.0 - kept) * (1.0 - carried)) * 100.0)
+        tp.status = TPStatus.CANCELED
+        tp.last_error = (f"Tranche {quantity} sous les minimums Binance : reportee sur le TP "
+                         f"{target.sequence_number}")
+        result.actions.append(f"TP {tp.sequence_number} reporte sur le TP {target.sequence_number} (sous minimums)")
+        position.log(EventType.POSITION_UPDATED, tp.last_error, tp_id=tp.tp_id, merged_into=target.tp_id)
+        self.events.append(
+            EventType.POSITION_UPDATED,
+            f"TP {tp.sequence_number} {position.symbol} sous les minimums : reporte sur le TP {target.sequence_number}",
+            position_id=position.position_id, symbol=position.symbol,
+        )
+        if tp.sequence_number == 1 and (
+            self.config.cancel_entries_on_first_tp
+            or position.automation.cancel_remaining_entries_on_first_tp
+        ):
+            # Premier TP atteint : les entrees restantes sont annulees comme apres un fill.
+            cancels = self.execution.cancel_open_entries(position)
+            if cancels:
+                result.actions.append(f"{len(cancels)} entry(ies) restantes annulees")
+        self.position_engine.refresh_tp_estimates(position)
+        return True
 
     def _apply_confirmed_tp(
         self, position: Position, tp: TakeProfit, confirmed, result: CycleResult
