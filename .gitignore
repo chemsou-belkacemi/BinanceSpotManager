@@ -27,3 +27,4 @@ htmlcov/
 Thumbs.db
 .vscode/
 .idea/
+.claude/
