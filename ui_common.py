@@ -109,8 +109,25 @@ def sidebar_status(settings: Optional[Settings] = None) -> None:
         summary = service.summary()
         st.metric("Positions ouvertes", summary["open"])
         st.caption(f"{summary['total']} positions au total")
+        pending = signals_to_confirm(settings)
+        if pending:
+            st.warning(f"{pending} signal(aux) à confirmer · page Signaux")
 
     global_alerts()
+
+
+def signals_to_confirm(settings: Settings) -> int:
+    """Nombre de signaux « À confirmer » (lecture seule ; aucun fichier créé)."""
+    try:
+        from binance_spot_manager.command_store import account_scope
+        from binance_spot_manager.signal_inbox import SignalInbox
+
+        inbox = SignalInbox()
+        if not inbox.path.exists():
+            return 0
+        return inbox.count_review(account_scope(settings))
+    except Exception:  # noqa: BLE001 - badge indicatif seulement
+        return 0
 
 
 def alert_tone() -> bytes:

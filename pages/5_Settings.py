@@ -151,8 +151,9 @@ with tabs[5]:
     st.divider()
     st.subheader("Budget des signaux")
     st.caption(
-        "Ce réglage propose le budget lors de la simulation. Il ne supprime jamais "
-        "la vérification du signal ni la confirmation manuelle avant l'ordre Demo."
+        "Ce réglage propose le budget lors de la simulation et fixe celui de l'exécution "
+        "automatique. Un signal avec un motif de revue (risque élevé, confiance faible ou "
+        "inconnue) reste toujours à confirmer à la main."
     )
     sizing = SignalSizingPolicy.from_mapping(signal_preferences)
     mode_labels = {
@@ -225,7 +226,7 @@ with tabs[5]:
     st.subheader("Exécution automatique")
     auto_was_enabled = bool(signal_preferences.get("signal_auto_execute_enabled", False))
     auto_execute = st.toggle(
-        "Envoyer automatiquement les signaux Telegram valides au worker",
+        "Envoyer automatiquement au worker les signaux sans motif de revue (Telegram, dépôt)",
         value=auto_was_enabled,
         key="signal_auto_execute_toggle",
         help=(
@@ -320,10 +321,176 @@ with tabs[5]:
         st.caption(
             f"État : {auto_diagnostics.get('state', 'INCONNU')} · "
             f"mis en file : {auto_diagnostics.get('queued_total', 0)} · "
-            f"refusés : {auto_diagnostics.get('rejected_total', 0)}"
+            f"refusés : {auto_diagnostics.get('rejected_total', 0)} · "
+            f"à confirmer : {auto_diagnostics.get('review_total', 0)}"
         )
         if auto_diagnostics.get("last_detail"):
             st.caption(f"Dernier résultat : {auto_diagnostics['last_detail']}")
+
+    st.divider()
+    st.subheader("Confirmation manuelle ou exécution automatique")
+    from binance_spot_manager import signal_routing
+    from binance_spot_manager.event_store import EventStore
+    from binance_spot_manager.models import EventType
+
+    st.caption(
+        "Règle : confirmation manuelle obligatoire si le risque est élevé OU si la confiance est "
+        "faible ou inconnue. Un signal part automatiquement sur Binance Demo seulement si "
+        "l'exécution automatique est autorisée ci-dessus et qu'il n'a aucun motif de revue. "
+        "La confiance est une déclaration (groupe de confiance, actif validé, statut CSI "
+        "DEMO_ELIGIBLE), jamais une mesure ; le dépôt JSON v1 est toujours manuel."
+    )
+    routing_prefs = get_settings_store().load()
+    routing_limits = service.risk_limits()
+    current_policy = signal_routing.RoutingPolicy.from_mapping(routing_prefs, routing_limits)
+    allowed_chats = signal_routing.parse_chat_ids(routing_prefs.get("signal_telegram_chats", ""))
+    try:
+        auto_24h = len([c for c in service.commands.auto_commands(account_scope(settings), since=time.time() - 86_400)
+                        if c["state"] not in signal_routing.NO_ORDER_STATES])
+    except Exception:  # noqa: BLE001 - affichage seulement
+        auto_24h = None
+    with st.container(border=True):
+        st.markdown("**État de préparation**")
+        manual_mode = settings.run_mode.value == "DEMO_MANUAL" and current_policy.honor_demo_manual
+        st.markdown(
+            f"- Mode : `{settings.run_mode.value}`"
+            + (" — tout signal demande une confirmation manuelle" if manual_mode else "") + "\n"
+            f"- Autorisation datée : {'oui' if routing_prefs.get('signal_auto_execute_enabled_since') else 'non'}\n"
+            f"- Groupes Telegram de confiance : {len(current_policy.trusted_chats)}\n"
+            f"- Actifs validés pour l'automatique : {len(current_policy.base_assets)}\n"
+            f"- Coupe-circuits : {auto_24h if auto_24h is not None else '?'} ordre(s) automatique(s) sur 24 h "
+            f"(maximum {current_policy.max_auto_per_24h})"
+            + (f" · réarmé le {time.strftime('%Y-%m-%d %H:%M', time.gmtime(current_policy.breaker_reset_at))} UTC"
+               if current_policy.breaker_reset_at else "")
+        )
+    if routing_prefs.get("signal_auto_execute_enabled") and (
+            not current_policy.trusted_chats or not current_policy.base_assets):
+        st.warning("Exécution automatique active, mais aucun groupe de confiance ou aucun actif validé : "
+                   "tous les signaux Telegram passeront « À confirmer ».")
+
+    trusted_input = st.text_input(
+        "Groupes Telegram de confiance (identifiants numériques, parmi les conversations autorisées)",
+        value=", ".join(str(chat) for chat in sorted(signal_routing.parse_chat_ids(
+            routing_prefs.get("signal_auto_trusted_chats", ())))),
+        key="signal_trusted_chats_input",
+        help="Déclaration du propriétaire, pas une mesure : un groupe de confiance peut envoyer de mauvais signaux.",
+    )
+    assets_input = st.text_input(
+        "Actifs validés pour l'exécution automatique (liste vide = aucun actif autorisé)",
+        value=", ".join(current_policy.base_assets),
+        key="signal_base_assets_input",
+    )
+    st.caption("Pré-rempli avec les 16 actifs de base de CryptoSignalIntelligence, à valider (univers halal). "
+               "Un actif hors liste passe « À confirmer » avec un avertissement. Les signaux CSI ne sont pas "
+               "contrôlés contre cette liste : leur univers est filtré en amont.")
+    honor_input = st.toggle("DEMO_MANUAL : tout signal demande une confirmation manuelle",
+                            value=current_policy.honor_demo_manual, key="signal_honor_demo_manual_toggle")
+    notify_input = st.toggle("Notifier les signaux à confirmer (Telegram/e-mail, sans aucune ligne de prix)",
+                             value=current_policy.notify_review, key="signal_review_notify_toggle")
+    with st.expander("Seuils de revue (valeurs prudentes par défaut)"):
+        max_risk_input = st.number_input("Risque au stop frais compris (% du portefeuille, plafonné à la limite dure)",
+                                         min_value=0.01, max_value=100.0, value=float(current_policy.max_risk_percent),
+                                         step=0.1, key="signal_review_max_risk_input")
+        share_input = st.number_input("Part du risque total maximum (0,05 à 1)", min_value=0.05, max_value=1.0,
+                                      value=float(current_policy.total_risk_share), step=0.05,
+                                      key="signal_review_total_share_input")
+        min_stop_input = st.number_input("Distance minimale du stop (%)", min_value=0.0, max_value=50.0,
+                                         value=float(current_policy.min_stop_percent), step=0.1,
+                                         key="signal_review_min_stop_input")
+        max_stop_input = st.number_input("Distance maximale du stop (%)", min_value=0.1, max_value=100.0,
+                                         value=float(current_policy.max_stop_percent), step=0.5,
+                                         key="signal_review_max_stop_input")
+        gap_input = st.number_input("Entrée déjà dépassée (%)", min_value=0.0, max_value=10.0,
+                                    value=float(current_policy.marketable_gap_percent), step=0.1,
+                                    key="signal_review_gap_input")
+        same_asset_input = st.toggle("Revue si le même actif est déjà ouvert ou en file",
+                                     value=current_policy.same_asset_review, key="signal_review_same_asset_toggle")
+        volatility_input = st.toggle("Revue si VOLATILITY_REGIME=HIGH (CSI)",
+                                     value=current_policy.csi_high_volatility_review,
+                                     key="signal_review_volatility_toggle")
+        max_auto_input = st.number_input("Ordres automatiques au plus sur 24 h", min_value=0, max_value=100,
+                                         value=int(current_policy.max_auto_per_24h), step=1,
+                                         key="signal_auto_max_per_24h_input")
+        day_loss_input = st.number_input("Perte réalisée du jour déclenchant la revue (%)", min_value=0.01,
+                                         max_value=100.0, value=float(current_policy.daily_loss_percent), step=0.5,
+                                         key="signal_auto_daily_loss_input")
+        streak_input = st.number_input("Pertes automatiques consécutives avant réarmement", min_value=1, max_value=50,
+                                       value=int(current_policy.loss_streak), step=1,
+                                       key="signal_auto_loss_streak_input")
+    widen_authorization = st.checkbox("J'autorise l'élargissement de l'exécution automatique",
+                                      key="signal_routing_widen_authorization",
+                                      help="Obligatoire pour tout changement qui ne peut qu'augmenter l'automatique.")
+
+    def save_routing(update: dict, message: str) -> None:
+        new_policy = signal_routing.RoutingPolicy.from_mapping(routing_prefs | update, routing_limits)
+        widened = current_policy.widened_by(new_policy)
+        if widened and not widen_authorization:
+            raise ValueError("Élargissement de l'automatique (" + ", ".join(widened)
+                             + ") : cocher l'autorisation explicite.")
+        get_settings_store().update(update)
+        EventStore().append(EventType.SIGNAL_ROUTING_CHANGED, message, level="INFO",
+                            changes=sorted(update), widened=widened)
+        st.success("Routage enregistré. Le worker le relit à chaque cycle ; les signaux déjà décidés ne sont pas re-routés.")
+
+    routing_buttons = st.columns(3)
+    if routing_buttons[0].button("Enregistrer le routage des signaux", type="primary"):
+        try:
+            trusted_tokens = [token for token in trusted_input.replace(";", ",").split(",") if token.strip()]
+            trusted = signal_routing.parse_chat_ids(trusted_input)
+            if len(trusted) != len(trusted_tokens):
+                raise ValueError("Groupes de confiance : identifiants numériques uniquement.")
+            if not trusted <= allowed_chats:
+                raise ValueError("Groupes de confiance hors des conversations autorisées à la réception : "
+                                 + ", ".join(str(chat) for chat in sorted(trusted - allowed_chats)))
+            asset_tokens = [token for token in assets_input.replace(";", ",").split(",") if token.strip()]
+            assets = signal_routing.parse_assets(assets_input)
+            if len(assets) != len({token.strip().upper() for token in asset_tokens}):
+                raise ValueError("Actifs : codes en lettres et chiffres uniquement (ex. BTC, ETH).")
+            if float(min_stop_input) >= float(max_stop_input):
+                raise ValueError("La distance minimale du stop doit être inférieure à la maximale.")
+            save_routing({
+                "signal_auto_trusted_chats": sorted(trusted),
+                "signal_auto_base_assets": list(assets),
+                "signal_route_honor_demo_manual": bool(honor_input),
+                "signal_review_notify": bool(notify_input),
+                "signal_review_max_risk_percent": float(max_risk_input),
+                "signal_review_total_risk_share": float(share_input),
+                "signal_review_min_stop_percent": float(min_stop_input),
+                "signal_review_max_stop_percent": float(max_stop_input),
+                "signal_review_marketable_gap_percent": float(gap_input),
+                "signal_review_same_asset": bool(same_asset_input),
+                "signal_review_csi_high_volatility": bool(volatility_input),
+                "signal_auto_max_per_24h": int(max_auto_input),
+                "signal_auto_daily_loss_percent": float(day_loss_input),
+                "signal_auto_loss_streak": int(streak_input),
+            }, "Routage des signaux modifié")
+        except ValueError as exc:
+            st.error(str(exc))
+    if routing_buttons[1].button("Rétablir les valeurs prudentes"):
+        defaults = signal_routing.RoutingPolicy()
+        try:
+            save_routing({
+                "signal_review_max_risk_percent": defaults.max_risk_percent,
+                "signal_review_total_risk_share": defaults.total_risk_share,
+                "signal_review_min_stop_percent": defaults.min_stop_percent,
+                "signal_review_max_stop_percent": defaults.max_stop_percent,
+                "signal_review_marketable_gap_percent": defaults.marketable_gap_percent,
+                "signal_review_same_asset": True, "signal_review_csi_high_volatility": True,
+                "signal_auto_max_per_24h": defaults.max_auto_per_24h,
+                "signal_auto_daily_loss_percent": defaults.daily_loss_percent,
+                "signal_auto_loss_streak": defaults.loss_streak,
+                "signal_route_honor_demo_manual": True,
+            }, "Seuils de revue des signaux rétablis")
+        except ValueError as exc:
+            st.error(str(exc))
+    rearm_confirmation = st.checkbox("Je confirme le réarmement des coupe-circuits", key="signal_rearm_confirmation")
+    if routing_buttons[2].button("Réarmer l'automatique", disabled=not rearm_confirmation):
+        stamp = time.time()
+        get_settings_store().update({"signal_auto_breaker_reset_at": stamp})
+        EventStore().append(EventType.SIGNAL_ROUTING_CHANGED, "Coupe-circuits de l'automatique réarmés",
+                            level="INFO", changes=["signal_auto_breaker_reset_at"])
+        st.success("Coupe-circuits réarmés : seules les pertes automatiques suivantes comptent.")
+
 
 # ==========================================================================
 # Sécurité
@@ -705,7 +872,7 @@ with tabs[3]:
     st.subheader("Événements notifiables")
     st.markdown(
         """
-Signal reçu · Signal rejeté · Entry créée · Entry remplie · Entry partielle ·
+Signal à confirmer (désactivé par défaut, Settings → Signaux) · Entry créée · Entry remplie · Entry partielle ·
 TP atteint · TP exécuté · SL déplacé · SL exécuté · Position terminée ·
 Erreur Binance · Worker offline · Capital insuffisant · Désynchronisation
 """
