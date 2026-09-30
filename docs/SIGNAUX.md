@@ -116,15 +116,17 @@ espérance nette en R avec son intervalle) et bilan du groupe qui a émis le sig
 REFUSE, DEFAVORABLE, INDETERMINE, FAVORABLE. Un taux de base n'est jamais la probabilité que ce
 signal réussisse ; INDETERMINE signifie « pas assez d'éléments », pas « 50/50 ».
 
-- **Page Avis CSI** : coller un signal, lire le verdict expliqué, bilan des groupes Telegram,
+- **Page CSI** : bouton *Vérifier* (signal collé → avis en une phrase, détail sur demande) ; liste des
+  **signaux trouvés par CSI** (stratégies non validées) avec un bouton *Tester en Demo* qui les ajoute à la
+  page Signaux, où le budget se choisit et se confirme à la main ; en détail : bilan des groupes Telegram,
   verdicts des stratégies de CSI, dernières évaluations, état de la surveillance.
 - **Page Signaux** : bouton « Demander l'avis de CSI » sur chaque signal ; l'avis est conservé
   avec le signal (`csi_verdict`, `csi_detail`).
-- **Paires hors de l'univers de CSI** : un signal **collé à la main** (page Avis CSI, ou page Signaux
+- **Paires hors de l'univers de CSI** : un signal **collé à la main** (page CSI, ou page Signaux
   avec un texte collé) vaut validation de sa paire par le propriétaire : CSI l'ajoute définitivement,
   répond `EN_ATTENTE` le temps de télécharger l'historique (quelques minutes), puis l'avis normal
   arrive au clic suivant. Un signal **reçu par Telegram** n'ajoute jamais de paire (`REFUSE`, retenu) :
-  le coller sur la page Avis CSI pour valider la paire.
+  le coller sur la page CSI pour valider la paire.
 - **Settings → Signaux → Avis CSI avant exécution automatique** : le worker demande l'avis de CSI
   avant de mettre en file un signal Telegram automatique. REFUSE et DEFAVORABLE sont **retenus**
   (état `REJECTED`, motif « Avis CSI … exécution automatique retenue ») : la confirmation manuelle

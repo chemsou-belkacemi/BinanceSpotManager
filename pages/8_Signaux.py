@@ -152,8 +152,8 @@ with st.container(border=True):
         except ValueError as exc:
             st.warning(str(exc))
     st.caption(
-        "Un taux de base historique n'est pas la probabilité que ce signal réussisse. Détail : page Avis CSI. "
-        "Paire hors univers sur un signal Telegram : le coller sur la page Avis CSI vaut validation de la paire."
+        "Un taux de base historique n'est pas la probabilité que ce signal réussisse. Détail : page CSI. "
+        "Paire hors univers sur un signal Telegram : le coller sur la page CSI vaut validation de la paire."
     )
 
 if row["payload"]:

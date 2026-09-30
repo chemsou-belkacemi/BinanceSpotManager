@@ -135,6 +135,10 @@ class CsiClient:
     def recent(self, limit: int = 20) -> list[dict]:
         return list(self._request("GET", "/signals/recent", params={"limit": int(limit)}).get("signals") or [])
 
+    def generated(self, limit: int = 20) -> list[dict]:
+        """Derniers signaux trouvés par les stratégies de CSI, avec `bsm_text` (format lu par la page Signaux)."""
+        return list(self._request("GET", "/signals/generated", params={"limit": int(limit)}).get("signals") or [])
+
     # --- évaluation --------------------------------------------------------------------------
     def evaluate(self, text: str, *, source: str, record: bool = True, user_validated: bool = False) -> CsiOpinion:
         """`user_validated` : signal soumis à la main par le propriétaire. Sa validation ajoute une paire

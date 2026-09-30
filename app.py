@@ -43,15 +43,15 @@ sidebar_status(settings)
 
 st.markdown(
     """
-Ouvre une page dans le menu de gauche.
+### Par où commencer
 
-**New Trade** construit une position complète (Entries, TP, SL) avec simulation
-avant lancement. **Investissement** permet un achat simple sans sortie ou un
-achat avec TP seul / SL seul. **Dashboard** suit le worker, le portefeuille
-multidevise et les ordres réels. **Positions** détaille chaque position,
-**History** conserve les positions terminées, **Settings** regroupe les réglages.
-**Signaux** analyse un texte collé ou importé de Telegram, puis prépare un plan
-Demo à confirmer avant transmission au worker.
+1. **CSI** : colle un signal et clique sur *Vérifier* pour avoir l'avis de CSI en une phrase.
+   Tu y vois aussi les signaux que CSI a trouvés lui-même, avec un bouton *Tester en Demo*.
+2. **Signaux** : pour exécuter un signal sur Binance Demo (budget, simulation, confirmation).
+3. **Dashboard** et **Positions** : suivre ce qui tourne.
+
+Les autres pages : **New Trade** (position construite à la main), **Investissement** (achat simple),
+**History** (positions terminées), **Operations** (demandes envoyées au worker), **Settings** (réglages).
 """
 )
 

@@ -353,7 +353,7 @@ with tabs[5]:
     st.caption(
         "CryptoSignalIntelligence évalue chaque signal Telegram (vetos, taux de base historique de la "
         "même géométrie, bilan du groupe). Il ne place aucun ordre : il peut seulement RETENIR un signal "
-        "automatique pour confirmation manuelle, jamais l'envoyer tout seul. Détail : page Avis CSI."
+        "automatique pour confirmation manuelle, jamais l'envoyer tout seul. Détail : page CSI."
     )
     csi_policy = GatePolicy.from_mapping(signal_preferences)
     with st.form("signal_csi_gate_preferences"):
