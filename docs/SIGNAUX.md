@@ -216,8 +216,20 @@ comportement.
 
 #### Réception, deux expirations, exécution
 
+**Canal unique.** Un texte CSI (première ligne `SIGNAL_VERSION=`) n'est accepté QUE
+par le dépôt TXT : `SignalInbox.receive` le refuse s'il arrive par Telegram (message
+ignoré, offset avancé), dans un JSON v1 (fichier rejeté) ou par collage dans la page
+**Signaux** (message d'erreur). Pour tout texte CSI, la clé d'idempotence et le
+`SIGNAL_ID` sont lus dans le texte lui-même et contrôlés dans `signal_keys`, quel que
+soit l'appelant. En double sécurité, l'exécution automatique refuse une ligne CSI
+dont l'identifiant externe ne commence pas par `csi:`.
+
 Réception (chaque cycle du worker) :
 
+- `SIGNAL_ID` déjà reçu (accepté ou refusé) : contrôlé AVANT tout autre refus. Rejeu
+  strict du même fichier → ligne existante, `processed/` ; tout autre fichier portant
+  cet identifiant (modifié, invalide, expiré) → `rejected/` avec le motif « déjà
+  reçu », **sans aucun événement de retour** : le suivi du signal accepté continue ;
 - fichier accepté → boîte des signaux, source `api`, identifiant externe
   `csi:<SIGNAL_ID>`, date de référence `CREATED_AT`, puis `processed/` ;
 - `EXPIRES_AT` déjà atteint, texte non conforme (dont version 2, politique non
@@ -232,7 +244,8 @@ Deux expirations distinctes :
 
 - `EXPIRES_AT` borne l'**acceptation du message** : refus à la réception au-delà,
   refus de l'exécution automatique au-delà, et recontrôle par le worker juste avant
-  l'envoi de l'ordre d'entrée (valeur gelée dans la commande) ;
+  l'envoi de l'ordre d'entrée (valeur gelée dans la commande, comme `VALID_FROM`, lui
+  aussi recontrôlé) ;
 - `ENTRY_EXPIRES_AT` borne l'**ordre d'entrée** : c'est l'expiration locale de
   l'entrée LIMIT, annulée sur Binance à cette heure si elle n'est pas remplie. Une
   position déjà ouverte continue de suivre sa politique (TP et stop) sans limite de
@@ -258,7 +271,10 @@ Exécution automatique (mêmes interrupteurs que le contrat v1) :
   ±1 %, des soldes, de la réserve, des frais et du risque).
 
 Une entrée expirée sans aucun achat est annulée sur Binance puis la position est
-terminée (`CANCELED_BEFORE_FILL`) : elle ne compte plus comme ouverte.
+terminée (`CANCELED_BEFORE_FILL`) : elle ne compte plus comme ouverte. Un TP atteint
+avant tout achat n'est ni vendu, ni reporté, ni mis en échec : le premier TP atteint
+annule les entrées encore ouvertes (`CANCEL_AT_ENTRY_EXPIRY_OR_FIRST_TP`), puis la
+position sans achat est terminée.
 
 ### Retour d'exécution v2 (`outgoing/execution_events.jsonl`)
 
@@ -292,10 +308,15 @@ remplissage : la devise la plus fréquente parmi les exécutions de l'ordre est 
 et omises, pour ne jamais écrire deux événements (donc deux quantités) pour un même
 remplissage.
 
-Les identifiants sont déterministes (`BSM-<SIGNAL_ID>-<TYPE>-<n>`) et enregistrés dans
-`data/signal_feedback.sqlite3` après l'écriture de la ligne : au pire, une reprise
-réécrit la même ligne avec le même identifiant, que le producteur ignore
-(`import-feedback` dédoublonne sur `event_id`). Chaque ligne est validée contre les
+Les identifiants (`BSM-<SIGNAL_ID>-<TYPE>-<n>`) sont fixés avec la ligne complète,
+notée comme **intention** dans `data/signal_feedback.sqlite3` AVANT l'écriture ;
+après l'écriture, l'événement et le cumul rapporté du remplissage sont validés dans
+UNE seule transaction. Un arrêt, ou un fichier verrouillé, laisse l'intention en
+attente : elle est réécrite telle quelle (même identifiant, même contenu) au cycle
+suivant, que le producteur dédoublonne (`import-feedback` sur `event_id`) ; un
+incrément n'est donc jamais compté deux fois et un refus n'est jamais perdu. Une
+dernière ligne tronquée n'est jamais prolongée (retour à la ligne ajouté d'abord).
+Chaque signal est synchronisé isolément : une erreur sur l'un n'arrête pas les autres. Chaque ligne est validée contre les
 règles du modèle producteur avant écriture ; une ligne non conforme est journalisée
 et jamais écrite. Le retour est désactivé en `DRY_RUN` (aucun ordre réel).
 
