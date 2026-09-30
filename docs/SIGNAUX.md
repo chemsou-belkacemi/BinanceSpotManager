@@ -10,16 +10,28 @@ positions de la paire ; les ordres existants ne sont pas transférés.
 
 ## Formats
 
-- PAIR / ENTRY 1, ENTRY 2 / T1… / SL : Suhaib, Cleo.
-- Coin / Entry Zone / Target 1… / Stop Loss : ABK.
-- #PAIRE / Entry1 / TP1… / Stop : Al-Mahwashi, y compris `Stop: prix(1h)`.
-- Paire explicite, BUY, Entry Price, TP1… et SL : format simple.
+Le parseur ne dépend pas d'un fournisseur : il lit les **étiquettes**, quel que soit l'habillage
+(emojis, lignes de séparation, numérotation `1)`/`1️⃣`, pourcentages, flèches, `|`, plusieurs
+étiquettes sur une seule ligne).
 
-Les exemples BICO, ARK et LSK sont reconnus. METIS/Bitget est analysé mais bloqué,
-sans substitution de plateforme. XAU/USD, XRPUSD short, indices NIFTY,
-shorts/levier GWEI et GOLD/XAUT sont hors périmètre. Un message par import.
-Les modèles sont sélectionnables ; ajouter un nouveau format nécessite une
-extension testée du parseur, pas une expression arbitraire lancée par le message.
+| Élément | Étiquettes reconnues |
+|---|---|
+| Paire | `PAIR`, `COIN`, `SYMBOL`, ou n'importe où : `SAGA/USDT`, `#DOGE/USDT`, `LSKUSDT`, `ARB-USDT` |
+| Entrées | `ENTRY`, `ENTRY 1`, `ENTRY ZONE`, `ENTRIES`, `BUY`, `BUY ZONE`, `ACHAT` — prix, plage `a - b` ou liste |
+| Objectifs | `TP`, `TP1`, `T1`, `TARGET 1`, `TARGETS`, `TAKE PROFIT 1`, `OBJECTIF` |
+| Stop | `SL`, `STOP`, `STOP LOSS`, `STOPLOSS`, `INVALIDATION` ; `(15m)`, `(4H close)`, `daily close` = mention de clôture |
+| Plateforme | `PLATFORM`, `EXCHANGE` |
+
+Un en-tête sans prix (`TARGETS:`, `ENTRY ZONE:`) peut être suivi de prix seuls, un par ligne.
+Direction : achat, sauf `SHORT`, `SELL` en tête, levier, futures ou marge (refusés) ; un short non
+annoncé est de toute façon refusé par la règle SL < entrées < TP.
+
+**Refusé plutôt que deviné** : deux prix pour un TP ou un SL, `or market`, `above`/`breakout`,
+`150K`, `160+`, virgule (`140,5`, `84,000`), prix négatif, deux paires, paire sans USDT/USDC,
+plateforme autre que Binance, TP non strictement croissants (y compris publiés à l'envers),
+numérotation discontinue. Le motif affiché cite la ligne en cause. XAU/USD, indices NIFTY et
+shorts restent hors périmètre. Un message par import. Le choix d'un modèle précis reste possible ;
+un nouveau cas non lu se corrige par une extension testée du parseur (`tests/test_signal_formats.py`).
 Après l'ajout d'un format, **Réanalyser ce signal** actualise l'analyse du texte
 déjà enregistré. Ce bouton conserve le même signal et ne crée aucune commande ;
 les messages édités et les signaux déjà confirmés ne peuvent pas être réanalysés.

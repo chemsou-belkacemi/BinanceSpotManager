@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from binance_spot_manager.signal_parser import parse_signal
+from binance_spot_manager.signal_parser import content_hash, parse_signal
 from binance_spot_manager.signal_inbox import SignalInbox
 from binance_spot_manager.signal_plan import (
     automatic_entry_allocations,
@@ -135,6 +135,66 @@ def test_three_supported_examples(text, symbol, entries, targets, stop, timefram
     assert result.targets == targets
     assert result.stop == stop
     assert result.stop_timeframe == timeframe
+
+
+ABO_YASEEIN = """ABO YASEEIN
+──────────────────────
+✨ بسم الله توكلت على الله ✨
+──────────────────────
+💎 PAIR: MOVR/USDT
+🔶 ENTRY ZONE:
+✨ENTRY 1: 1.135
+✨ENTRY 2: 1.11861
+──────────────────────
+🎯 TARGETS:
+1️⃣ T1: 1.15602 📉 (1.35%)
+──────────────────────
+2️⃣ T2: 1.17221 📉 (2.77%)
+──────────────────────
+3️⃣ T3: 1.338 📉 (17.31%)
+──────────────────────
+🛑 SL: 1.1092 (30m) (1.81%)
+──────────────────────
+📅Date: Tuesday - 2026-09-29
+
+🟠 Platform: Binance
+──────────────────────
+☪️ الحكم الشرعي: مباح ✅"""
+HARMONIC = """📈 HARMONIC TRADE DETECTED
+Suhaib AlMashhadani Harmonic Indicator
+──────────────────────
+💎 PAIR: SAGA/USDT
+🔶 ENTRY ZONE:
+✨ENTRY 1 ✅: 0.02542
+✨ENTRY 2 ✅: 0.024803
+──────────────────────
+🎯 TARGETS:
+1️⃣ T1: 0.025907 📉 (1.92%)
+──────────────────────
+2️⃣ T2: 0.026407 📉 (3.88%)
+──────────────────────
+🛑 SL: 0.02446 (15m) (2.59%)
+──────────────────────
+📅Date: Wednesday - 2026-09-30
+⏰IndicatorTime :- 23:44 GMT+3
+──────────────────────
+🟠 Platform: Binance"""
+
+
+@pytest.mark.parametrize("text,symbol,entries,targets,stop,timeframe", [
+    (ABO_YASEEIN, "MOVRUSDT", [1.135, 1.11861], [1.15602, 1.17221, 1.338], 1.1092, "30m"),
+    (HARMONIC, "SAGAUSDT", [.02542, .024803], [.025907, .026407], .02446, "15m"),
+])
+def test_decorative_emoji_between_label_price_and_percentage_are_ignored(text, symbol, entries, targets, stop, timeframe):
+    result = parse_signal(text)
+    assert result.errors == []
+    assert (result.symbol, result.entries, result.targets) == (symbol, entries, targets)
+    assert (result.stop, result.stop_timeframe) == (stop, timeframe)
+
+
+def test_emoji_never_joins_two_numbers_and_does_not_change_the_dedup_hash():
+    assert parse_signal(SIMPLE.replace("90000", "90📉000")).errors
+    assert content_hash(ABO_YASEEIN) != content_hash(ABO_YASEEIN.replace(" 📉", ""))
 
 
 @pytest.mark.parametrize("text,reason", [
