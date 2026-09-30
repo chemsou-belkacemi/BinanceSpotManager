@@ -107,6 +107,33 @@ annuler les ordres déjà transmis. Elles demandent une vérification manuelle.
 Références : [Bot API getUpdates](https://core.telegram.org/bots/api#getupdates),
 [messages accessibles à un bot](https://core.telegram.org/bots/faq#what-messages-will-my-bot-get).
 
+## Avis CSI (CryptoSignalIntelligence)
+
+CryptoSignalIntelligence (projet voisin, « le cerveau ») évalue un signal sans jamais passer
+d'ordre : vetos déterministes (signal déjà mort, paire hors univers, stop absurde…), contexte de
+marché, **taux de base historique** de la même géométrie dans le même régime (TP1 avant stop,
+espérance nette en R avec son intervalle) et bilan du groupe qui a émis le signal. Verdicts :
+REFUSE, DEFAVORABLE, INDETERMINE, FAVORABLE. Un taux de base n'est jamais la probabilité que ce
+signal réussisse ; INDETERMINE signifie « pas assez d'éléments », pas « 50/50 ».
+
+- **Page Avis CSI** : coller un signal, lire le verdict expliqué, bilan des groupes Telegram,
+  verdicts des stratégies de CSI, dernières évaluations, état de la surveillance.
+- **Page Signaux** : bouton « Demander l'avis de CSI » sur chaque signal ; l'avis est conservé
+  avec le signal (`csi_verdict`, `csi_detail`).
+- **Settings → Signaux → Avis CSI avant exécution automatique** : le worker demande l'avis de CSI
+  avant de mettre en file un signal Telegram automatique. REFUSE et DEFAVORABLE sont **retenus**
+  (état `REJECTED`, motif « Avis CSI … exécution automatique retenue ») : la confirmation manuelle
+  reste possible sur la page Signaux. INDETERMINE peut aussi être retenu (option). CSI injoignable :
+  retenu par défaut, ou exécuté sans avis si le réglage le permet. L'avis ne rend **jamais** un
+  signal automatique : il ne peut que retenir. Les noms des groupes (`identifiant=nom`) servent au
+  bilan par source chez CSI ; sans nom, la source est « telegram <identifiant> ».
+
+Technique : `binance_spot_manager/csi_client.py` (client HTTP, `GatePolicy`), API locale de CSI
+(`docs/API.md` de CryptoSignalIntelligence). Variables d'environnement : `BSM_CSI_API_URL`
+(défaut `http://csi-api:8503` sous Compose, via le réseau Docker partagé `csi-bridge` créé par
+`make network`) et `CSI_API_TOKEN` (facultatif, identique côté CSI). Les tests hors ligne n'ont
+pas besoin de CSI : une panne est simulée, jamais un appel réseau.
+
 ## Non activé dans cette version
 
 Suivi des clôtures de bougie, remappage Bitget/forex et apprentissage libre de

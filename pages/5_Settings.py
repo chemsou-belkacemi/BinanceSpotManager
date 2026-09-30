@@ -51,6 +51,18 @@ with tabs[5]:
     )
     from binance_spot_manager.signal_sizing import SignalSizingPolicy
     from binance_spot_manager.telegram_signals import chat_allowlist
+    from binance_spot_manager import csi_client
+    from binance_spot_manager.csi_client import (
+        GATE_ENABLED_KEY,
+        GATE_HOLD_INDETERMINE_KEY,
+        GATE_WHEN_UNAVAILABLE_KEY,
+        SOURCE_NAMES_KEY,
+        GatePolicy,
+        source_names,
+    )
+
+    CSI_HOLD_LABEL = "Retenir le signal (prudent)"
+    CSI_ALLOW_LABEL = "Exécuter quand même, sans avis"
 
     st.subheader("Réception des signaux Telegram")
     st.caption("Le worker peut relever automatiquement les messages autorisés. L'exécution directe se règle séparément plus bas. Le token existant n'est ni affiché ni modifié.")
@@ -335,6 +347,61 @@ with tabs[5]:
         )
         if auto_diagnostics.get("last_detail"):
             st.caption(f"Dernier résultat : {auto_diagnostics['last_detail']}")
+
+    st.divider()
+    st.subheader("Avis CSI avant exécution automatique")
+    st.caption(
+        "CryptoSignalIntelligence évalue chaque signal Telegram (vetos, taux de base historique de la "
+        "même géométrie, bilan du groupe). Il ne place aucun ordre : il peut seulement RETENIR un signal "
+        "automatique pour confirmation manuelle, jamais l'envoyer tout seul. Détail : page Avis CSI."
+    )
+    csi_policy = GatePolicy.from_mapping(signal_preferences)
+    with st.form("signal_csi_gate_preferences"):
+        csi_gate = st.toggle(
+            "Demander l'avis de CSI avant toute exécution automatique",
+            value=csi_policy.enabled,
+            key="signal_csi_gate_toggle",
+        )
+        csi_hold_indetermine = st.toggle(
+            "Retenir aussi les signaux jugés indéterminés",
+            value=csi_policy.hold_indetermine,
+            key="signal_csi_hold_indetermine_toggle",
+            help="Refusé et Défavorable sont toujours retenus. Indéterminé : pas assez d'éléments pour préférer ce signal au hasard.",
+        )
+        csi_unavailable = st.radio(
+            "Si CSI est injoignable",
+            [CSI_HOLD_LABEL, CSI_ALLOW_LABEL],
+            index=1 if csi_policy.allow_when_unavailable else 0,
+            key="signal_csi_when_unavailable_choice",
+        )
+        csi_names = st.text_area(
+            "Noms des groupes Telegram (identifiant=nom, un par ligne)",
+            value=str(signal_preferences.get(SOURCE_NAMES_KEY, "")),
+            key="signal_csi_source_names_input",
+            height=90,
+            help="Sert au bilan par groupe chez CSI. Exemple : -1001234567890=Suhaib. Sans nom : « telegram <identifiant> ».",
+        )
+        if st.form_submit_button("Enregistrer l'avis CSI"):
+            try:
+                source_names(csi_names)
+                get_settings_store().update({
+                    GATE_ENABLED_KEY: bool(csi_gate),
+                    GATE_HOLD_INDETERMINE_KEY: bool(csi_hold_indetermine),
+                    GATE_WHEN_UNAVAILABLE_KEY: "ALLOW" if csi_unavailable == CSI_ALLOW_LABEL else "HOLD",
+                    SOURCE_NAMES_KEY: csi_names.strip(),
+                })
+                st.success("Réglage enregistré. Le worker le relit automatiquement.")
+            except ValueError as exc:
+                st.error(str(exc))
+    csi_health, csi_failure = csi_client.CsiClient.from_env().probe()
+    if csi_health is None:
+        st.warning(
+            f"CSI injoignable : {csi_failure}. Tant que CSI ne répond pas, les signaux automatiques sont "
+            + ("exécutés sans avis (réglage)." if csi_policy.allow_when_unavailable
+               else "retenus pour confirmation manuelle.")
+        )
+    else:
+        (st.success if csi_health.get("ready") else st.info)(f"CSI : {csi_health.get('detail', '')}")
 
 # ==========================================================================
 # Sécurité

@@ -10,6 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from binance_spot_manager import csi_client
 from binance_spot_manager.command_store import account_scope
 from binance_spot_manager.config import get_settings
 from binance_spot_manager.signal_inbox import SignalInbox
@@ -119,6 +120,35 @@ for error in parsed.errors:
     st.error(error)
 if parsed.errors:
     st.stop()
+
+with st.container(border=True):
+    st.markdown(
+        "**Avis de CSI** — analyse indépendante (vetos, taux de base historique de la même géométrie, "
+        "bilan du groupe). Un avis ne crée aucun ordre : il peut seulement retenir une exécution automatique."
+    )
+    if row.get("csi_verdict"):
+        st.markdown(
+            f"{csi_client.VERDICT_ICONS.get(row['csi_verdict'], '')} "
+            f"**{csi_client.verdict_label(row['csi_verdict'])}** · {row.get('csi_evaluated_at') or ''}"
+        )
+        st.write(row.get("csi_detail") or "")
+    else:
+        st.caption("Pas encore d'avis CSI pour ce signal.")
+    if st.button(
+        "Actualiser l'avis de CSI" if row.get("csi_verdict") else "Demander l'avis de CSI",
+        key=f"csi_{selected}", icon=":material/psychology:",
+    ):
+        try:
+            opinion = csi_client.CsiClient.from_env().evaluate(
+                row["raw"], source=csi_client.source_label(row, preferences),
+            )
+            inbox.set_csi_opinion(scope, selected, opinion.verdict, opinion.summary, opinion.evaluated_at)
+            st.rerun()
+        except csi_client.CsiUnavailable as exc:
+            st.warning(f"Avis CSI indisponible : {exc}")
+        except ValueError as exc:
+            st.warning(str(exc))
+    st.caption("Un taux de base historique n'est pas la probabilité que ce signal réussisse. Détail : page Avis CSI.")
 
 if row["payload"]:
     st.info("Ce signal a déjà été confirmé. Il ne peut pas créer une seconde demande.")

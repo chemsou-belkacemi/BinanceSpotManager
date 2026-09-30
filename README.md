@@ -41,6 +41,8 @@ Ouvrir ensuite `.env` dans un éditeur et renseigner les clés. Variables essent
 | `BSM_DEMO_API_SECRET` | secret API Demo | vide |
 | `BSM_QUOTE_ASSET` | actif de cotation | `USDT` |
 | `BSM_UI_PORT` | port de l'interface sur `127.0.0.1` | `8501` |
+| `BSM_CSI_API_URL` | API locale de CryptoSignalIntelligence (avis sur les signaux, lecture seule) | `http://csi-api:8503` sous Compose |
+| `CSI_API_TOKEN` | jeton facultatif de cette API, identique à celui défini côté CSI | vide |
 
 **Quelle URL utiliser ?** Le cahier des charges mentionnait `https://demo-api.binance.com`.
 Le testnet Spot public de Binance est `https://testnet.binance.vision`, et **les deux sont

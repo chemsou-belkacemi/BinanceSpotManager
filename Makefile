@@ -6,7 +6,7 @@ SERVICE ?= ui
 STAMP := $(shell date +%Y%m%d-%H%M%S)
 
 .DEFAULT_GOAL := help
-.PHONY: help init build up down restart ps logs worker-start worker-stop worker-restart \
+.PHONY: help init build network up down restart ps logs worker-start worker-stop worker-restart \
         check open-orders demo-tests integration migrate-oco run test shell backup import-data
 
 help: ## Affiche cette aide
@@ -20,14 +20,17 @@ init: ## Cree .env a partir de .env.example (sans ecraser un .env existant)
 build: ## Construit l'image
 	$(COMPOSE) build
 
-up: ## Demarre l'interface et le worker en arriere-plan
+network: ## Cree le reseau Docker partage avec CryptoSignalIntelligence (csi-bridge) s'il manque
+	@docker network inspect csi-bridge >/dev/null 2>&1 || docker network create csi-bridge
+
+up: network ## Demarre l'interface et le worker en arriere-plan
 	$(COMPOSE) up -d --build
 	@echo "Interface : http://127.0.0.1:$${BSM_UI_PORT:-8501}"
 
 down: ## Arrete et supprime les conteneurs (les volumes de donnees sont conserves)
 	$(COMPOSE) down
 
-restart: ## Redemarre les services (a faire apres une modification de .env)
+restart: network ## Redemarre les services (a faire apres une modification de .env)
 	$(COMPOSE) up -d --force-recreate
 
 ps: ## Etat des services et des healthchecks

@@ -6,9 +6,11 @@ from streamlit.testing.v1 import AppTest
 
 from binance_spot_manager.command_store import CommandStore, account_scope
 from binance_spot_manager.config import Settings, RunMode
+from binance_spot_manager.csi_client import CsiOpinion
 from binance_spot_manager.signal_inbox import SignalInbox
 from binance_spot_manager.symbol_rules import parse_symbol_rules
 import binance_spot_manager.config as config
+import binance_spot_manager.csi_client as csi_client
 import binance_spot_manager.signal_inbox as signal_inbox
 import binance_spot_manager.position_store as position_store
 import ui_common
@@ -119,3 +121,42 @@ def test_automatic_telegram_reader_hides_competing_manual_getupdates(monkeypatch
     labels = [button.label for button in app.button]
     assert "Actualiser la boîte de réception" in labels
     assert "Relever les messages Telegram" not in labels
+
+
+def test_signal_page_asks_csi_opinion_and_keeps_it_without_any_order(monkeypatch, tmp_path):
+    settings = Settings(run_mode=RunMode.DEMO_MANUAL, demo_api_key="test", demo_api_secret="test")
+    scope = account_scope(settings)
+    inbox = SignalInbox(tmp_path / "inbox.db")
+    commands = CommandStore(tmp_path / "commands.db")
+    inbox.receive(scope, SIGNAL, source="telegram", external_id="bothash:-100123:7", source_timestamp=1)
+    calls = []
+
+    class FakeClient:
+        @classmethod
+        def from_env(cls):
+            return cls()
+
+        def evaluate(self, text, *, source, record=True):
+            calls.append((text, source, record))
+            return CsiOpinion(verdict="INDETERMINE", summary="Indéterminé : pas assez d'éléments.",
+                              source=source, evaluated_at="2026-09-30T10:00:00+00:00")
+
+    monkeypatch.setattr(config, "get_settings", lambda: settings)
+    monkeypatch.setattr(signal_inbox, "SignalInbox", lambda: inbox)
+    monkeypatch.setattr(csi_client, "CsiClient", FakeClient)
+    monkeypatch.setattr(position_store, "get_settings_store",
+                        lambda: SimpleNamespace(load=lambda: {"signal_csi_source_names": "-100123=Suhaib"}))
+    monkeypatch.setattr(ui_common, "get_service", lambda: SimpleNamespace(commands=commands))
+    monkeypatch.setattr(ui_common, "sidebar_status", lambda settings: None)
+
+    app = AppTest.from_file(str(PAGE)).run()
+    assert not app.exception
+    assert any("Pas encore d'avis CSI" in c.value for c in app.caption)
+    next(b for b in app.button if b.label == "Demander l'avis de CSI").click().run()
+    assert not app.exception
+    assert calls == [(SIGNAL, "Suhaib", True)]
+    saved = inbox.recent(scope)[0]
+    assert saved["csi_verdict"] == "INDETERMINE" and "pas assez" in saved["csi_detail"]
+    assert any("Indéterminé" in m.value for m in app.markdown)
+    assert any(b.label == "Actualiser l'avis de CSI" for b in app.button)
+    assert commands.list_recent(scope) == []

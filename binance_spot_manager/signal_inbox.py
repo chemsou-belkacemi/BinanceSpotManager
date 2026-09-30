@@ -38,6 +38,10 @@ class SignalInbox:
                 ("source_timestamp", "REAL NOT NULL DEFAULT 0"),
                 ("auto_state", "TEXT NOT NULL DEFAULT ''"),
                 ("auto_detail", "TEXT NOT NULL DEFAULT ''"),
+                # Avis de CryptoSignalIntelligence : information affichée, jamais un ordre.
+                ("csi_verdict", "TEXT NOT NULL DEFAULT ''"),
+                ("csi_detail", "TEXT NOT NULL DEFAULT ''"),
+                ("csi_evaluated_at", "TEXT NOT NULL DEFAULT ''"),
             ):
                 if name not in columns:
                     db.execute(f"ALTER TABLE signals ADD COLUMN {name} {definition}")
@@ -212,3 +216,12 @@ class SignalInbox:
                 (state, str(detail)[:1000], scope, signal_id)).rowcount
             if changed != 1:
                 raise ValueError("Signal automatique absent")
+
+    def set_csi_opinion(self, scope, signal_id, verdict, detail="", evaluated_at=""):
+        """Dernier avis de CryptoSignalIntelligence sur ce signal (affiché, jamais exécuté)."""
+        with self.connect() as db, db:
+            changed = db.execute("""UPDATE signals SET csi_verdict=?, csi_detail=?, csi_evaluated_at=?
+                WHERE scope=? AND id=?""",
+                (str(verdict)[:32], str(detail)[:2000], str(evaluated_at)[:64], scope, signal_id)).rowcount
+            if changed != 1:
+                raise ValueError("Signal absent")

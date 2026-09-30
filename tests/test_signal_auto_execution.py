@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import pytest
 
 from binance_spot_manager.command_store import CommandStore
+from binance_spot_manager.csi_client import CsiOpinion, CsiUnavailable
 from binance_spot_manager.event_store import EventStore
 from binance_spot_manager.signal_auto_execution import AutomaticSignalExecutor
 from binance_spot_manager.signal_inbox import SignalInbox
@@ -13,7 +14,21 @@ from binance_spot_manager.symbol_rules import SymbolRulesCache, parse_symbol_rul
 SIMPLE = "PAIR: BTC/USDT\nENTRY 1: 84000\nT1: 90000\nSL: 80000"
 
 
-def executor(tmp_path, inbox, preferences, *, now=1000):
+class FakeCsi:
+    """Client CSI factice : un verdict fixe, ou une panne."""
+
+    def __init__(self, verdict="FAVORABLE", *, fail=False):
+        self.verdict, self.fail, self.calls = verdict, fail, []
+
+    def evaluate(self, text, *, source, record=True):
+        self.calls.append((text, source, record))
+        if self.fail:
+            raise CsiUnavailable("CSI injoignable sur http://csi-api:8503 (ConnectionError)")
+        return CsiOpinion(verdict=self.verdict, summary=f"résumé {self.verdict}", source=source,
+                          evaluated_at="2026-09-30T10:00:00+00:00")
+
+
+def executor(tmp_path, inbox, preferences, *, now=1000, csi_client=None):
     rules = parse_symbol_rules({
         "symbol": "BTCUSDT", "baseAsset": "BTC", "quoteAsset": "USDT",
         "status": "TRADING", "filters": [
@@ -33,7 +48,7 @@ def executor(tmp_path, inbox, preferences, *, now=1000):
         "demo", inbox, commands, client, SymbolRulesCache(client),
         lambda: SimpleNamespace(min_reserve_percent=20),
         lambda: preferences, EventStore(tmp_path / "events.jsonl"),
-        clock=lambda: now,
+        clock=lambda: now, csi_client=csi_client,
     )
     return worker, commands
 
@@ -48,6 +63,8 @@ def enabled_preferences(**overrides):
         "signal_auto_touch_stop": False,
         "signal_sizing_mode": "FIXED",
         "signal_fixed_budget": 200,
+        # Les tests historiques n'ont pas de client CSI : contrôle désactivé, sauf mention contraire.
+        "signal_csi_gate_enabled": False,
     } | overrides
 
 
@@ -203,3 +220,68 @@ def test_fresh_resend_can_retry_rejected_signal_without_existing_payload(tmp_pat
     assert resent["source_timestamp"] == 998
     assert resent["auto_state"] == ""
     assert resent["auto_detail"] == ""
+
+
+def test_csi_gate_holds_unfavourable_signals_for_manual_confirmation(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    row = inbox.receive(
+        "demo", SIMPLE, source="telegram", external_id="bothash:-100123:7", source_timestamp=995,
+    )
+    csi = FakeCsi("DEFAVORABLE")
+    preferences = enabled_preferences(
+        signal_csi_gate_enabled=True, signal_csi_source_names="-100123=Suhaib",
+    )
+    worker, commands = executor(tmp_path, inbox, preferences, csi_client=csi)
+
+    assert worker.process_pending() == ["REJECTED"]
+    saved = inbox.recent("demo")[0]
+    assert saved["id"] == row["id"] and saved["auto_state"] == "REJECTED"
+    assert "Avis CSI Défavorable" in saved["auto_detail"] and "retenue" in saved["auto_detail"]
+    assert saved["csi_verdict"] == "DEFAVORABLE" and saved["csi_detail"] == "résumé DEFAVORABLE"
+    assert csi.calls == [(SIMPLE, "Suhaib", True)]
+    assert commands.list_recent("demo") == []          # aucun ordre : confirmation manuelle possible
+
+
+def test_csi_gate_lets_favourable_signals_through_and_keeps_the_opinion(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    row = inbox.receive("demo", SIMPLE, source="telegram", external_id="bothash:-100123:8", source_timestamp=995)
+    csi = FakeCsi("FAVORABLE")
+    worker, commands = executor(tmp_path, inbox, enabled_preferences(signal_csi_gate_enabled=True), csi_client=csi)
+
+    assert worker.process_pending() == ["QUEUED"]
+    saved = inbox.recent("demo")[0]
+    assert saved["csi_verdict"] == "FAVORABLE" and saved["auto_state"] == "QUEUED"
+    assert csi.calls == [(SIMPLE, "telegram -100123", True)]
+    assert commands.get_by_request_key("demo", f"signal:{row['id']}") is not None
+
+
+def test_csi_gate_holds_when_csi_is_unreachable_unless_allowed_by_setting(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    inbox.receive("demo", SIMPLE, source="telegram", external_id="bothash:-1:1", source_timestamp=995)
+    worker, commands = executor(
+        tmp_path, inbox, enabled_preferences(signal_csi_gate_enabled=True), csi_client=FakeCsi(fail=True),
+    )
+    assert worker.process_pending() == ["REJECTED"]
+    saved = inbox.recent("demo")[0]
+    assert "Avis CSI indisponible" in saved["auto_detail"] and saved["csi_verdict"] == ""
+    assert commands.list_recent("demo") == []
+
+    lenient = SignalInbox(tmp_path / "lenient.db")
+    lenient.receive("demo", SIMPLE, source="telegram", external_id="bothash:-1:2", source_timestamp=995)
+    worker, commands = executor(
+        tmp_path / "lenient", lenient,
+        enabled_preferences(signal_csi_gate_enabled=True, signal_csi_when_unavailable="ALLOW"),
+        csi_client=FakeCsi(fail=True),
+    )
+    assert worker.process_pending() == ["QUEUED"]
+    assert len(commands.list_recent("demo")) == 1
+
+
+def test_csi_gate_disabled_never_calls_csi(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    inbox.receive("demo", SIMPLE, source="telegram", external_id="bothash:-1:3", source_timestamp=995)
+    csi = FakeCsi("REFUSE")
+    worker, commands = executor(tmp_path, inbox, enabled_preferences(), csi_client=csi)
+
+    assert worker.process_pending() == ["QUEUED"]
+    assert csi.calls == [] and len(commands.list_recent("demo")) == 1

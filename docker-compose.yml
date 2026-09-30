@@ -16,9 +16,16 @@ x-app: &app
       required: false
   environment:
     BSM_WORKER_SUPERVISOR: docker
+    # Avis CSI : API locale de CryptoSignalIntelligence (lecture et evaluation seulement),
+    # jointe par le reseau partage csi-bridge. Le jeton facultatif vient de .env.
+    BSM_CSI_API_URL: ${BSM_CSI_API_URL:-http://csi-api:8503}
+    CSI_API_TOKEN: ${CSI_API_TOKEN:-}
   volumes:
     - bsm-data:/app/data
     - bsm-logs:/app/logs
+  networks:
+    - default
+    - csi-bridge
   restart: unless-stopped
 
 services:
@@ -66,3 +73,12 @@ services:
 volumes:
   bsm-data:
   bsm-logs:
+
+networks:
+  default: {}
+  # Reseau partage avec CryptoSignalIntelligence, cree une fois par `make network`
+  # (ou `docker network create csi-bridge`) ; aucun des deux projets ne le supprime.
+  # Les services test et integration ne le rejoignent pas : ils tournent sans CSI.
+  csi-bridge:
+    name: csi-bridge
+    external: true
