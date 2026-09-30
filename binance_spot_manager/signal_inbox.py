@@ -13,6 +13,9 @@ from .signal_parser import (
     parse_signal,
 )
 
+# Errors that freeze a signal: an edited source is never re-parsed into an executable one.
+EDIT_BLOCKS = ("Message édité", "Message source édité", "Révision d'un message")
+
 
 class SignalInbox:
     def __init__(self, path=DATA_DIR / "signals.sqlite3"):
@@ -102,6 +105,13 @@ class SignalInbox:
                        (uuid.uuid4().hex, scope, content_hash(raw), source, external_id, time.time(),
                         raw[:20000], json.dumps(parsed, allow_nan=False), float(source_timestamp or 0)))
             row = db.execute("SELECT * FROM signals WHERE scope=? AND hash=?", (scope, content_hash(raw))).fetchone()
+            # The same text imported again after a parser upgrade must not return the old
+            # analysis: refresh it like reanalyse(), never once confirmed or edited.
+            stored = json.loads(row["parsed"])
+            if (row["payload"] is None and not edited and not revised and stored != parsed
+                    and not any(error.startswith(EDIT_BLOCKS) for error in stored["errors"])):
+                db.execute("UPDATE signals SET parsed=? WHERE id=?", (json.dumps(parsed, allow_nan=False), row["id"]))
+                row = db.execute("SELECT * FROM signals WHERE id=?", (row["id"],)).fetchone()
             if external_id:
                 db.execute("INSERT OR IGNORE INTO signal_origins VALUES (?, ?, ?)", (scope, external_id, row["id"]))
             # A previously reviewed/imported text may be sent again after automatic
@@ -142,8 +152,7 @@ class SignalInbox:
             if row is None or row["payload"] is not None:
                 raise ValueError("Signal absent ou déjà confirmé : réanalyse impossible.")
             previous = json.loads(row["parsed"])
-            if any(error.startswith(("Message édité", "Message source édité", "Révision d'un message"))
-                   for error in previous["errors"]):
+            if any(error.startswith(EDIT_BLOCKS) for error in previous["errors"]):
                 raise ValueError("Message source édité : réanalyse bloquée, vérifier manuellement via New Trade.")
             parsed = parse_signal(row["raw"], template).to_dict()
             db.execute("UPDATE signals SET parsed=? WHERE scope=? AND id=?",

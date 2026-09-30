@@ -112,6 +112,25 @@ def test_reanalysis_refreshes_old_parser_errors_without_creating_new_signal(tmp_
         inbox.reanalyse("demo", row["id"])
 
 
+def test_importing_the_same_text_again_refreshes_a_stale_analysis_but_never_a_frozen_one(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    row = inbox.receive("demo", GALA)
+    stale = dict(row["parsed"], entries=[], errors=["Objectif ambigu (ancien parseur)."])
+    with inbox.connect() as db, db:
+        db.execute("UPDATE signals SET parsed=? WHERE id=?", (json.dumps(stale), row["id"]))
+    again = inbox.receive("demo", GALA)
+    assert again["id"] == row["id"] and len(inbox.recent("demo")) == 1
+    assert again["parsed"]["errors"] == [] and again["parsed"]["entries"] == [.002116]
+
+    inbox.freeze("demo", row["id"], {"plan": 1})
+    with inbox.connect() as db, db:
+        db.execute("UPDATE signals SET parsed=? WHERE id=?", (json.dumps(stale), row["id"]))
+    assert inbox.receive("demo", GALA)["parsed"]["errors"] == stale["errors"]
+
+    edited = inbox.receive("demo", BICO, source="telegram", external_id="chat:9", edited=True)
+    assert inbox.receive("demo", BICO)["parsed"]["errors"] == edited["parsed"]["errors"] != []
+
+
 def test_reanalysis_preserves_source_edit_blocks_and_account_scope(tmp_path):
     inbox = SignalInbox(tmp_path / "signals.db")
     row = inbox.receive("demo", GALA, source="telegram", external_id="chat:1", edited=True)
