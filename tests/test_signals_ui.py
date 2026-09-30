@@ -136,8 +136,8 @@ def test_signal_page_asks_csi_opinion_and_keeps_it_without_any_order(monkeypatch
         def from_env(cls):
             return cls()
 
-        def evaluate(self, text, *, source, record=True):
-            calls.append((text, source, record))
+        def evaluate(self, text, *, source, record=True, user_validated=False):
+            calls.append((text, source, record, user_validated))
             return CsiOpinion(verdict="INDETERMINE", summary="Indéterminé : pas assez d'éléments.",
                               source=source, evaluated_at="2026-09-30T10:00:00+00:00")
 
@@ -154,7 +154,7 @@ def test_signal_page_asks_csi_opinion_and_keeps_it_without_any_order(monkeypatch
     assert any("Pas encore d'avis CSI" in c.value for c in app.caption)
     next(b for b in app.button if b.label == "Demander l'avis de CSI").click().run()
     assert not app.exception
-    assert calls == [(SIGNAL, "Suhaib", True)]
+    assert calls == [(SIGNAL, "Suhaib", True, False)]           # reçu par Telegram : pas une validation
     saved = inbox.recent(scope)[0]
     assert saved["csi_verdict"] == "INDETERMINE" and "pas assez" in saved["csi_detail"]
     assert any("Indéterminé" in m.value for m in app.markdown)

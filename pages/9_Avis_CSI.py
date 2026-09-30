@@ -51,12 +51,16 @@ with st.form("csi_evaluate"):
         value=True,
     )
     submitted = st.form_submit_button("Demander l'avis de CSI")
+st.caption(
+    "Un signal collé ici vaut validation de sa paire : si elle n'est pas encore dans l'univers de CSI, elle y est "
+    "ajoutée définitivement (historique téléchargé en quelques minutes ; redemander l'avis ensuite)."
+)
 if submitted:
     if not text.strip() or not source.strip():
         st.warning("Indiquer le groupe et coller le signal.")
     else:
         try:
-            opinion = client.evaluate(text, source=source.strip(), record=record)
+            opinion = client.evaluate(text, source=source.strip(), record=record, user_validated=True)
             st.session_state["csi_source"] = source.strip()
             st.session_state["csi_last_opinion"] = opinion
         except CsiUnavailable as exc:
@@ -65,7 +69,8 @@ if submitted:
             st.warning(str(exc))
 opinion = st.session_state.get("csi_last_opinion")
 if opinion is not None:
-    boxes = {"REFUSE": st.error, "DEFAVORABLE": st.error, "INDETERMINE": st.warning, "FAVORABLE": st.success}
+    boxes = {"REFUSE": st.error, "DEFAVORABLE": st.error, "INDETERMINE": st.warning, "FAVORABLE": st.success,
+             "EN_ATTENTE": st.info}
     boxes.get(opinion.verdict, st.info)(f"{opinion.icon} **{opinion.label}** — {opinion.summary}")
     with st.expander("Détail de l'évaluation"):
         checks = opinion.raw.get("checks") or []

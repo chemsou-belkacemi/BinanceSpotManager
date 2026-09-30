@@ -20,7 +20,8 @@ class FakeCsi:
     def __init__(self, verdict="FAVORABLE", *, fail=False):
         self.verdict, self.fail, self.calls = verdict, fail, []
 
-    def evaluate(self, text, *, source, record=True):
+    def evaluate(self, text, *, source, record=True, user_validated=False):
+        assert user_validated is False                     # le worker ne valide jamais une paire
         self.calls.append((text, source, record))
         if self.fail:
             raise CsiUnavailable("CSI injoignable sur http://csi-api:8503 (ConnectionError)")

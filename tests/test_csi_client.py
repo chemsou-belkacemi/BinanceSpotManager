@@ -38,15 +38,19 @@ def test_evaluate_sends_token_and_builds_an_opinion():
         "evaluated_at": "2026-09-30T10:00:00+00:00", "record_id": "EXT-1",
         "checks": [{"label": "lecture", "ok": True, "detail": ""}, {"label": "distance du stop", "ok": False, "detail": "0,2 ATR"}],
     }
-    session = FakeSession([(200, payload)])
+    session = FakeSession([(200, payload), (200, payload | {"verdict": "EN_ATTENTE", "record_id": None})])
     client = CsiClient("http://csi-api:8503/", "secret", session=session)
     result = client.evaluate("PAIR: ETH/USDT\nENTRY 1: 100\nT1: 110\nSL: 95", source="Groupe A", record=False)
     method, url, kwargs = session.calls[0]
     assert (method, url) == ("POST", "http://csi-api:8503/evaluate")
     assert kwargs["headers"]["Authorization"] == "Bearer secret"
-    assert kwargs["json"] == {"text": "PAIR: ETH/USDT\nENTRY 1: 100\nT1: 110\nSL: 95", "source": "Groupe A", "record": False}
+    assert kwargs["json"] == {"text": "PAIR: ETH/USDT\nENTRY 1: 100\nT1: 110\nSL: 95", "source": "Groupe A",
+                              "record": False, "user_validated": False}
     assert result.verdict == "DEFAVORABLE" and result.label == "Défavorable" and result.holds_execution
     assert result.record_id == "EXT-1" and result.failed_checks == ("distance du stop : 0,2 ATR",)
+    pending = client.evaluate("PAIR: ETH/USDT\nENTRY 1: 100\nT1: 110\nSL: 95", source="Groupe A", user_validated=True)
+    assert session.calls[1][2]["json"]["user_validated"] is True
+    assert pending.verdict == "EN_ATTENTE" and pending.label == "En attente" and pending.holds_execution
     with pytest.raises(ValueError):
         client.evaluate("   ", source="Groupe A")
 

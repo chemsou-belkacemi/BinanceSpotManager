@@ -27,8 +27,8 @@ class FakeClient:
         return ({"ready": True, "detail": "prêt : cycle terminé il y a 60 s"}, "") if self.reachable \
             else (None, "CSI injoignable sur http://csi-api:8503 (ConnectionError)")
 
-    def evaluate(self, text, *, source, record=True):
-        self.evaluations.append((text, source, record))
+    def evaluate(self, text, *, source, record=True, user_validated=False):
+        self.evaluations.append((text, source, record, user_validated))
         return CsiOpinion(
             verdict="DEFAVORABLE", summary="Défavorable : aucun veto, mais la même géométrie perd en moyenne.",
             source=source, evaluated_at="2026-09-30T10:00:00+00:00", record_id="EXT-1" if record else None,
@@ -72,7 +72,7 @@ def test_page_evaluates_a_pasted_signal_and_shows_the_verdict(monkeypatch):
     app.text_area[0].set_value(SIGNAL)
     next(b for b in app.button if b.label == "Demander l'avis de CSI").click().run()
     assert not app.exception
-    assert FakeClient.evaluations == [(SIGNAL, "Suhaib", True)]
+    assert FakeClient.evaluations == [(SIGNAL, "Suhaib", True, True)]      # collé à la main : paire validée
     assert any("Défavorable" in e.value for e in app.error)
     assert any("probabilité" in c.value for c in [*app.caption, *app.info])
 

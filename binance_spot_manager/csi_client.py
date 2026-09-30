@@ -20,15 +20,17 @@ from dataclasses import dataclass, field
 import requests
 
 DEFAULT_URL = "http://127.0.0.1:8503"
-#: Avis qui retiennent toujours une exécution automatique quand le contrôle est actif.
-HOLD_VERDICTS = frozenset({"REFUSE", "DEFAVORABLE"})
+#: Avis qui retiennent toujours une exécution automatique quand le contrôle est actif
+#: (EN_ATTENTE : paire en cours d'ajout chez CSI, historique pas encore téléchargé).
+HOLD_VERDICTS = frozenset({"REFUSE", "DEFAVORABLE", "EN_ATTENTE"})
 VERDICT_LABELS = {
     "REFUSE": "Refusé",
     "DEFAVORABLE": "Défavorable",
     "INDETERMINE": "Indéterminé",
     "FAVORABLE": "Favorable",
+    "EN_ATTENTE": "En attente",
 }
-VERDICT_ICONS = {"REFUSE": "⛔", "DEFAVORABLE": "🔴", "INDETERMINE": "🟡", "FAVORABLE": "🟢"}
+VERDICT_ICONS = {"REFUSE": "⛔", "DEFAVORABLE": "🔴", "INDETERMINE": "🟡", "FAVORABLE": "🟢", "EN_ATTENTE": "⏳"}
 #: L'API refuse un corps de plus de 16 Ko : le texte est tronqué bien avant.
 MAX_TEXT_CHARS = 12_000
 MAX_SOURCE_CHARS = 80
@@ -134,13 +136,18 @@ class CsiClient:
         return list(self._request("GET", "/signals/recent", params={"limit": int(limit)}).get("signals") or [])
 
     # --- évaluation --------------------------------------------------------------------------
-    def evaluate(self, text: str, *, source: str, record: bool = True) -> CsiOpinion:
+    def evaluate(self, text: str, *, source: str, record: bool = True, user_validated: bool = False) -> CsiOpinion:
+        """`user_validated` : signal soumis à la main par le propriétaire. Sa validation ajoute une paire
+        inconnue à l'univers de CSI (avis EN_ATTENTE le temps du téléchargement). Le worker passe False :
+        un signal reçu automatiquement n'ajoute jamais rien."""
         text = (text or "").strip()
         source = (source or "").strip()[:MAX_SOURCE_CHARS]
         if not text or not source:
             raise ValueError("Texte du signal et nom du groupe requis.")
         payload = self._request(
-            "POST", "/evaluate", json={"text": text[:MAX_TEXT_CHARS], "source": source, "record": bool(record)},
+            "POST", "/evaluate",
+            json={"text": text[:MAX_TEXT_CHARS], "source": source, "record": bool(record),
+                  "user_validated": bool(user_validated)},
         )
         verdict = str(payload.get("verdict") or "")
         if verdict not in VERDICT_LABELS:

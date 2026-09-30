@@ -139,8 +139,11 @@ with st.container(border=True):
         key=f"csi_{selected}", icon=":material/psychology:",
     ):
         try:
+            # Signal collé à la main = validé par le propriétaire (sa paire peut être ajoutée chez CSI) ;
+            # signal reçu par Telegram = non validé : CSI n'ajoute rien.
             opinion = csi_client.CsiClient.from_env().evaluate(
                 row["raw"], source=csi_client.source_label(row, preferences),
+                user_validated=row.get("source") != "telegram",
             )
             inbox.set_csi_opinion(scope, selected, opinion.verdict, opinion.summary, opinion.evaluated_at)
             st.rerun()
@@ -148,7 +151,10 @@ with st.container(border=True):
             st.warning(f"Avis CSI indisponible : {exc}")
         except ValueError as exc:
             st.warning(str(exc))
-    st.caption("Un taux de base historique n'est pas la probabilité que ce signal réussisse. Détail : page Avis CSI.")
+    st.caption(
+        "Un taux de base historique n'est pas la probabilité que ce signal réussisse. Détail : page Avis CSI. "
+        "Paire hors univers sur un signal Telegram : le coller sur la page Avis CSI vaut validation de la paire."
+    )
 
 if row["payload"]:
     st.info("Ce signal a déjà été confirmé. Il ne peut pas créer une seconde demande.")
