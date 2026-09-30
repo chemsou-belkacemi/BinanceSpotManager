@@ -1,8 +1,8 @@
-"""Retour d'exécution vers CryptoSignalIntelligence (FEEDBACK_FORMAT.md, version 1).
+"""Retour d'exécution vers CryptoSignalIntelligence (FEEDBACK_FORMAT.md, version 2).
 
 Un événement JSON par ligne, ajouté en fin de fichier
 ``DATA_DIR/signal_drop/outgoing/execution_events.jsonl`` (UTF-8, flush + fsync),
-uniquement pour les signaux du contrat TXT V2. Chaque événement porte un
+uniquement pour les signaux du contrat TXT V3. Chaque événement porte un
 identifiant déterministe ``BSM-<SIGNAL_ID>-<TYPE>-<n>`` enregistré dans
 ``DATA_DIR/signal_feedback.sqlite3`` APRÈS l'écriture de la ligne : un arrêt
 entre les deux réécrit la même ligne avec le même identifiant, que le
@@ -11,14 +11,24 @@ sous un second identifiant.
 
 Sources des événements :
 
-* RECEIVED : une commande ``signal:<ligne>`` existe (signal accepté, non expiré,
-  écart d'entrée contrôlé) ; REJECTED : refus à la réception (dépôt), refus de
-  l'exécution automatique (``auto_detail``), commande échouée/expirée/annulée,
-  ou signal jamais traité avant EXPIRES_AT ;
-* ENTRY_PARTIAL / ENTRY_FILLED / TP_FILLED / STOP_FILLED : quantités REELLEMENT
-  remplies, rapportées par INCREMENT (le producteur additionne les quantités) ;
+* RECEIVED (avec ``exit_policy_hash``, l'empreinte vérifiée) : une commande
+  ``signal:<ligne>`` existe (signal accepté, non expiré, écart d'entrée contrôlé) ;
+  REJECTED : refus à la réception (dépôt), refus de l'exécution automatique
+  (``auto_detail``), commande échouée/expirée/annulée, ou signal jamais traité ;
+* ORDER_PLACED : ordre d'entrée accepté par Binance (identifiant, quantité
+  commandée, prix limite) ;
+* ENTRY_PARTIAL / ENTRY_FILLED / TP_FILLED / STOP_FILLED / MARKET_EXIT_FILLED :
+  quantités REELLEMENT remplies, rapportées par INCREMENT (le producteur additionne
+  les quantités) ; MARKET_EXIT_FILLED = vente au marché hors stop et hors TP ;
 * EXPIRED / CANCELLED : entrées terminées sans aucun achat ; CLOSED : position
   terminée après au moins un achat.
+
+Frais : lus sur ``GET /api/v3/myTrades?orderId=…`` (lecture seule, Binance Demo)
+pour chaque remplissage ; à défaut, commissions déjà connues de l'ordre ; sinon
+``fee`` et ``fee_asset`` sont omis (jamais 0). Plusieurs devises de commission sur
+un même remplissage : la devise la plus fréquente parmi les exécutions est écrite,
+les autres sont journalisées et omises (un seul événement par remplissage, pour ne
+jamais compter deux fois la quantité).
 
 Aucune importation du projet producteur : ses règles de validation sont
 reproduites dans :func:`validate_event` et toute ligne non conforme est refusée
@@ -26,6 +36,7 @@ avant écriture. Le retour est désactivé en DRY_RUN (aucun ordre réel).
 """
 from __future__ import annotations
 
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -48,23 +59,29 @@ logger = logging.getLogger("bsm.signal_feedback")
 OUTGOING_DIR = DATA_DIR / "signal_drop" / "outgoing"
 FEEDBACK_FILE_NAME = "execution_events.jsonl"
 REGISTRY_PATH = DATA_DIR / "signal_feedback.sqlite3"
+FEEDBACK_VERSION = 2
 PRODUCER = "BinanceSpotManager"
 ENVIRONMENT = "DEMO"
-EVENT_TYPES = ("RECEIVED", "REJECTED", "ENTRY_PARTIAL", "ENTRY_FILLED", "TP_FILLED", "STOP_FILLED",
-               "CLOSED", "EXPIRED", "CANCELLED")
-FILL_EVENTS = frozenset({"ENTRY_PARTIAL", "ENTRY_FILLED", "TP_FILLED", "STOP_FILLED"})
+EVENT_TYPES = ("RECEIVED", "REJECTED", "ORDER_PLACED", "ENTRY_PARTIAL", "ENTRY_FILLED", "TP_FILLED",
+               "STOP_FILLED", "MARKET_EXIT_FILLED", "CLOSED", "EXPIRED", "CANCELLED")
+FILL_EVENTS = frozenset({"ENTRY_PARTIAL", "ENTRY_FILLED", "TP_FILLED", "STOP_FILLED", "MARKET_EXIT_FILLED"})
+REASON_REQUIRED = frozenset({"REJECTED", "CANCELLED", "MARKET_EXIT_FILLED"})
 EVENT_FIELDS = ("event_id", "signal_id", "event_type", "occurred_at", "environment", "producer", "symbol",
-                "quantity", "price", "quote_quantity", "fee", "fee_asset", "order_id", "target_index", "reason")
+                "quantity", "price", "quote_quantity", "fee", "fee_asset", "order_id", "target_index", "reason",
+                "exit_policy_hash")
 ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:\-]{1,160}$")
 PRODUCER_PATTERN = re.compile(r"^[A-Za-z0-9_.\-]{1,60}$")
 SYMBOL_PATTERN = re.compile(r"^[A-Z0-9]{2,20}(USDT|USDC)$")
 ASSET_PATTERN = re.compile(r"^[A-Z0-9]{2,20}$")
 ORDER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:\-]{1,80}$")
+HASH_PATTERN = re.compile(r"^[0-9a-f]{16}$")
 TIME_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 MAX_REASON = 500
 MAX_TARGET_INDEX = 4
 #: Délai après EXPIRES_AT avant de déclarer refusé un signal jamais traité.
 EXPIRY_GRACE_SECONDS = 60
+#: Attente maximale des exécutions myTrades d'un remplissage avant de l'écrire sans frais.
+FEE_WAIT_SECONDS = 30
 
 
 class FeedbackContractError(ValueError):
@@ -99,7 +116,7 @@ def _decimal_field(event, key, *, required_positive=False):
     value = event.get(key)
     if value is None:
         if required_positive:
-            raise FeedbackContractError(f"{event.get('event_type')} exige {key} > 0 (remplissage réel)")
+            raise FeedbackContractError(f"{event.get('event_type')} exige {key} > 0")
         return None
     if not isinstance(value, str):
         raise FeedbackContractError(f"{key} : nombre en chaîne décimale requis")
@@ -110,12 +127,12 @@ def _decimal_field(event, key, *, required_positive=False):
     if not number.is_finite() or number < 0:
         raise FeedbackContractError(f"{key} : valeur finie et positive requise")
     if required_positive and number <= 0:
-        raise FeedbackContractError(f"{event.get('event_type')} exige {key} > 0 (remplissage réel)")
+        raise FeedbackContractError(f"{event.get('event_type')} exige {key} > 0")
     return number
 
 
 def validate_event(event: dict) -> dict:
-    """Reproduit les règles du modèle producteur ; lève FeedbackContractError sinon."""
+    """Reproduit les règles du modèle producteur (retour v2) ; lève FeedbackContractError sinon."""
     if not isinstance(event, dict) or set(event) != set(EVENT_FIELDS):
         raise FeedbackContractError("champs de l'événement inattendus ou manquants")
     kind = event["event_type"]
@@ -134,9 +151,10 @@ def validate_event(event: dict) -> dict:
         datetime.strptime(occurred, "%Y-%m-%dT%H:%M:%SZ")
     except ValueError:
         raise FeedbackContractError("occurred_at : date invalide") from None
-    fill = kind in FILL_EVENTS
-    _decimal_field(event, "quantity", required_positive=fill)
-    _decimal_field(event, "price", required_positive=fill)
+    # Remplissage réel, ou ordre d'entrée envoyé (quantité commandée, prix limite).
+    positive = kind in FILL_EVENTS or kind == "ORDER_PLACED"
+    _decimal_field(event, "quantity", required_positive=positive)
+    _decimal_field(event, "price", required_positive=positive)
     _decimal_field(event, "quote_quantity")
     fee = _decimal_field(event, "fee")
     asset = event["fee_asset"]
@@ -147,6 +165,8 @@ def validate_event(event: dict) -> dict:
     order_id = event["order_id"]
     if order_id is not None and (not isinstance(order_id, str) or not ORDER_ID_PATTERN.fullmatch(order_id)):
         raise FeedbackContractError(f"order_id invalide : {order_id!r}")
+    if kind == "ORDER_PLACED" and not order_id:
+        raise FeedbackContractError("ORDER_PLACED exige order_id, quantity (commandée) et price (limite)")
     index = event["target_index"]
     if index is not None and (isinstance(index, bool) or not isinstance(index, int)
                               or not 1 <= index <= MAX_TARGET_INDEX):
@@ -156,8 +176,13 @@ def validate_event(event: dict) -> dict:
     reason = event["reason"]
     if reason is not None and (not isinstance(reason, str) or len(reason) > MAX_REASON):
         raise FeedbackContractError("reason : texte de 500 caractères maximum")
-    if kind in {"REJECTED", "CANCELLED"} and not reason:
+    if kind in REASON_REQUIRED and not reason:
         raise FeedbackContractError(f"{kind} exige reason")
+    policy_hash = event["exit_policy_hash"]
+    if (kind == "RECEIVED") != (policy_hash is not None):
+        raise FeedbackContractError("exit_policy_hash : obligatoire sur RECEIVED, absent ailleurs")
+    if policy_hash is not None and (not isinstance(policy_hash, str) or not HASH_PATTERN.fullmatch(policy_hash)):
+        raise FeedbackContractError("exit_policy_hash : 16 caractères hexadécimaux minuscules")
     return event
 
 
@@ -170,13 +195,13 @@ def build_event_id(signal_id: str, event_type: str, sequence: int) -> str:
     return event_id
 
 
-def _single_commission(commissions):
-    """(asset, montant) si toutes les commissions portent sur un seul actif, sinon None."""
-    assets = {c.asset for c in commissions if c.amount > 0}
-    if len(assets) != 1:
+def dominant_fee(deltas: dict, counts: dict):
+    """(devise, montant) la plus fréquente parmi les exécutions ; égalité → plus grand montant, puis nom."""
+    candidates = [asset for asset, amount in deltas.items() if amount > 0]
+    if not candidates:
         return None
-    asset = assets.pop()
-    return asset, sum(c.amount for c in commissions if c.asset == asset)
+    asset = sorted(candidates, key=lambda a: (-counts.get(a, 0), -deltas[a], a))[0]
+    return asset, deltas[asset]
 
 
 class FeedbackRegistry:
@@ -203,8 +228,11 @@ class FeedbackRegistry:
             db.execute("""CREATE TABLE IF NOT EXISTS reported (
                 signal_id TEXT NOT NULL, item_key TEXT NOT NULL,
                 quantity REAL NOT NULL, quote REAL NOT NULL,
-                fee REAL NOT NULL DEFAULT 0, fee_asset TEXT NOT NULL DEFAULT '',
+                fees TEXT NOT NULL DEFAULT '{}',
                 PRIMARY KEY(signal_id, item_key))""")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(reported)")}
+            if "fees" not in columns:
+                db.execute("ALTER TABLE reported ADD COLUMN fees TEXT NOT NULL DEFAULT '{}'")
             db.commit()
             yield db
         finally:
@@ -260,33 +288,39 @@ class FeedbackRegistry:
         with self.connect() as db:
             row = db.execute("SELECT * FROM reported WHERE signal_id=? AND item_key=?",
                              (signal_id, item_key)).fetchone()
-            return dict(row) if row else {"quantity": 0.0, "quote": 0.0, "fee": 0.0, "fee_asset": ""}
+            if row is None:
+                return {"quantity": 0.0, "quote": 0.0, "fees": {}}
+            return {"quantity": row["quantity"], "quote": row["quote"], "fees": json.loads(row["fees"] or "{}")}
 
-    def set_reported(self, signal_id, item_key, *, quantity, quote, fee, fee_asset):
+    def set_reported(self, signal_id, item_key, *, quantity, quote, fees):
         with self.connect() as db, db:
-            db.execute("""INSERT INTO reported VALUES (?, ?, ?, ?, ?, ?)
+            db.execute("""INSERT INTO reported (signal_id, item_key, quantity, quote, fees) VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(signal_id, item_key) DO UPDATE SET
-                quantity=excluded.quantity, quote=excluded.quote, fee=excluded.fee, fee_asset=excluded.fee_asset""",
-                       (signal_id, item_key, float(quantity), float(quote), float(fee), fee_asset or ""))
+                quantity=excluded.quantity, quote=excluded.quote, fees=excluded.fees""",
+                       (signal_id, item_key, float(quantity), float(quote), json.dumps(fees, sort_keys=True)))
 
 
 class SignalFeedbackWriter:
     """Écrit le fichier de retour ; appelé par le dépôt (réception) et par le worker (``sync``)."""
 
-    def __init__(self, scope, inbox, commands, *, positions=None, directory=OUTGOING_DIR,
+    def __init__(self, scope, inbox, commands, *, positions=None, client=None, directory=OUTGOING_DIR,
                  registry_path=REGISTRY_PATH, clock=time.time, enabled=True):
         self.scope = scope
         self.inbox = inbox
         self.commands = commands
         self.positions = positions
+        #: Client Binance Demo, lecture seule (myTrades) ; None : frais connus de l'ordre seulement.
+        self.client = client
         self.directory = Path(directory)
         self.path = self.directory / FEEDBACK_FILE_NAME
         self.registry = FeedbackRegistry(registry_path)
         self.clock = clock
         self.enabled = bool(enabled)
+        self._fee_wait: dict[tuple[str, str], float] = {}
         self._lock = threading.Lock()
         self._diagnostics = {
             "state": "ACTIVE" if self.enabled else "DISABLED",
+            "feedback_version": FEEDBACK_VERSION,
             "events_total": 0,
             "pending_signals": 0,
             "last_event_at": None,
@@ -307,7 +341,7 @@ class SignalFeedbackWriter:
     # ------------------------------------------------------------------
 
     def register(self, signal_id, row_id, symbol) -> None:
-        """Signal V2 accepté à la réception : suivi jusqu'à son état final."""
+        """Signal CSI accepté à la réception : suivi jusqu'à son état final."""
         if not self.enabled:
             return
         try:
@@ -329,7 +363,7 @@ class SignalFeedbackWriter:
                                  occurred_at=occurred_at if occurred_at is not None else self.clock(),
                                  reason=reason)
             self.registry.mark_final(signal_id)
-            return written
+            return bool(written)
         except Exception as exc:  # noqa: BLE001 - le dépôt continue sans le retour
             logger.exception("Retour d'exécution : refus de %s non écrit", signal_id)
             self._update(state="ERROR", last_error=str(exc))
@@ -361,8 +395,7 @@ class SignalFeedbackWriter:
             if len(position.tags) >= 2 and position.tags[0] == "signal":
                 by_tag[position.tags[1]] = position
         written = 0
-        pending = self.registry.pending()
-        for record in pending:
+        for record in self.registry.pending():
             written += self._process_signal(record, by_tag, now)
         self._update(state="ACTIVE", last_error="", pending_signals=len(self.registry.pending()),
                      events_total=self.registry.events_total())
@@ -374,6 +407,10 @@ class SignalFeedbackWriter:
         if row is None:
             return 0
         parsed = row["parsed"]
+        if parsed.get("signal_version") != 3:
+            # Ligne d'un contrat retiré (V2) : hors retour v2, jamais exécutée.
+            self.registry.mark_final(signal_id)
+            return 0
         symbol = record["symbol"] or parsed.get("symbol") or ""
         expires_at = float(parsed.get("expires_at") or 0)
         command = self.commands.get_by_request_key(self.scope, f"signal:{row['id']}")
@@ -399,8 +436,9 @@ class SignalFeedbackWriter:
                                              "(exécution automatique inactive ou non autorisée)")
                 final = True
         else:
+            policy_hash = (command["payload"].get("exit_policy_hash") or parsed.get("exit_policy_hash") or None)
             written += self._emit(signal_id, "RECEIVED", "command", symbol=symbol,
-                                  occurred_at=command["created_at"])
+                                  occurred_at=command["created_at"], exit_policy_hash=policy_hash)
             state = command["state"]
             if state in {"FAILED", "EXPIRED", "CANCELED"}:
                 reason = {
@@ -428,41 +466,64 @@ class SignalFeedbackWriter:
 
     def _report_position(self, signal_id, position, symbol, now):
         written = 0
+        pending_fills = False
         for entry in position.sorted_entries:
+            if entry.order_id:
+                # Ordre accepté par Binance : quantité commandée et prix limite.
+                limit = entry.resolved_price if entry.order_type.value == "LIMIT" else None
+                if limit and entry.binance_qty > 0:
+                    written += self._emit(
+                        signal_id, "ORDER_PLACED", f"entry:{entry.entry_id}", symbol=symbol,
+                        occurred_at=entry.submitted_at or entry.created_at or now,
+                        quantity=entry.binance_qty, price=limit, order_id=entry.order_id,
+                    )
             kind = "ENTRY_FILLED" if entry.status is EntryStatus.FILLED else "ENTRY_PARTIAL"
-            occurred = entry.filled_at if (entry.status is EntryStatus.FILLED and entry.filled_at) else now
-            written += self._report_fill(
+            count, deferred = self._report_fill(
                 signal_id, symbol, f"entry:{entry.entry_id}", kind,
                 quantity=entry.executed_qty, quote=entry.quote_spent, average=entry.average_fill_price,
                 commissions=entry.commissions, order_id=entry.order_id or entry.client_order_id,
-                occurred_at=occurred,
+                occurred_at=entry.filled_at if (entry.status is EntryStatus.FILLED and entry.filled_at) else now,
+                now=now,
             )
+            written += count
+            pending_fills |= deferred
         for tp in position.sorted_tps:
             if not 1 <= tp.sequence_number <= MAX_TARGET_INDEX:
                 continue
-            written += self._report_fill(
+            count, deferred = self._report_fill(
                 signal_id, symbol, f"tp:{tp.tp_id}", "TP_FILLED",
                 quantity=tp.executed_qty, quote=tp.quote_received, average=tp.average_fill_price,
                 commissions=tp.commissions, order_id=tp.order_id or tp.client_order_id,
-                occurred_at=tp.executed_at or now, target_index=tp.sequence_number,
+                occurred_at=tp.executed_at or now, target_index=tp.sequence_number, now=now,
             )
+            written += count
+            pending_fills |= deferred
         stop = position.stop_loss
-        written += self._report_fill(
+        count, deferred = self._report_fill(
             signal_id, symbol, "sl", "STOP_FILLED",
             quantity=stop.executed_qty, quote=stop.quote_received, average=stop.average_fill_price,
             commissions=stop.commissions, order_id=stop.order_id or stop.client_order_id,
-            occurred_at=stop.executed_at or now,
+            occurred_at=stop.executed_at or now, now=now,
         )
+        written += count
+        pending_fills |= deferred
         for sale in position.manual_exits:
-            # Vente au marché décidée par le worker (stop franchi) ou par l'utilisateur :
-            # rapportée comme sortie protectrice, le motif précise la nature de la vente.
-            written += self._report_fill(
-                signal_id, symbol, f"exit:{sale.client_order_id}", "STOP_FILLED",
+            # Vente au marché hors stop Binance et hors TP : stop refusé car déjà franchi,
+            # ou fermeture manuelle depuis l'interface.
+            motive = {"STOP_CROSSED": "stop déjà franchi, SL refusé par Binance : vente au marché",
+                      "MANUAL_CLOSE": "fermeture manuelle au marché"}.get(
+                sale.close_reason.value, f"vente au marché ({sale.close_reason.value})")
+            count, deferred = self._report_fill(
+                signal_id, symbol, f"exit:{sale.client_order_id}", "MARKET_EXIT_FILLED",
                 quantity=sale.executed_qty, quote=sale.quote_received, average=sale.average_fill_price,
                 commissions=sale.commissions, order_id=sale.order_id or sale.client_order_id,
-                occurred_at=position.closed_at or now,
-                reason=f"Vente au marché hors stop Binance ({sale.close_reason.value})",
+                occurred_at=position.closed_at or now, reason=f"Sortie hors TP/stop : {motive}", now=now,
             )
+            written += count
+            pending_fills |= deferred
+        if pending_fills:
+            # Un remplissage attend ses frais : l'état final sera écrit après lui.
+            return written, False
         bought = any(entry.executed_qty > QTY_EPSILON for entry in position.entries)
         closed_at = position.closed_at or now
         if not bought and position.entries and all(entry.is_terminal for entry in position.entries):
@@ -484,47 +545,111 @@ class SignalFeedbackWriter:
             return written, True
         return written, False
 
+    # ------------------------------------------------------------------
+    # Frais réels
+    # ------------------------------------------------------------------
+
+    def _order_trades(self, symbol, order_id, cumulative_qty):
+        """Exécutions Binance de l'ordre ; None si indisponibles ou incomplètes."""
+        if self.client is None or order_id in (None, ""):
+            return None
+        try:
+            numeric = int(order_id)
+        except (TypeError, ValueError):
+            return None  # identifiant client seulement : ordre non confirmé par Binance
+        try:
+            trades = self.client.get_my_trades(symbol, order_id=numeric) or []
+        except Exception as exc:  # noqa: BLE001 - lecture seule ; les frais restent inconnus
+            logger.info("Retour d'exécution : myTrades indisponible pour %s (%s)", order_id, exc)
+            return None
+        trades = [t for t in trades if str(t.get("orderId", numeric)) == str(numeric)]
+        executed = sum(float(t.get("qty") or 0) for t in trades)
+        if executed + 1e-9 < cumulative_qty:
+            return None  # exécutions pas encore toutes visibles
+        return trades
+
+    @staticmethod
+    def _trade_fees(trades):
+        totals, counts = {}, Counter()
+        for trade in trades:
+            asset = str(trade.get("commissionAsset") or "")
+            try:
+                amount = float(trade.get("commission") or 0)
+            except (TypeError, ValueError):
+                continue
+            if asset and amount > 0:
+                totals[asset] = totals.get(asset, 0.0) + amount
+                counts[asset] += 1
+        return totals, counts
+
     def _report_fill(self, signal_id, symbol, item_key, event_type, *, quantity, quote, average,
-                     commissions, order_id, occurred_at, target_index=None, reason=None) -> int:
-        """Rapporte l'INCREMENT de quantité depuis le dernier cumul déjà écrit."""
+                     commissions, order_id, occurred_at, now, target_index=None, reason=None):
+        """Rapporte l'INCREMENT depuis le dernier cumul écrit ; retourne (lignes, en attente de frais)."""
         quantity = float(quantity or 0)
         if quantity <= QTY_EPSILON:
-            return 0
+            return 0, False
         last = self.registry.reported(signal_id, item_key)
         delta_qty = quantity - float(last["quantity"])
         if delta_qty <= QTY_EPSILON:
-            return 0
+            return 0, False
         quote = float(quote or 0)
         delta_quote = quote - float(last["quote"])
         if delta_quote <= 0:
             delta_quote = delta_qty * float(average or 0)
         if delta_quote <= 0:
             logger.warning("Retour d'exécution : remplissage sans prix pour %s (%s)", signal_id, item_key)
-            return 0
-        fee = fee_asset = None
-        single = _single_commission(commissions or [])
-        if single is not None:
-            asset, total = single
-            previous = float(last["fee"]) if last["fee_asset"] == asset else 0.0
-            if total - previous > 0:
-                fee, fee_asset = total - previous, asset
-        # Clé = cumul atteint : une reprise après arrêt retrouve la même ligne, jamais un
-        # second incrément, et réaligne le cumul déjà rapporté.
+            return 0, False
+        # Clé = cumul atteint : une reprise retrouve la même ligne, jamais un second incrément.
         dedupe_key = f"{item_key}:{decimal_text(quantity)}"
-        cumulative = dict(quantity=quantity, quote=max(quote, float(last["quote"]) + delta_quote),
-                          fee=single[1] if single is not None else 0.0,
-                          fee_asset=single[0] if single is not None else "")
+        cumulative = dict(quantity=quantity, quote=max(quote, float(last["quote"]) + delta_quote))
         if self.registry.event_exists(signal_id, event_type, dedupe_key):
-            self.registry.set_reported(signal_id, item_key, **cumulative)
-            return 0
+            self.registry.set_reported(signal_id, item_key, fees=last["fees"], **cumulative)
+            return 0, False
+
+        trades = self._order_trades(symbol, order_id, quantity)
+        wait_key = (signal_id, dedupe_key)
+        if trades is None and self.client is not None and order_id not in (None, ""):
+            first_seen = self._fee_wait.setdefault(wait_key, now)
+            if now - first_seen < FEE_WAIT_SECONDS:
+                return 0, True  # les exécutions arrivent : attendre les frais réels
+        self._fee_wait.pop(wait_key, None)
+        fee = fee_asset = None
+        fees_seen = dict(last["fees"])
+        if trades is not None:
+            totals, counts = self._trade_fees(trades)
+            deltas = {asset: amount - float(last["fees"].get(asset, 0.0)) for asset, amount in totals.items()}
+            chosen = dominant_fee(deltas, counts)
+            if chosen is not None:
+                fee_asset, fee = chosen
+                omitted = sorted(a for a, v in deltas.items() if v > 0 and a != fee_asset)
+                if omitted:
+                    logger.warning("Retour d'exécution : frais en %s omis pour %s (%s) : une seule devise par "
+                                   "événement, %s retenue", ", ".join(omitted), signal_id, item_key, fee_asset)
+            fees_seen = totals
+            times = [int(t["time"]) for t in trades if str(t.get("time") or "").isdigit()]
+            if times:
+                # Moment de l'exécution chez le courtier, pas de sa détection.
+                occurred_at = max(times) / 1000.0
+        else:
+            # Frais inconnus de Binance : commissions déjà reçues avec l'ordre, sinon omis.
+            totals = {}
+            for commission in commissions or []:
+                if commission.amount > 0:
+                    totals[commission.asset] = totals.get(commission.asset, 0.0) + commission.amount
+            if totals:
+                deltas = {asset: amount - float(last["fees"].get(asset, 0.0)) for asset, amount in totals.items()}
+                chosen = dominant_fee(deltas, {})
+                if chosen is not None:
+                    fee_asset, fee = chosen
+                fees_seen = totals
         written = self._emit(
             signal_id, event_type, dedupe_key, symbol=symbol, occurred_at=occurred_at,
             quantity=delta_qty, price=delta_quote / delta_qty, quote_quantity=delta_quote,
             fee=fee, fee_asset=fee_asset, order_id=order_id, target_index=target_index, reason=reason,
         )
         if written:
-            self.registry.set_reported(signal_id, item_key, **cumulative)
-        return written
+            self.registry.set_reported(signal_id, item_key, fees=fees_seen, **cumulative)
+        return written, False
 
     # ------------------------------------------------------------------
     # Écriture
@@ -532,7 +657,7 @@ class SignalFeedbackWriter:
 
     def _emit(self, signal_id, event_type, dedupe_key, *, symbol, occurred_at, quantity=None, price=None,
               quote_quantity=None, fee=None, fee_asset=None, order_id=None, target_index=None,
-              reason=None) -> int:
+              reason=None, exit_policy_hash=None) -> int:
         """Écrit une ligne si (signal, type, clé) est inédit ; retourne 1 si écrite, 0 sinon."""
         if self.registry.event_exists(signal_id, event_type, dedupe_key):
             return 0
@@ -553,6 +678,7 @@ class SignalFeedbackWriter:
             "order_id": None if order_id in (None, "") else str(order_id),
             "target_index": target_index,
             "reason": None if reason is None else str(reason)[:MAX_REASON],
+            "exit_policy_hash": exit_policy_hash,
         }
         try:
             validate_event(event)

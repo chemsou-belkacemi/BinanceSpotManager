@@ -122,9 +122,9 @@ class Worker:
         # sans ordre reel, aucun evenement ne doit pretendre a une execution.
         self.signal_feedback = SignalFeedbackWriter(
             account_scope(self.settings), self.signal_inbox, self.commands,
-            positions=self.positions, enabled=not self.settings.dry_run,
+            positions=self.positions, client=self.client, enabled=not self.settings.dry_run,
         )
-        # Depot direct (generateur ML v1 ou CSI V2) : lecture de data/signal_drop/incoming/.
+        # Depot direct (generateur ML v1 ou CSI V3) : lecture de data/signal_drop/incoming/.
         self.signal_drop = SignalDropImporter(
             self.signal_inbox, account_scope(self.settings),
             lambda: get_settings_store().load(),
@@ -210,7 +210,7 @@ class Worker:
         runtime.command_capabilities = [
             "signal_v1", "independent_positions_v1", "market_close_v1",
             "telegram_getupdates_v1", "telegram_auto_execution_v1",
-            "signal_drop_v1", "signal_drop_v2", "signal_feedback_v1",
+            "signal_drop_v1", "signal_drop_csi_v3", "signal_feedback_v2",
         ]
         runtime.last_message = message or runtime.last_message
         runtime.heartbeat_at = utcnow()
