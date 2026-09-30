@@ -360,3 +360,42 @@ def test_buy_guard_uses_binance_discount_instead_of_saved_manual_rate(processor)
     )
     assert check.sufficient
     assert check.estimated_required_bnb == pytest.approx(0.001875)
+
+
+# ==========================================================================
+# Routage : refus additionnels pour les commandes AUTO (tests/test_signal_routing.py)
+# ==========================================================================
+
+
+def route_payload(position, **extra):
+    return {"position": position.model_dump(mode="json"), "entry_ids": [e.entry_id for e in position.entries],
+            "reference_price": 84000} | extra
+
+
+@pytest.mark.parametrize("extra, message", [
+    ({"confirmation_mode": "AUTO", "route": {"decision": "REVIEW"}}, "décision de routage AUTO"),
+    ({"confirmation_mode": "AUTO", "route": {"decision": "AUTO"}, "exit_policy_hash": "x",
+      "signal_validation_status": "RESEARCH"}, "DEMO_ELIGIBLE"),
+    ({"confirmation_mode": "AUTO", "route": {"decision": "AUTO"}}, "DEMO_MANUAL"),
+    ({"confirmation_mode": "BOT"}, "Mode de confirmation inconnu"),
+])
+def test_worker_route_guard(processor, extra, message):
+    worker, calls = processor  # le fixture tourne en DEMO_MANUAL
+    worker.store.enqueue(worker.scope, "SUBMIT_POSITION", route_payload(proposed(), **extra), request_key="guard")
+    assert worker.run_one() == "FAILED"
+    assert message in worker.store.list_recent(worker.scope)[0]["result"]["message"]
+    assert calls == []
+
+
+def test_worker_route_guard_leaves_manual_and_legacy_payloads_unchanged(processor):
+    worker, calls = processor
+    for index, extra in enumerate(({}, {"confirmation_mode": "MANUAL", "acknowledged_reason_codes": ["R1"]})):
+        worker.store.enqueue(worker.scope, "SUBMIT_POSITION", route_payload(proposed(), **extra),
+                             request_key=f"manual-{index}")
+        assert worker.run_one() == "SUCCEEDED"
+    assert len(calls) == 2
+    # DEMO_MANUAL non honoré (réglage du propriétaire) : une commande AUTO valide passe.
+    worker.settings_supplier = lambda: {"signal_route_honor_demo_manual": False}
+    worker.store.enqueue(worker.scope, "SUBMIT_POSITION", route_payload(
+        proposed(), confirmation_mode="AUTO", route={"decision": "AUTO"}), request_key="auto-ok")
+    assert worker.run_one() == "SUCCEEDED" and len(calls) == 3

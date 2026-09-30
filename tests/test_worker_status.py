@@ -556,3 +556,28 @@ def test_cycle_with_crossed_stop_triggers_exit_before_reporting_error():
         worker._process_position(position, 80000)
 
     assert handled == [80640.0]
+
+
+
+def test_routing_failure_never_skips_commands_or_position_monitoring():
+    import sqlite3
+
+    worker = Worker.__new__(Worker)
+    events, ran, monitored = [], [], []
+
+    def broken():
+        raise sqlite3.OperationalError("database is locked")
+
+    worker.auto_signal_executor = SimpleNamespace(process_pending=broken)
+    worker.command_processor = SimpleNamespace(run_one=lambda: ran.append(1))
+    worker.events = SimpleNamespace(append=lambda *a, **k: events.append((a, k)))
+    position = Position(symbol="ETHUSDT")
+    worker.positions = SimpleNamespace(list_open=lambda: [position], read_errors=[])
+    worker._price_provider = lambda symbols: lambda symbol: None
+    worker._process_position = lambda p, price: monitored.append(p)
+    worker._loop = 1
+
+    assert worker._tick() == 1
+    assert ran == [1] and monitored == [position]
+    assert events and "Routage des signaux interrompu" in events[0][0][1]
+    assert events[0][1]["level"] == "ERROR"

@@ -1276,3 +1276,56 @@ def test_fix10_expiry_is_rechecked_right_before_the_entry(processor, monkeypatch
     assert submit(worker, {"signal_expires_at": expiry}) == "FAILED"
     assert "EXPIRES_AT" in worker.store.list_recent(worker.scope)[0]["result"]["message"]
     assert calls == []
+
+
+
+# ==========================================================================
+# Routage : retour CSI d'un signal « À confirmer »
+# ==========================================================================
+
+
+def review_row(inbox, text):
+    row = receive_csi(inbox, text)
+    inbox.set_auto_state("demo", row["id"], "REVIEW", "Statut CSI RESEARCH",
+                         route=json.dumps({"reasons": [{"code": "C_CSI_STATUS"}]}))
+    return row
+
+
+def test_feedback_for_a_review_row_confirmed_by_hand_is_never_rejected(tmp_path, btc_rules):
+    inbox, commands, store, writer = feedback_setup(tmp_path)
+    row = review_row(inbox, csi_text(VALIDATION_STATUS="RESEARCH"))
+    writer.register(SIGNAL_ID, row["id"], "BTCUSDT")
+    assert writer.sync([]) == 0  # en attente de confirmation : aucun refus prématuré
+    _, payload = prepare_signal(parse_signal(csi_text(VALIDATION_STATUS="RESEARCH")), btc_rules, budget=300,
+                                available_quote=1000, reserve_percent=20, current_price=84500,
+                                signal_id=row["id"], source="api", validity_confirmed=True)
+    payload |= {"confirmation_mode": "MANUAL", "acknowledged_reason_codes": ["C_CSI_STATUS"]}
+    command = commands.enqueue("demo", "SUBMIT_POSITION", inbox.freeze("demo", row["id"], payload),
+                               request_key=f"signal:{row['id']}")
+    succeed(commands, command)
+    position = Position.model_validate(payload["position"])
+    position.entries[0].status, position.entries[0].order_id = EntryStatus.SUBMITTED, 321
+    late = SignalFeedbackWriter("demo", inbox, commands, positions=store, directory=writer.directory,
+                                registry_path=writer.registry.path, clock=lambda: EXPIRES + 61)
+    assert late.sync([position]) == 2
+    events = assert_contract(lines_of(writer))
+    assert [e["event_type"] for e in events] == ["RECEIVED", "ORDER_PLACED"]
+
+
+def test_feedback_for_an_unconfirmed_review_row_waits_for_expiry(tmp_path):
+    inbox, commands, store, writer = feedback_setup(tmp_path)
+    row = review_row(inbox, csi_text(VALIDATION_STATUS="RESEARCH"))
+    writer.register(SIGNAL_ID, row["id"], "BTCUSDT")
+    assert writer.sync([], now=EXPIRES + 30) == 0
+    assert writer.sync([], now=EXPIRES + 61) == 1 and writer.sync([], now=EXPIRES + 120) == 0
+    events = assert_contract(lines_of(writer))
+    assert [e["event_type"] for e in events] == ["REJECTED"]
+    assert "Confirmation manuelle requise" in events[0]["reason"] and "C_CSI_STATUS" in events[0]["reason"]
+    assert writer.registry.pending() == []
+
+    frozen = receive_csi(inbox, csi_text(SIGNAL_ID="CSI-FROZEN", IDEMPOTENCY_KEY=KEY + ":Z"))
+    inbox.freeze("demo", frozen["id"], {"position": {"position_id": "p"}, "confirmation_mode": "MANUAL"})
+    writer.register("CSI-FROZEN", frozen["id"], "BTCUSDT")
+    assert writer.sync([], now=EXPIRES + 61) == 1
+    last = assert_contract(lines_of(writer))[-1]
+    assert last["signal_id"] == "CSI-FROZEN" and "gelée sans transmission" in last["reason"]
