@@ -136,6 +136,48 @@ dans le dossier du projet. `make down` les conserve ; **ne jamais lancer
   `make run CMD="python scripts/<script>.py ..."` lance un script ponctuel relié
   aux données.
 
+### Accès public (serveur, VPS)
+
+L'interface n'a **aucune authentification** : ne jamais publier le port 8501
+(par exemple `0.0.0.0:8501`), d'autant que Docker contourne les règles `ufw`
+pour les ports publiés. L'accès public passe par un proxy Caddy : HTTPS
+automatique (Let's Encrypt) et un identifiant par personne pour toutes les pages.
+
+1. Ouvrir les ports **80** et **443** du serveur (80 sert au certificat et à la
+   redirection vers HTTPS). Rien d'autre ne doit déjà les utiliser.
+2. Compléter `.env` :
+   ```bash
+   COMPOSE_PROFILES=public
+   BSM_PUBLIC_HOST=62-84-177-241.sslip.io   # ou un nom de domaine pointant vers le serveur
+   ```
+   Sans nom de domaine, `<ip-avec-tirets>.sslip.io` pointe vers l'IP du serveur
+   et permet un certificat valide.
+3. Créer au moins un utilisateur, puis démarrer :
+   ```bash
+   make user-add NAME=imad      # demande le mot de passe (12 caractères minimum)
+   make up                      # puis ouvrir https://<BSM_PUBLIC_HOST>
+   ```
+
+| Commande | Effet |
+|---|---|
+| `make user-add NAME=<nom>` | ajoute une personne, ou change son mot de passe |
+| `make user-remove NAME=<nom>` | retire son accès immédiatement (refusé pour le dernier utilisateur) |
+| `make users` | liste les utilisateurs |
+| `make logs SERVICE=proxy` | journal d'accès ; `user_id` indique qui a fait chaque requête |
+
+Les modifications s'appliquent sans redémarrage. Les identifiants sont dans
+`deploy/users.caddy` (hash bcrypt, lisible par son seul propriétaire), jamais
+dans Git ni dans l'image. Le proxy refuse de démarrer sans hôte ni utilisateur :
+il n'y a jamais d'interface publique sans mot de passe, et il ne reçoit aucune
+clé Binance.
+
+**Tous les utilisateurs ont les mêmes droits** : trades, annulations, réglages
+et arrêt du worker, sur le même compte Demo. Il n'y a pas de rôles ; ne donner
+un accès qu'à des personnes de confiance. L'adresse `sslip.io` apparaît dans les
+journaux publics des certificats et sera rapidement sondée : utiliser des mots de
+passe longs et aléatoires. L'interface reste aussi joignable par tunnel SSH
+(`ssh -L 8501:127.0.0.1:8501 <serveur>`).
+
 ## 6. Créer un trade
 
 1. **New Trade** → saisir la paire (`BTCUSDT`). Le bot vérifie immédiatement la paire,
