@@ -53,6 +53,27 @@ services:
       start_period: 30s
       retries: 3
 
+  # Acces public (optionnel, COMPOSE_PROFILES=public dans .env) : HTTPS + mot de passe.
+  # Seule entree publique : l'interface reste liee a 127.0.0.1. Aucune cle Binance ici.
+  proxy:
+    image: caddy:2-alpine
+    profiles: ["public"]
+    init: true
+    depends_on: [ui]
+    entrypoint: ["sh", "/etc/caddy/deploy/proxy-entrypoint.sh"]
+    environment:
+      BSM_PUBLIC_HOST: ${BSM_PUBLIC_HOST:-}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      # Dossier entier (pas les fichiers) : make user-add remplace users.caddy et recharge.
+      - ./deploy:/etc/caddy/deploy:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+
   # Outils ponctuels (make test) : aucun volume, aucun secret.
   test:
     build: .
@@ -73,6 +94,9 @@ services:
 volumes:
   bsm-data:
   bsm-logs:
+  # Certificats HTTPS : a conserver, sinon Let's Encrypt en reemet (limites de frequence).
+  caddy-data:
+  caddy-config:
 
 networks:
   default: {}

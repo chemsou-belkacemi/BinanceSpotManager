@@ -1,0 +1,26 @@
+# Acces public a l'interface : HTTPS automatique (Let's Encrypt) + un identifiant par personne.
+# Streamlit n'a aucune authentification : ce proxy est la seule entree publique.
+# Hote lu depuis .env (BSM_PUBLIC_HOST) ; utilisateurs dans deploy/users.caddy (make user-add).
+
+{$BSM_PUBLIC_HOST} {
+	basic_auth {
+		import /etc/caddy/deploy/users.caddy
+	}
+
+	# WebSocket Streamlit compris ; l'en-tete Authorization suit la connexion.
+	reverse_proxy ui:8501
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	# Journal d'acces (make logs SERVICE=proxy) : user_id indique qui a fait la requete.
+	# Caddy masque l'en-tete Authorization et les cookies dans ce journal.
+	log {
+		output stdout
+	}
+}
