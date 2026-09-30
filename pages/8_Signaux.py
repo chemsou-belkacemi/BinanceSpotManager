@@ -1,4 +1,5 @@
 """Text signal inbox, explicit preview and guarded Demo submission."""
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 import time
@@ -99,12 +100,19 @@ if row["payload"] is None and st.button("Réanalyser ce signal", help="Reprendre
     except ValueError as exc:
         st.error(str(exc))
 parsed = ParsedSignal(**row["parsed"])
+source_date_label = "Date source (UTC)"
+source_date = parsed.published_at or "non vérifiée"
+if row.get("source") == "telegram" and float(row.get("source_timestamp") or 0) > 0:
+    source_date_label = "Date Telegram (UTC)"
+    source_date = datetime.fromtimestamp(
+        float(row["source_timestamp"]), tz=timezone.utc,
+    ).isoformat()
 with st.expander("Texte original"):
     st.text(row["raw"])
 st.write(f"Modèle : {TEMPLATES.get(parsed.template, parsed.template)} · Direction : {parsed.direction or 'inconnue'} · Plateforme : {parsed.exchange or 'non précisée'}")
 st.write({"Paire": parsed.symbol, "Entrées": parsed.entries, "TP": parsed.targets,
           "SL": parsed.stop, "Mention SL": parsed.stop_timeframe or "aucune",
-          "Date source (UTC)": parsed.published_at or "non vérifiée"})
+          source_date_label: source_date})
 for warning in parsed.warnings:
     st.warning(warning)
 for error in parsed.errors:

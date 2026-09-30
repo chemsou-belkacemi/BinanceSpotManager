@@ -11,6 +11,9 @@ TEMPLATES = {"auto": "Automatique", "structured": "PAIR / ENTRY / T1 (Suhaib, Cl
              "numbered": "#PAIRE / Entry1 / TP1 / Stop (Al-Mahwashi)",
              "simple": "BUY / Entry Price / TP"}
 NUMBER = r"(?:\d+(?:\.\d+)?|\.\d+)"
+UNVERIFIABLE_SOURCE_DATE_WARNING = (
+    "Date source non vérifiable : contrôler manuellement la validité du signal."
+)
 
 
 @dataclass
@@ -149,5 +152,5 @@ def parse_signal(raw: str, template: str = "auto") -> ParsedSignal:
         except ValueError:
             result.errors.append("Date du signal invalide.")
     else:
-        result.warnings.append("Date source non vérifiable : contrôler manuellement la validité du signal.")
+        result.warnings.append(UNVERIFIABLE_SOURCE_DATE_WARNING)
     return result

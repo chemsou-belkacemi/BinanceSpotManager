@@ -7,7 +7,11 @@ import time
 import uuid
 
 from .config import DATA_DIR
-from .signal_parser import content_hash, parse_signal
+from .signal_parser import (
+    UNVERIFIABLE_SOURCE_DATE_WARNING,
+    content_hash,
+    parse_signal,
+)
 
 
 class SignalInbox:
@@ -51,12 +55,25 @@ class SignalInbox:
     def decode(row):
         if row is None:
             return None
-        return dict(row) | {"parsed": json.loads(row["parsed"]),
+        parsed = json.loads(row["parsed"])
+        # Telegram provides its own server timestamp. It is the authoritative
+        # freshness source, so an absent date inside the message is not a warning.
+        if row["source"] == "telegram":
+            parsed["warnings"] = [
+                warning for warning in parsed.get("warnings", [])
+                if warning != UNVERIFIABLE_SOURCE_DATE_WARNING
+            ]
+        return dict(row) | {"parsed": parsed,
                             "payload": json.loads(row["payload"]) if row["payload"] else None}
 
     def receive(self, scope, raw, *, template="auto", source="manual", external_id="",
                 edited=False, source_timestamp=0.0):
         parsed = parse_signal(raw, template).to_dict()
+        if source == "telegram":
+            parsed["warnings"] = [
+                warning for warning in parsed["warnings"]
+                if warning != UNVERIFIABLE_SOURCE_DATE_WARNING
+            ]
         if edited:
             parsed["errors"].append("Message édité : vérifier manuellement via New Trade ; aucun ordre remplacé.")
         with self.connect() as db, db:

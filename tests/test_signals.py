@@ -1,6 +1,7 @@
 """Offline parser, durable deduplication and preparation safety tests."""
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -165,6 +166,37 @@ def test_dates_quotes_and_forced_template():
     assert not parse_signal(SIMPLE.replace("USDT", "USDC")).errors
     assert parse_signal(BICO, "abk").errors
     assert parse_signal(BICO, "structured").errors == []
+
+
+def test_missing_embedded_date_warning_is_ignored_only_for_telegram(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    manual = inbox.receive("manual", SIMPLE)
+    telegram = inbox.receive(
+        "telegram", SIMPLE, source="telegram", external_id="99:1",
+        source_timestamp=1_790_763_600,
+    )
+
+    assert any("Date source non vérifiable" in warning for warning in manual["parsed"]["warnings"])
+    assert not any("Date source non vérifiable" in warning for warning in telegram["parsed"]["warnings"])
+
+
+def test_old_stored_telegram_warning_is_hidden_when_decoded(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    row = inbox.receive(
+        "demo", SIMPLE, source="telegram", external_id="99:2",
+        source_timestamp=1_790_763_600,
+    )
+    with inbox.connect() as db, db:
+        parsed = json.loads(db.execute(
+            "SELECT parsed FROM signals WHERE id=?", (row["id"],),
+        ).fetchone()[0])
+        parsed["warnings"].append(
+            "Date source non vérifiable : contrôler manuellement la validité du signal."
+        )
+        db.execute("UPDATE signals SET parsed=? WHERE id=?", (json.dumps(parsed), row["id"]))
+
+    saved = inbox.recent("demo")[0]
+    assert not any("Date source non vérifiable" in warning for warning in saved["parsed"]["warnings"])
 
 
 def test_deduplication_and_immutable_confirmation(tmp_path):
