@@ -379,6 +379,10 @@ affiche le détail.
   à 2 % lorsque le capital libre passe sous 30 % par défaut). Une autorisation séparée dans
   Settings peut envoyer les nouveaux signaux valides directement au worker Demo. L'âge du
   message, la réserve, les frais et les limites de risque restent contrôlés.
+- **Dépôt direct de signaux par fichiers** (`data/signal_drop/`) : JSON v1 du générateur ML
+  local, ou TXT `SIGNAL_VERSION=2` de CryptoSignalIntelligence (fenêtre `VALID_FROM` /
+  `EXPIRES_AT`, écart d'entrée maximal, clé d'idempotence, poids de TP, retour d'exécution
+  JSONL dans `outgoing/`, hors `DRY_RUN`). Détails et limites : [docs/SIGNAUX.md](docs/SIGNAUX.md).
 - **SMS et WhatsApp** : interfaces présentes, envoi désactivé.
 - **Le montant engagé dans le sizing dépend du solde lu au moment du calcul.** Si le solde
   change entre la simulation et l'exécution, les quantités envoyées peuvent différer.
