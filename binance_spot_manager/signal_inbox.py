@@ -57,6 +57,7 @@ class SignalInbox:
                 auto_state TEXT NOT NULL DEFAULT '',
                 auto_detail TEXT NOT NULL DEFAULT '',
                 expires_at REAL NOT NULL DEFAULT 0,
+                route TEXT NOT NULL DEFAULT '',
                 UNIQUE(scope, hash))""")
             columns = {row[1] for row in db.execute("PRAGMA table_info(signals)")}
             for name, definition in (
@@ -65,6 +66,8 @@ class SignalInbox:
                 ("auto_detail", "TEXT NOT NULL DEFAULT ''"),
                 # Contrat CSI : EXPIRES_AT (Unix, fin d'acceptation) ; 0 pour les formats historiques.
                 ("expires_at", "REAL NOT NULL DEFAULT 0"),
+                # Décision de routage (JSON : motifs, seuils, métriques) ; '' si jamais routé.
+                ("route", "TEXT NOT NULL DEFAULT ''"),
             ):
                 if name not in columns:
                     db.execute(f"ALTER TABLE signals ADD COLUMN {name} {definition}")
@@ -201,7 +204,8 @@ class SignalInbox:
             # payload was ever frozen. A fresh resend may retry a rejected preparation,
             # whereas confirmed/queued rows remain immutable and cannot create another
             # order. A drop file re-imported after a crash keeps its external_id and
-            # therefore never resets a previous refusal.
+            # therefore never resets a previous refusal. REVIEW (« À confirmer ») is
+            # deliberately sticky: a resend never re-routes a row already sent to review.
             if (source in AUTO_SOURCES and external_id and source_timestamp
                     and (source == "telegram" or row["external_id"] != external_id)
                     and not edited and not revised and row["payload"] is None
@@ -295,12 +299,7 @@ class SignalInbox:
         Rows carrying a CSI EXPIRES_AT ignore the age window: the executor applies
         VALID_FROM <= now < EXPIRES_AT itself and records an explicit refusal.
         """
-        if isinstance(sources, dict):
-            windows = {str(name): max(float(enabled_since), float(since))
-                       for name, since in sources.items()}
-        else:
-            windows = {str(name): float(enabled_since) for name in sources}
-        windows = sorted((name, since) for name, since in windows.items() if name in AUTO_SOURCES)
+        windows = self._windows(enabled_since, sources)
         if not windows:
             return []
         clause = " OR ".join(["(source=? AND received>=?)"] * len(windows))
@@ -329,12 +328,60 @@ class SignalInbox:
             ).fetchone()
             return bool(row and row[0] == "PROCESSING")
 
-    def set_auto_state(self, scope, signal_id, state, detail=""):
-        if state not in {"QUEUED", "REJECTED", "PROCESSING"}:
+    def set_auto_state(self, scope, signal_id, state, detail="", *, route=None):
+        if state not in {"QUEUED", "REJECTED", "PROCESSING", "REVIEW"}:
             raise ValueError("État automatique invalide")
         with self.connect() as db, db:
-            changed = db.execute("""UPDATE signals SET auto_state=?, auto_detail=?
-                WHERE scope=? AND id=?""",
-                (state, str(detail)[:1000], scope, signal_id)).rowcount
+            if route is None:
+                changed = db.execute("""UPDATE signals SET auto_state=?, auto_detail=?
+                    WHERE scope=? AND id=?""",
+                    (state, str(detail)[:1000], scope, signal_id)).rowcount
+            else:
+                changed = db.execute("""UPDATE signals SET auto_state=?, auto_detail=?, route=?
+                    WHERE scope=? AND id=?""",
+                    (state, str(detail)[:1000], str(route), scope, signal_id)).rowcount
             if changed != 1:
                 raise ValueError("Signal automatique absent")
+
+    @staticmethod
+    def _windows(enabled_since, sources):
+        if isinstance(sources, dict):
+            windows = {str(name): max(float(enabled_since), float(since))
+                       for name, since in sources.items()}
+        else:
+            windows = {str(name): float(enabled_since) for name in sources}
+        return sorted((name, since) for name, since in windows.items() if name in AUTO_SOURCES)
+
+    def stale_rows_for_review(self, scope, *, enabled_since, oldest_source_timestamp, now,
+                              sources=("telegram",), limit=20):
+        """Lignes autorisées, reçues après l'autorisation, jamais routées et hors fenêtre d'âge.
+
+        Sans cette pré-passe, un message trop ancien restait '' sans motif. Les lignes
+        CSI (EXPIRES_AT) suivent leur propre fenêtre et ne sont jamais concernées.
+        """
+        windows = self._windows(enabled_since, sources)
+        if not windows:
+            return []
+        clause = " OR ".join(["(source=? AND received>=?)"] * len(windows))
+        params = [value for window in windows for value in window]
+        with self.connect() as db:
+            rows = db.execute("SELECT * FROM signals WHERE scope=? AND (" + clause + """)
+                  AND auto_state='' AND payload IS NULL AND expires_at=0
+                  AND (source_timestamp<=0 OR source_timestamp<? OR source_timestamp>?)
+                ORDER BY received, id LIMIT ?""",
+                (scope, *params, float(oldest_source_timestamp), float(now) + 60,
+                 max(1, min(int(limit), 100)))).fetchall()
+            return [self.decode(row) for row in rows]
+
+    def pending_review(self, scope, *, now=None, limit=100):
+        """Signaux « À confirmer » encore confirmables (non gelés, analysables, non expirés)."""
+        now = time.time() if now is None else float(now)
+        with self.connect() as db:
+            rows = db.execute("""SELECT * FROM signals WHERE scope=? AND auto_state='REVIEW'
+                AND payload IS NULL AND (expires_at=0 OR expires_at>?)
+                ORDER BY received DESC LIMIT ?""", (scope, now, max(1, min(int(limit), 500)))).fetchall()
+        decoded = [self.decode(row) for row in rows]
+        return [row for row in decoded if not row["parsed"].get("errors")]
+
+    def count_review(self, scope, *, now=None):
+        return len(self.pending_review(scope, now=now, limit=500))

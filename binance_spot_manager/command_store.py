@@ -102,6 +102,24 @@ class CommandStore:
                 (scope, request_key),
             ).fetchone())
 
+    def active(self, scope, action=None):
+        """Commandes en attente ou en cours (lecture seule), les plus anciennes d'abord."""
+        query = "SELECT * FROM commands WHERE scope=? AND state IN ('PENDING', 'RUNNING')"
+        params = [scope]
+        if action:
+            query += " AND action=?"
+            params.append(action)
+        with self.connect() as db:
+            return [self.decode(r) for r in db.execute(query + " ORDER BY created_at, id", params)]
+
+    def auto_commands(self, scope, *, since=0.0):
+        """SUBMIT_POSITION dont le payload gelé porte confirmation_mode AUTO (lecture seule)."""
+        with self.connect() as db:
+            rows = [self.decode(r) for r in db.execute(
+                """SELECT * FROM commands WHERE scope=? AND action='SUBMIT_POSITION' AND created_at>=?
+                   ORDER BY created_at, id""", (scope, float(since)))]
+        return [row for row in rows if (row["payload"] or {}).get("confirmation_mode") == "AUTO"]
+
     def cancel_pending(self, scope, command_id):
         with self.connect() as db, db:
             return db.execute("UPDATE commands SET state='CANCELED', updated_at=? WHERE scope=? AND id=? AND state='PENDING'", (time.time(), scope, command_id)).rowcount == 1

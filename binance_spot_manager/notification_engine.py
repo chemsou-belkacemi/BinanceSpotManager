@@ -34,8 +34,8 @@ logger = logging.getLogger("bsm.notifications")
 # ==========================================================================
 
 NOTIFIABLE_EVENTS: dict[str, str] = {
-    "SIGNAL_RECEIVED": "Signal recu",
-    "SIGNAL_REJECTED": "Signal rejete",
+    # Désactivé par défaut (Settings → Signaux) ; le texte ne contient aucun prix.
+    "SIGNAL_REVIEW": "Signal a confirmer",
     "ENTRY_CREATED": "Entry creee",
     "ENTRY_FILLED": "Entry remplie",
     "ENTRY_PARTIAL": "Entry partielle",

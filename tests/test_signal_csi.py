@@ -484,8 +484,12 @@ def test_only_demo_eligible_is_executed_automatically(tmp_path, status):
     receive_csi(inbox, csi_text(VALIDATION_STATUS=status))
     worker, commands = executor(tmp_path, inbox, drop_preferences(), now=NOW)
 
-    assert worker.process_pending() == ["REJECTED"]
-    assert f"VALIDATION_STATUS={status}" in inbox.recent("demo")[0]["auto_detail"]
+    # Décision du propriétaire : jamais bloqué, jamais automatique — « À confirmer ».
+    assert worker.process_pending() == ["REVIEW"]
+    saved = inbox.recent("demo")[0]
+    assert saved["auto_state"] == "REVIEW" and saved["payload"] is None
+    assert f"Statut CSI {status}" in saved["auto_detail"]
+    assert '"C_CSI_STATUS"' in saved["route"]
     assert commands.list_recent("demo") == []
 
 
@@ -959,24 +963,25 @@ def test_feedback_rejections_come_from_reception_auto_state_and_failed_commands(
     assert not writer.record_rejection("", "BTCUSDT", "sans identifiant")
     auto = receive_csi(inbox, csi_text(SIGNAL_ID="CSI-AUTO", IDEMPOTENCY_KEY=KEY + ":A",
                                        VALIDATION_STATUS="RESEARCH"))
-    inbox.set_auto_state("demo", auto["id"], "REJECTED", "VALIDATION_STATUS=RESEARCH : seul DEMO_ELIGIBLE")
+    inbox.set_auto_state("demo", auto["id"], "REJECTED", "Écart de prix 59.5 bps > MAX_ENTRY_DEVIATION_BPS 20")
     row, command, _ = queue_signal(inbox, commands, writer,
                                    csi_text(SIGNAL_ID="CSI-FAILED", IDEMPOTENCY_KEY=KEY + ":F"), btc_rules)
     commands.claim("demo")
     commands.finish("demo", command["id"], "FAILED", {"message": "Prix modifie de plus de 1 %"})
     receive_csi(inbox, csi_text(SIGNAL_ID="CSI-NEVER", IDEMPOTENCY_KEY=KEY + ":N"))
 
-    assert writer.sync([]) == 3
+    # Sans commande, le refus attend EXPIRES_AT + 60 s : une confirmation manuelle reste possible.
+    assert writer.sync([]) == 2  # CSI-FAILED : RECEIVED + REJECTED
     late = SignalFeedbackWriter("demo", inbox, commands, positions=store, directory=writer.directory,
                                 registry_path=writer.registry.path, clock=lambda: EXPIRES + 61)
-    assert late.sync([]) == 1 and late.sync([]) == 0
+    assert late.sync([]) == 2 and late.sync([]) == 0  # CSI-AUTO et CSI-NEVER
 
     events = assert_contract(lines_of(writer))
     by_signal = {}
     for event in events:
         by_signal.setdefault(event["signal_id"], []).append(event)
     assert [e["event_type"] for e in by_signal["CSI-RECEPTION"]] == ["REJECTED"]
-    assert "RESEARCH" in by_signal["CSI-AUTO"][0]["reason"]
+    assert "59.5 bps" in by_signal["CSI-AUTO"][0]["reason"]
     assert [e["event_type"] for e in by_signal["CSI-FAILED"]] == ["RECEIVED", "REJECTED"]
     assert by_signal["CSI-FAILED"][1]["reason"] == "Prix modifie de plus de 1 %"
     assert "avant tout traitement" in by_signal["CSI-NEVER"][0]["reason"]
