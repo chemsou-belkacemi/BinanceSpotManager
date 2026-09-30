@@ -185,7 +185,7 @@ jamais valorisé à zéro en silence.
 | Mode | Comportement |
 |---|---|
 | `DRY_RUN` | Prix réels, calculs réels, **aucun ordre envoyé**. Idéal pour tester. |
-| `DEMO_MANUAL` | Demo avec validation humaine possible avant chaque envoi. |
+| `DEMO_MANUAL` | Demo ; tout signal demande une confirmation manuelle (réglable dans Settings → Signaux). |
 | `DEMO_AUTO` | Demo, le worker agit automatiquement. |
 | `LIVE` | **Non implémenté.** Toute écriture est refusée. |
 
@@ -386,6 +386,12 @@ affiche le détail.
   empreinte, exécution automatique réservée à `DEMO_ELIGIBLE`, retour d'exécution v2 JSONL
   dans `outgoing/` avec frais réels lus sur myTrades, hors `DRY_RUN`). Détails et limites :
   [docs/SIGNAUX.md](docs/SIGNAUX.md).
+- **Routage des signaux** : confirmation manuelle obligatoire si le risque est élevé ou si la
+  confiance est faible ou inconnue ; seul un signal sans motif de revue part automatiquement
+  (Demo, automatisation autorisée). Confiance déclarée (statut CSI `DEMO_ELIGIBLE`, groupe
+  Telegram de confiance, liste d'actifs validés ; JSON v1 toujours manuel), risque frais
+  compris, limites dures en miroir, coupe-circuits. Les autres signaux passent « À confirmer »
+  dans la page Signaux. Voir [docs/SIGNAUX.md](docs/SIGNAUX.md#routage--confirmation-manuelle-ou-exécution-automatique).
 - **SMS et WhatsApp** : interfaces présentes, envoi désactivé.
 - **Le montant engagé dans le sizing dépend du solde lu au moment du calcul.** Si le solde
   change entre la simulation et l'exécution, les quantités envoyées peuvent différer.
