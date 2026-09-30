@@ -44,7 +44,8 @@ def test_valid_file_is_imported_as_api_signal_and_moved(tmp_path):
     worker, inbox = importer(tmp_path)
     drop(tmp_path / "drop", "ml-abc123.json", document())
     drop(tmp_path / "drop", "ml-next.tmp", b"{partial")
-    drop(tmp_path / "drop", "notes.txt", b"ignored")
+    drop(tmp_path / "drop", "CSI-next.txt.tmp", b"SIGNAL_VERSION=2\npartial")
+    drop(tmp_path / "drop", "notes.md", b"ignored")
 
     rows = worker.import_pending()
 
@@ -56,7 +57,10 @@ def test_valid_file_is_imported_as_api_signal_and_moved(tmp_path):
     assert row["parsed"]["symbol"] == "BTCUSDT"
     assert not row["parsed"]["errors"]
     assert (tmp_path / "drop" / "processed" / "ml-abc123.json").exists()
-    assert sorted(p.name for p in (tmp_path / "drop" / "incoming").iterdir()) == ["ml-next.tmp", "notes.txt"]
+    # Écritures en cours (*.tmp, *.txt.tmp) et autres extensions : jamais lues.
+    assert sorted(p.name for p in (tmp_path / "drop" / "incoming").iterdir()) == [
+        "CSI-next.txt.tmp", "ml-next.tmp", "notes.md",
+    ]
     snapshot = worker.snapshot()
     assert snapshot["state"] == "ACTIVE"
     assert snapshot["imported_total"] == 1

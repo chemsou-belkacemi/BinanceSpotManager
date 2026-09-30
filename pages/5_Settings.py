@@ -93,8 +93,10 @@ with tabs[5]:
     st.divider()
     st.subheader("Dépôt direct (générateur ML)")
     st.caption(
-        "Le worker relit `data/signal_drop/incoming/` à chaque cycle. Chaque fichier JSON "
-        "passe par le même parseur strict que Telegram ; la réception seule ne crée aucun ordre."
+        "Le worker relit `data/signal_drop/incoming/` à chaque cycle. Un fichier JSON (v1) "
+        "passe par le même parseur strict que Telegram ; un fichier TXT `SIGNAL_VERSION=2` "
+        "(CryptoSignalIntelligence) est contrôlé par le contrat V2 (expiration, écart d'entrée, "
+        "idempotence). La réception seule ne crée aucun ordre."
     )
     with st.form("signal_drop_preferences"):
         drop_enabled = st.toggle(
