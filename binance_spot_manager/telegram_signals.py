@@ -7,7 +7,7 @@ import time
 
 import requests
 
-from .signal_inbox import SignalInbox
+from .signal_inbox import CsiChannelRefused, SignalInbox
 
 
 logger = logging.getLogger("bsm.telegram")
@@ -61,10 +61,14 @@ def import_telegram(
         if chat in allowed_chats and raw:
             origin = message.get("forward_origin") or {}
             source_timestamp = origin.get("date") or message.get("date") or 0
-            received.append(inbox.receive(scope, raw, source="telegram",
-                external_id=f"{bot}:{chat}:{message['message_id']}",
-                edited="edited_message" in update or "edited_channel_post" in update,
-                source_timestamp=source_timestamp))
+            try:
+                received.append(inbox.receive(scope, raw, source="telegram",
+                    external_id=f"{bot}:{chat}:{message['message_id']}",
+                    edited="edited_message" in update or "edited_channel_post" in update,
+                    source_timestamp=source_timestamp))
+            except CsiChannelRefused:
+                # Un signal CSI ne passe que par le dépôt TXT : message ignoré, offset avancé.
+                logger.warning("Message Telegram %s ignoré : signal CSI hors dépôt TXT", message["message_id"])
         # Persist only AFTER saving the message. A retry remains idempotent.
         inbox.advance(bot, int(update["update_id"]) + 1)
     return received

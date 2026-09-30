@@ -22,7 +22,7 @@ from binance_spot_manager.signal_drop import SignalDropImporter
 from binance_spot_manager.signal_feedback import (
     FeedbackContractError, SignalFeedbackWriter, build_event_id, decimal_text, dominant_fee, validate_event,
 )
-from binance_spot_manager.signal_inbox import DuplicateSignal, SignalInbox
+from binance_spot_manager.signal_inbox import CsiChannelRefused, DuplicateSignal, SignalInbox
 from binance_spot_manager.signal_parser import (
     BSM_EXIT_POLICIES, BSM_EXIT_POLICY_HASHES, CSI_POLICY_REGISTRY, ParsedSignal, exit_policy_hash,
     parse_csi_signal, parse_signal,
@@ -427,7 +427,7 @@ def test_duplicate_idempotency_key_and_replays(tmp_path):
     assert "Doublon" in reason_of(tmp_path, "second.txt")
     drop_file(tmp_path, "third.txt", csi_text(IDEMPOTENCY_KEY=KEY + ":B"))
     assert importer.import_pending() == []
-    assert "Doublon" in reason_of(tmp_path, "third.txt")
+    assert "déjà reçu" in reason_of(tmp_path, "third.txt")
     drop_file(tmp_path, "first.txt", csi_text())
     replay = importer.import_pending()
     assert len(replay) == 1 and replay[0]["id"] == first["id"]
@@ -445,8 +445,10 @@ def test_inbox_registry_is_written_with_the_signal(tmp_path):
     assert same.value.same_signal
     assert receive_csi(inbox, csi_text())["id"] == row["id"]
     assert receive_csi(inbox, csi_text(), scope="other")["id"] != row["id"]
-    with pytest.raises(ValueError, match="requis ensemble"):
+    with pytest.raises(CsiChannelRefused):
         inbox.receive("demo", csi_text(), idempotency_key=KEY)
+    with pytest.raises(ValueError, match="réservés aux signaux CSI"):
+        inbox.receive("demo", SIMPLE, idempotency_key=KEY, producer_signal_id="X")
 
 
 # ==========================================================================
@@ -462,6 +464,7 @@ def test_row_is_queued_within_window_with_both_expirations_frozen(tmp_path):
     assert worker.process_pending() == ["QUEUED"]
     payload = commands.get_by_request_key("demo", f"signal:{row['id']}")["payload"]
     assert payload["signal_expires_at"] == EXPIRES and payload["entry_expires_at"] == ENTRY_EXPIRES
+    assert payload["signal_valid_from"] == CREATED
     assert payload["max_entry_deviation_bps"] == 100.0 and payload["signal_entry_price"] == 84000.0
     assert payload["exit_policy_id"] == FIXED and payload["exit_policy_hash"] == BSM_EXIT_POLICY_HASHES[FIXED]
     position = payload["position"]
@@ -1079,3 +1082,192 @@ def test_feedback_validation_replicates_producer_rules():
 def test_producer_feedback_model_v2_is_used_for_cross_validation():
     assert CSI_SCHEMA.FEEDBACK_VERSION == 2
     assert {"ORDER_PLACED", "MARKET_EXIT_FILLED"} <= set(CSI_SCHEMA.FILL_EVENTS | {"ORDER_PLACED"})
+
+
+# ==========================================================================
+# Corrections de la relecture indépendante (un test par correction)
+# ==========================================================================
+
+
+def test_fix1_csi_text_is_only_accepted_from_the_txt_drop(tmp_path):
+    import hashlib
+    from types import SimpleNamespace
+
+    from binance_spot_manager.telegram_signals import import_telegram
+
+    importer, inbox = drop_importer(tmp_path)
+    drop_file(tmp_path, "ok.txt", csi_text())
+    assert len(importer.import_pending()) == 1
+    # Même SIGNAL_ID par Telegram, avec seulement de la prose en plus : jamais enregistré.
+    copy = csi_text() + "Commentaire du canal\n"
+    updates = [{"update_id": 1, "message": {"chat": {"id": 7}, "message_id": 3, "text": copy, "date": 995}}]
+    session = SimpleNamespace(get=lambda url, **kw: SimpleNamespace(
+        status_code=200, json=lambda: {"ok": True, "result": updates}))
+    assert import_telegram("secret", {7}, inbox, "demo", session=session) == []
+    assert inbox.offset(hashlib.sha256(b"secret").hexdigest()) == 2
+    # Collage manuel et JSON v1 : refusés aussi.
+    with pytest.raises(CsiChannelRefused):
+        inbox.receive("demo", copy)
+    drop_file(tmp_path, "ml.json", json.dumps({"version": 1, "id": "ml-1", "created_at": 995.0, "text": copy}))
+    assert importer.import_pending() == []
+    assert "dépôt TXT" in reason_of(tmp_path, "ml.json")
+    assert len(inbox.recent("demo")) == 1
+    # Le dépôt lui-même ne peut pas contourner le registre : identité lue dans le texte.
+    with pytest.raises(DuplicateSignal):
+        inbox.receive("demo", copy, source="api", external_id=f"csi:{SIGNAL_ID}", source_timestamp=CREATED)
+
+
+def test_fix1_executor_refuses_a_csi_row_without_csi_origin(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    row = receive_csi(inbox, csi_text())
+    with inbox.connect() as db, db:
+        db.execute("UPDATE signals SET external_id='bot:7:3', source='telegram' WHERE id=?", (row["id"],))
+    preferences = drop_preferences() | {"signal_telegram_enabled": True, "signal_telegram_auto_enabled": True}
+    worker, commands = executor(tmp_path, inbox, preferences, now=NOW)
+    assert worker.process_pending() == ["REJECTED"]
+    assert "hors dépôt TXT" in inbox.recent("demo")[0]["auto_detail"]
+    assert commands.list_recent("demo") == []
+
+
+def test_fix2_redropped_known_signal_id_is_classified_without_feedback(tmp_path):
+    inbox, commands, store, writer = feedback_setup(tmp_path)
+    importer, _ = drop_importer(tmp_path, feedback=writer, inbox=inbox)
+    drop_file(tmp_path, "01.txt", csi_text())
+    assert len(importer.import_pending()) == 1
+    later, _ = drop_importer(tmp_path, now=EXPIRES + 5, feedback=writer, inbox=inbox)
+    drop_file(tmp_path, "02.txt", csi_text(MAX_ENTRY_DEVIATION_BPS="30"))    # modifié ET expiré
+    drop_file(tmp_path, "03.txt", csi_text(STATUS="NEW\nFOO=1"))           # invalide
+    assert later.import_pending() == []
+    assert "déjà reçu" in reason_of(tmp_path, "02.txt") and "déjà reçu" in reason_of(tmp_path, "03.txt")
+    assert lines_of(writer) == []
+    assert {r["signal_id"] for r in writer.registry.pending()} == {SIGNAL_ID}  # suivi intact
+
+
+def test_fix3_fix4_crash_after_write_never_double_counts(tmp_path, btc_rules):
+    inbox, commands, store, writer = feedback_setup(tmp_path)
+    row, command, position = queue_signal(inbox, commands, writer, csi_text(), btc_rules)
+    succeed(commands, command)
+    entry = position.entries[0]
+    engine = PositionEngine(btc_rules)
+    engine.apply_entry_fill(position, entry.entry_id, executed_qty=0.001, average_price=84000, quote_spent=84,
+                            order_id=901)
+    original = writer._append_line
+    crashed = []
+
+    def crash_after_write(line):
+        original(line)
+        if '"ENTRY_PARTIAL"' in line and not crashed:
+            crashed.append(line)
+            raise RuntimeError("arrêt brutal après l'écriture")
+
+    writer._append_line = crash_after_write
+    writer.sync([position])
+    assert crashed
+    engine.apply_entry_fill(position, entry.entry_id, executed_qty=entry.binance_qty, average_price=84000,
+                            quote_spent=84000 * entry.binance_qty, order_id=901)
+    writer.sync([position])
+    writer.sync([position])
+    events = assert_contract(lines_of(writer))
+    unique = {e["event_id"]: e for e in events}
+    bought = sum(Decimal(e["quantity"]) for e in unique.values() if e["event_type"].startswith("ENTRY_"))
+    assert bought == Decimal(decimal_text(entry.binance_qty))
+    # La ligne réécrite après l'arrêt est identique (même identifiant, même contenu).
+    partial = [line for line in lines_of(writer) if '"ENTRY_PARTIAL"' in line]
+    assert len(partial) == 2 and partial[0] == partial[1] == crashed[0]
+
+
+def test_fix5_truncated_last_line_is_never_extended(tmp_path):
+    inbox, commands, store, writer = feedback_setup(tmp_path)
+    writer.directory.mkdir(parents=True)
+    writer.path.write_bytes(b'{"event_id": "BSM-tronque')
+    assert writer.record_rejection("CSI-T", "BTCUSDT", "refus", occurred_at=NOW)
+    lines = writer.path.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == '{"event_id": "BSM-tronque'
+    assert_contract(lines[1:])
+
+
+def test_fix6_rejection_is_kept_when_the_file_is_locked(tmp_path):
+    inbox, commands, store, writer = feedback_setup(tmp_path)
+    original = writer._append_line
+
+    def locked(line):
+        writer._append_line = original
+        raise PermissionError("fichier verrouillé")
+
+    writer._append_line = locked
+    assert not writer.record_rejection("CSI-LOCK", "BTCUSDT", "Signal expiré à la réception", occurred_at=NOW)
+    assert lines_of(writer) == []
+    assert writer.sync([]) == 1
+    events = assert_contract(lines_of(writer))
+    assert [(e["signal_id"], e["event_type"]) for e in events] == [("CSI-LOCK", "REJECTED")]
+
+
+def test_fix7_tp_reached_before_any_fill_is_neither_merged_nor_failed(engine, events):  # noqa: F811
+    from binance_spot_manager.execution_engine import OrderResult
+
+    execution, fake, rules = engine
+    position = small_position(rules, merge=True)
+    position.entries[0].executed_qty = 0.0
+    position.entries[0].status = EntryStatus.SUBMITTED
+    position.entries[0].order_id = 4321
+    position.stop_loss.status, position.stop_loss.order_id = SLStatus.PLANNED, None
+    position.automation.cancel_remaining_entries_on_first_tp = True
+    position.status = PositionStatus.PENDING_ENTRIES
+    recompute_position(position)
+    canceled = []
+    execution.cancel_open_entries = lambda p: canceled.append(p.position_id) or [OrderResult(success=True)]
+
+    result = build_automation(execution, rules, events).run_cycle(position, 86600.0)
+
+    tp1, tp2, _ = position.sorted_tps
+    assert tp1.status is not TPStatus.CANCELED and tp1.status is not TPStatus.FAILED
+    assert tp2.sell_percent == 50.0
+    assert canceled == [position.position_id] and not result.errors
+    assert any("TP 1 atteint avant tout achat : aucune vente, aucun report" in a for a in result.actions)
+    assert fake.created == []
+
+
+def test_fix8_worker_refuses_before_valid_from(processor):
+    worker, calls = processor
+    future = utcnow().timestamp() + 3600
+    assert submit(worker, {"signal_valid_from": future, "signal_expires_at": future + 600}) == "FAILED"
+    assert "VALID_FROM" in worker.store.list_recent(worker.scope)[0]["result"]["message"]
+    assert calls == []
+
+
+def test_fix9_one_failing_signal_does_not_block_the_others(tmp_path, btc_rules, monkeypatch):
+    inbox, commands, store, writer = feedback_setup(tmp_path)
+    queue_signal(inbox, commands, writer, csi_text(), btc_rules)
+    queue_signal(inbox, commands, writer, csi_text(SIGNAL_ID="CSI-OTHER", IDEMPOTENCY_KEY=KEY + ":O"), btc_rules)
+    original = writer._process_signal
+
+    def failing(record, by_tag, now):
+        if record["signal_id"] == SIGNAL_ID:
+            raise RuntimeError("ligne illisible")
+        return original(record, by_tag, now)
+
+    monkeypatch.setattr(writer, "_process_signal", failing)
+    assert writer.sync([]) == 1
+    assert [e["signal_id"] for e in assert_contract(lines_of(writer))] == ["CSI-OTHER"]
+    assert "ligne illisible" in writer.snapshot()["last_error"]
+
+
+def test_fix10_expiry_is_rechecked_right_before_the_entry(processor, monkeypatch):
+    from types import SimpleNamespace
+
+    import binance_spot_manager.command_processor as module
+
+    worker, calls = processor
+    clock = {"now": utcnow().timestamp()}
+    expiry = clock["now"] + 30
+    monkeypatch.setattr(module, "time", SimpleNamespace(time=lambda: clock["now"]))
+    original = worker._check_bnb_for_buy
+
+    def slow_checks(*args, **kwargs):
+        clock["now"] = expiry + 1  # EXPIRES_AT franchi entre le premier et le second contrôle
+        return original(*args, **kwargs)
+
+    worker._check_bnb_for_buy = slow_checks
+    assert submit(worker, {"signal_expires_at": expiry}) == "FAILED"
+    assert "EXPIRES_AT" in worker.store.list_recent(worker.scope)[0]["result"]["message"]
+    assert calls == []

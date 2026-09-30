@@ -121,11 +121,15 @@ class CommandProcessor:
 
     @staticmethod
     def _check_signal_window(payload, price=None):
-        """Contrat CSI gelé dans la commande : EXPIRES_AT et écart maximal à ENTRY_1.
+        """Contrat CSI gelé dans la commande : VALID_FROM, EXPIRES_AT et écart maximal à ENTRY_1.
 
         Appelé avant le contrôle de prix (expiration) puis juste avant l'envoi
         de l'entrée (expiration et écart), toujours depuis le payload gelé.
         """
+        if "signal_valid_from" in payload:
+            valid_from = positive(payload["signal_valid_from"], "Début de validité du signal (VALID_FROM)")
+            if time.time() < valid_from:
+                raise RejectedCommand("Signal pas encore valide (VALID_FROM non atteint) ; aucun ordre envoyé")
         if "signal_expires_at" in payload:
             expiry = positive(payload["signal_expires_at"], "Expiration du signal (EXPIRES_AT)")
             if time.time() >= expiry:

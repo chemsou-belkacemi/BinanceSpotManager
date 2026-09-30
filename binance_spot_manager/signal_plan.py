@@ -153,6 +153,7 @@ def prepare_signal(parsed: ParsedSignal, rules, *, budget, available_quote, rese
         payload["position"] = position.model_dump(mode="json")
         # Gelés dans la commande : le worker les recontrôle juste avant l'achat.
         payload |= {
+            "signal_valid_from": parsed.valid_from,
             "signal_expires_at": parsed.expires_at,
             "entry_expires_at": parsed.entry_expires_at,
             "max_entry_deviation_bps": parsed.max_entry_deviation_bps,

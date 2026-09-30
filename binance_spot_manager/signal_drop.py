@@ -35,8 +35,8 @@ import threading
 import time
 
 from .config import DATA_DIR
-from .signal_inbox import DuplicateSignal
-from .signal_parser import parse_csi_signal
+from .signal_inbox import CsiChannelRefused, DuplicateSignal
+from .signal_parser import content_hash, parse_csi_signal
 
 logger = logging.getLogger("bsm.signal_drop")
 
@@ -181,11 +181,14 @@ class SignalDropImporter:
                     row = self._receive_csi(data)
                 else:
                     document = parse_drop_document(data)
-                    row = self.inbox.receive(
-                        self.scope, document["text"], source="api",
-                        external_id=f"drop:{document['id']}",
-                        source_timestamp=document["created_at"],
-                    )
+                    try:
+                        row = self.inbox.receive(
+                            self.scope, document["text"], source="api",
+                            external_id=f"drop:{document['id']}",
+                            source_timestamp=document["created_at"],
+                        )
+                    except CsiChannelRefused as exc:
+                        raise DropFileRejected(str(exc)) from None
             except DropFileRejected as exc:
                 self._reject(path, str(exc))
                 last_error = f"{name} rejeté : {exc}"
@@ -209,6 +212,9 @@ class SignalDropImporter:
         except UnicodeDecodeError:
             raise DropFileRejected("UTF-8 invalide") from None
         parsed = parse_csi_signal(text)
+        replay = self._known_signal(text, parsed)
+        if replay is not None:
+            return replay
         if parsed.errors:
             reason = "Contrat CSI refusé : " + " ; ".join(parsed.errors)
             self._feedback_rejection(text, parsed, reason)
@@ -237,6 +243,25 @@ class SignalDropImporter:
         if self.feedback is not None:
             self.feedback.register(parsed.signal_id, row["id"], parsed.symbol)
         return row
+
+    def _known_signal(self, text: str, parsed):
+        """SIGNAL_ID déjà reçu (accepté ou refusé) : rejeu strict → ligne existante, sinon refus sans retour.
+
+        Contrôlé AVANT tout autre refus : un fichier re-déposé, modifié ou expiré
+        portant un identifiant connu ne doit ni écrire un second événement ni
+        arrêter le suivi du signal déjà accepté.
+        """
+        signal_id = parsed.signal_id or _lenient_v2_value(text, "SIGNAL_ID")
+        if not signal_id:
+            return None
+        key = self.inbox.signal_key(self.scope, signal_id)
+        if key is not None:
+            row = self.inbox.get(self.scope, key["row_id"])
+            if row is not None and row["hash"] == content_hash(text):
+                return row  # rejeu strict (arrêt avant le déplacement) : idempotent
+        elif self.feedback is None or not self.feedback.knows(signal_id):
+            return None
+        raise DropFileRejected(f"SIGNAL_ID {signal_id} déjà reçu : fichier classé, aucun nouvel événement de retour")
 
     def _feedback_rejection(self, text: str, parsed, reason: str) -> None:
         if self.feedback is None:

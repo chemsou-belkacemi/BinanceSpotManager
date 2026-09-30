@@ -155,6 +155,9 @@ class AutomaticSignalExecutor:
             if parsed.signal_version not in {1, 3}:
                 raise ValueError(f"Contrat CSI version {parsed.signal_version} retiré : aucune exécution")
             if parsed.is_csi:
+                # Double sécurité : seul le dépôt TXT garantit l'idempotence d'un signal CSI.
+                if not str(row.get("external_id") or "").startswith("csi:"):
+                    raise ValueError("Signal CSI hors dépôt TXT (identifiant externe csi: absent) : aucune exécution")
                 # Double sécurité : CSI ne publie hors shadow que du DEMO_ELIGIBLE.
                 if parsed.validation_status != "DEMO_ELIGIBLE":
                     raise ValueError(

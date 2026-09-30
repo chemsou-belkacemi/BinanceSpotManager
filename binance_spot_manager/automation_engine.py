@@ -628,6 +628,8 @@ class AutomationEngine:
         """
         if not position.automation.merge_below_minimum_tp:
             return False
+        if position.metrics.net_qty <= QTY_EPSILON:
+            return self._tp_reached_before_fill(position, tp, result)
         later = [t for t in position.sorted_tps
                  if t.sequence_number > tp.sequence_number and t.is_pending]
         if not later:
@@ -659,6 +661,27 @@ class AutomationEngine:
             if cancels:
                 result.actions.append(f"{len(cancels)} entry(ies) restantes annulees")
         self.position_engine.refresh_tp_estimates(position)
+        return True
+
+    def _tp_reached_before_fill(self, position: Position, tp: TakeProfit, result: CycleResult) -> bool:
+        """TP atteint alors qu'aucune quantite n'a ete achetee : rien a vendre ni a reporter.
+
+        Politique CANCEL_AT_ENTRY_EXPIRY_OR_FIRST_TP : le premier TP atteint annule
+        les entrees encore ouvertes ; la position, sans achat, est ensuite terminee
+        (CANCELED_BEFORE_FILL). Le TP reste en attente (declenche), sans echec ni report.
+        """
+        message = (f"TP {tp.sequence_number} atteint avant tout achat : aucune vente, aucun report")
+        if (tp.sequence_number == min(t.sequence_number for t in position.take_profits)
+                and position.automation.cancel_remaining_entries_on_first_tp and position.open_entries):
+            cancels = self.execution.cancel_open_entries(position)
+            failed = [c.error or c.status for c in cancels if not c.success]
+            if failed:
+                result.errors.append(f"{message} ; annulation des entrees non confirmee ({', '.join(failed)})")
+                return True
+            message += f" ; {len(cancels)} entree(s) annulee(s) (premier TP atteint)"
+        if message not in {e.message for e in position.history[-5:]}:
+            position.log(EventType.POSITION_UPDATED, message, tp_id=tp.tp_id)
+        result.actions.append(message)
         return True
 
     def _apply_confirmed_tp(

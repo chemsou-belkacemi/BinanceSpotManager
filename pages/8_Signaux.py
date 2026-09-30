@@ -53,9 +53,13 @@ if analyze:
     elif template != "auto" and parse_signal(raw).template != template:
         st.error("Le texte ne correspond pas au modèle sélectionné. Choisir Automatique ou le bon modèle.")
     else:
-        item = inbox.receive(scope, raw, template=template)
-        st.session_state["selected_signal"] = item["id"]
-        st.success("Analyse enregistrée. Les doublons retrouvent le même signal.")
+        try:
+            item = inbox.receive(scope, raw, template=template)
+        except ValueError as exc:  # signal CSI hors dépôt TXT, notamment
+            st.error(str(exc))
+        else:
+            st.session_state["selected_signal"] = item["id"]
+            st.success("Analyse enregistrée. Les doublons retrouvent le même signal.")
 
 with st.expander("Recevoir depuis Telegram"):
     automatic = bool(preferences.get("signal_telegram_auto_enabled", False))

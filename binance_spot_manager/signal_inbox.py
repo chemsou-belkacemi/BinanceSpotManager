@@ -7,10 +7,21 @@ import time
 import uuid
 
 from .config import DATA_DIR
-from .signal_parser import content_hash, parse_signal
+from .signal_parser import content_hash, first_line_is_csi, parse_signal
 
 #: Origines pouvant alimenter l'exécution automatique : Telegram et dépôt direct (ML).
 AUTO_SOURCES = frozenset({"telegram", "api"})
+#: Préfixe de l'identifiant externe des signaux CSI : seul le dépôt TXT l'emploie.
+CSI_EXTERNAL_PREFIX = "csi:"
+
+
+class CsiChannelRefused(ValueError):
+    """Texte CSI arrivé par un autre canal que le dépôt TXT : jamais enregistré.
+
+    L'idempotence (IDEMPOTENCY_KEY, SIGNAL_ID) n'est garantie que par le dépôt :
+    un même signal recopié dans Telegram, un JSON v1 ou un collage manuel
+    créerait sinon une seconde ligne, donc une seconde position.
+    """
 
 
 class DuplicateSignal(ValueError):
@@ -83,6 +94,28 @@ class SignalInbox:
                             "payload": json.loads(row["payload"]) if row["payload"] else None}
 
     @staticmethod
+    def _csi_identity(parsed, source, external_id, idempotency_key, producer_signal_id):
+        """Clé et SIGNAL_ID lus dans le texte CSI ; refus hors dépôt TXT ou si l'appelant diverge."""
+        if source != "api" or not str(external_id).startswith(CSI_EXTERNAL_PREFIX):
+            raise CsiChannelRefused(
+                "Signal CSI accepté uniquement par le dépôt TXT (data/signal_drop/incoming/*.txt) : "
+                "texte non enregistré, aucune exécution")
+        if parsed["errors"] or not parsed.get("idempotency_key") or not parsed.get("signal_id"):
+            raise ValueError("Contrat CSI invalide : " + " ; ".join(parsed["errors"] or ["identité absente"]))
+        key, signal_id = parsed["idempotency_key"], parsed["signal_id"]
+        if ((idempotency_key and idempotency_key != key) or (producer_signal_id and producer_signal_id != signal_id)
+                or external_id != f"{CSI_EXTERNAL_PREFIX}{signal_id}"):
+            raise ValueError("Identité CSI transmise différente de celle du texte : aucun enregistrement")
+        return key, signal_id
+
+    def signal_key(self, scope, signal_id):
+        """Entrée du registre d'idempotence pour ce SIGNAL_ID, ou None."""
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM signal_keys WHERE scope=? AND signal_id=?",
+                             (scope, signal_id)).fetchone()
+            return dict(row) if row else None
+
+    @staticmethod
     def _check_idempotency(db, scope, idempotency_key, producer_signal_id, digest):
         """Ligne existante si rejeu strict ; DuplicateSignal pour tout autre doublon ; None sinon."""
         known = db.execute("SELECT * FROM signal_keys WHERE scope=? AND idempotency_key=?",
@@ -114,20 +147,26 @@ class SignalInbox:
                 edited=False, source_timestamp=0.0, idempotency_key="", producer_signal_id=""):
         """Enregistre un texte ; les doublons retrouvent la même ligne.
 
-        ``idempotency_key`` / ``producer_signal_id`` (contrat CSI) sont inscrits
-        dans ``signal_keys`` dans la même transaction : une clé ou un SIGNAL_ID
-        déjà connu lève DuplicateSignal, sauf rejeu strict du même fichier
-        (même identifiant, même texte) qui rend simplement la ligne existante.
+        Un texte CSI (première ligne ``SIGNAL_VERSION=``) n'est accepté que du
+        dépôt TXT (source ``api``, identifiant externe ``csi:<SIGNAL_ID>``) ;
+        tout autre canal lève CsiChannelRefused. Sa clé d'idempotence et son
+        SIGNAL_ID sont extraits ici du texte et inscrits dans ``signal_keys``
+        dans la même transaction : une clé ou un SIGNAL_ID déjà connu lève
+        DuplicateSignal, sauf rejeu strict du même fichier (même identifiant,
+        même texte) qui rend simplement la ligne existante.
         """
         parsed = parse_signal(raw, template).to_dict()
+        if first_line_is_csi(raw):
+            idempotency_key, producer_signal_id = self._csi_identity(
+                parsed, source, external_id, idempotency_key, producer_signal_id)
+        elif idempotency_key or producer_signal_id:
+            raise ValueError("Clé d'idempotence et SIGNAL_ID réservés aux signaux CSI du dépôt TXT")
         if edited:
             parsed["errors"].append("Message édité : vérifier manuellement via New Trade ; aucun ordre remplacé.")
         digest = content_hash(raw)
         with self.connect() as db, db:
             db.execute("BEGIN IMMEDIATE")
-            if idempotency_key or producer_signal_id:
-                if not (idempotency_key and producer_signal_id):
-                    raise ValueError("Clé d'idempotence et SIGNAL_ID requis ensemble")
+            if idempotency_key:
                 replay = self._check_idempotency(db, scope, idempotency_key, producer_signal_id, digest)
                 if replay is not None:
                     return self.decode(replay)

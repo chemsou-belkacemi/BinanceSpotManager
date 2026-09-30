@@ -3,11 +3,14 @@
 Un événement JSON par ligne, ajouté en fin de fichier
 ``DATA_DIR/signal_drop/outgoing/execution_events.jsonl`` (UTF-8, flush + fsync),
 uniquement pour les signaux du contrat TXT V3. Chaque événement porte un
-identifiant déterministe ``BSM-<SIGNAL_ID>-<TYPE>-<n>`` enregistré dans
-``DATA_DIR/signal_feedback.sqlite3`` APRÈS l'écriture de la ligne : un arrêt
-entre les deux réécrit la même ligne avec le même identifiant, que le
-producteur ignore à l'importation ; un événement n'est jamais perdu ni écrit
-sous un second identifiant.
+identifiant ``BSM-<SIGNAL_ID>-<TYPE>-<n>`` : la ligne complète est d'abord notée
+comme INTENTION dans ``DATA_DIR/signal_feedback.sqlite3``, puis ajoutée au
+fichier, puis validée — avec le cumul rapporté du remplissage — dans UNE seule
+transaction. Un arrêt ou un fichier verrouillé entre deux étapes laisse
+l'intention en attente : elle est réécrite telle quelle (même identifiant, même
+contenu) au cycle suivant, que le producteur dédoublonne à l'importation. Un
+événement n'est donc jamais perdu, jamais écrit sous un second identifiant, et
+un incrément de quantité n'est jamais compté deux fois.
 
 Sources des événements :
 
@@ -224,7 +227,15 @@ class FeedbackRegistry:
             db.execute("""CREATE TABLE IF NOT EXISTS events (
                 event_id TEXT PRIMARY KEY, signal_id TEXT NOT NULL, event_type TEXT NOT NULL,
                 dedupe_key TEXT NOT NULL, sequence INTEGER NOT NULL, written REAL NOT NULL,
+                state TEXT NOT NULL DEFAULT 'WRITTEN', line TEXT NOT NULL DEFAULT '',
+                reported TEXT NOT NULL DEFAULT '',
                 UNIQUE(signal_id, event_type, dedupe_key))""")
+            event_columns = {row[1] for row in db.execute("PRAGMA table_info(events)")}
+            for name, definition in (("state", "TEXT NOT NULL DEFAULT 'WRITTEN'"),
+                                     ("line", "TEXT NOT NULL DEFAULT ''"),
+                                     ("reported", "TEXT NOT NULL DEFAULT ''")):
+                if name not in event_columns:
+                    db.execute(f"ALTER TABLE events ADD COLUMN {name} {definition}")
             db.execute("""CREATE TABLE IF NOT EXISTS reported (
                 signal_id TEXT NOT NULL, item_key TEXT NOT NULL,
                 quantity REAL NOT NULL, quote REAL NOT NULL,
@@ -265,24 +276,62 @@ class FeedbackRegistry:
         with self.connect() as db, db:
             db.execute("UPDATE signals SET final=1 WHERE signal_id=?", (signal_id,))
 
-    def event_exists(self, signal_id, event_type, dedupe_key):
+    def knows(self, signal_id):
         with self.connect() as db:
-            return db.execute("SELECT 1 FROM events WHERE signal_id=? AND event_type=? AND dedupe_key=?",
-                              (signal_id, event_type, dedupe_key)).fetchone() is not None
+            return db.execute("SELECT 1 FROM signals WHERE signal_id=?", (signal_id,)).fetchone() is not None
 
-    def next_sequence(self, signal_id, event_type):
+    def event_row(self, signal_id, event_type, dedupe_key):
         with self.connect() as db:
-            return db.execute("SELECT COUNT(*) FROM events WHERE signal_id=? AND event_type=?",
-                              (signal_id, event_type)).fetchone()[0] + 1
+            row = db.execute("SELECT * FROM events WHERE signal_id=? AND event_type=? AND dedupe_key=?",
+                             (signal_id, event_type, dedupe_key)).fetchone()
+            return dict(row) if row else None
 
-    def record_event(self, event_id, signal_id, event_type, dedupe_key, sequence, *, now):
+    def intend(self, signal_id, event_type, dedupe_key, build, *, reported=None, now):
+        """Note la ligne à écrire (état PENDING) ; une intention existante est rendue telle quelle.
+
+        ``build(event_id)`` construit et valide l'événement : l'identifiant est fixé
+        ici une fois pour toutes, dans la même transaction que l'intention.
+        """
         with self.connect() as db, db:
-            db.execute("INSERT OR IGNORE INTO events VALUES (?, ?, ?, ?, ?, ?)",
-                       (event_id, signal_id, event_type, dedupe_key, int(sequence), float(now)))
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM events WHERE signal_id=? AND event_type=? AND dedupe_key=?",
+                             (signal_id, event_type, dedupe_key)).fetchone()
+            if row is not None:
+                return dict(row)
+            sequence = db.execute("SELECT COUNT(*) FROM events WHERE signal_id=? AND event_type=?",
+                                  (signal_id, event_type)).fetchone()[0] + 1
+            event = build(build_event_id(signal_id, event_type, sequence))
+            line = json.dumps(event, ensure_ascii=False, allow_nan=False)
+            db.execute("""INSERT INTO events (event_id, signal_id, event_type, dedupe_key, sequence, written,
+                          state, line, reported) VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)""",
+                       (event["event_id"], signal_id, event_type, dedupe_key, sequence, float(now), line,
+                        json.dumps(reported, sort_keys=True) if reported else ""))
+            return dict(db.execute("SELECT * FROM events WHERE event_id=?", (event["event_id"],)).fetchone())
+
+    def complete(self, event_id, *, now):
+        """Ligne écrite : l'événement ET le cumul rapporté sont validés dans UNE transaction."""
+        with self.connect() as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM events WHERE event_id=?", (event_id,)).fetchone()
+            if row is None or row["state"] == "WRITTEN":
+                return
+            if row["reported"]:
+                cumul = json.loads(row["reported"])
+                db.execute("""INSERT INTO reported (signal_id, item_key, quantity, quote, fees) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(signal_id, item_key) DO UPDATE SET
+                    quantity=excluded.quantity, quote=excluded.quote, fees=excluded.fees""",
+                           (row["signal_id"], cumul["item_key"], float(cumul["quantity"]), float(cumul["quote"]),
+                            json.dumps(cumul["fees"], sort_keys=True)))
+            db.execute("UPDATE events SET state='WRITTEN', written=? WHERE event_id=?", (float(now), event_id))
+
+    def pending_events(self):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT * FROM events WHERE state='PENDING' ORDER BY rowid")]
 
     def events_total(self):
         with self.connect() as db:
-            return db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+            return db.execute("SELECT COUNT(*) FROM events WHERE state='WRITTEN'").fetchone()[0]
 
     def reported(self, signal_id, item_key):
         with self.connect() as db:
@@ -291,13 +340,6 @@ class FeedbackRegistry:
             if row is None:
                 return {"quantity": 0.0, "quote": 0.0, "fees": {}}
             return {"quantity": row["quantity"], "quote": row["quote"], "fees": json.loads(row["fees"] or "{}")}
-
-    def set_reported(self, signal_id, item_key, *, quantity, quote, fees):
-        with self.connect() as db, db:
-            db.execute("""INSERT INTO reported (signal_id, item_key, quantity, quote, fees) VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(signal_id, item_key) DO UPDATE SET
-                quantity=excluded.quantity, quote=excluded.quote, fees=excluded.fees""",
-                       (signal_id, item_key, float(quantity), float(quote), json.dumps(fees, sort_keys=True)))
 
 
 class SignalFeedbackWriter:
@@ -340,6 +382,15 @@ class SignalFeedbackWriter:
     # Entrées : réception d'un dépôt
     # ------------------------------------------------------------------
 
+    def knows(self, signal_id) -> bool:
+        """SIGNAL_ID déjà suivi (accepté ou refusé) ; faux si le retour est désactivé."""
+        if not self.enabled:
+            return False
+        try:
+            return self.registry.knows(signal_id)
+        except sqlite3.Error:
+            return False
+
     def register(self, signal_id, row_id, symbol) -> None:
         """Signal CSI accepté à la réception : suivi jusqu'à son état final."""
         if not self.enabled:
@@ -359,11 +410,16 @@ class SignalFeedbackWriter:
             return False
         try:
             self.registry.register(signal_id, "", symbol, now=self.clock())
+            self.registry.mark_final(signal_id)
             written = self._emit(signal_id, "REJECTED", "reception", symbol=symbol,
                                  occurred_at=occurred_at if occurred_at is not None else self.clock(),
                                  reason=reason)
-            self.registry.mark_final(signal_id)
             return bool(written)
+        except OSError as exc:
+            # Fichier verrouillé : le refus reste noté comme intention, réécrit à la synchro.
+            logger.warning("Retour d'exécution : refus de %s en attente d'écriture (%s)", signal_id, exc)
+            self._update(state="ERROR", last_error=str(exc))
+            return False
         except Exception as exc:  # noqa: BLE001 - le dépôt continue sans le retour
             logger.exception("Retour d'exécution : refus de %s non écrit", signal_id)
             self._update(state="ERROR", last_error=str(exc))
@@ -385,7 +441,21 @@ class SignalFeedbackWriter:
             self._update(state="ERROR", last_error=str(exc))
             return 0
 
+    def _flush_pending(self) -> int:
+        """Réécrit telles quelles les intentions en attente (arrêt ou fichier verrouillé)."""
+        written = 0
+        for row in self.registry.pending_events():
+            try:
+                written += self._write(row)
+            except OSError as exc:
+                logger.warning("Retour d'exécution : fichier indisponible, %s reste en attente (%s)",
+                               row["event_id"], exc)
+                self._update(state="ERROR", last_error=str(exc))
+                break
+        return written
+
     def _sync(self, positions, now):
+        written = self._flush_pending()
         known = self.registry.known_ids()
         for key in self.inbox.signal_keys(self.scope):
             if key["signal_id"] not in known:
@@ -394,11 +464,15 @@ class SignalFeedbackWriter:
         for position in positions:
             if len(position.tags) >= 2 and position.tags[0] == "signal":
                 by_tag[position.tags[1]] = position
-        written = 0
+        errors = []
         for record in self.registry.pending():
-            written += self._process_signal(record, by_tag, now)
-        self._update(state="ACTIVE", last_error="", pending_signals=len(self.registry.pending()),
-                     events_total=self.registry.events_total())
+            try:
+                written += self._process_signal(record, by_tag, now)
+            except Exception as exc:  # noqa: BLE001 - un signal défaillant ne bloque pas les autres
+                logger.exception("Retour d'exécution : signal %s non synchronisé", record["signal_id"])
+                errors.append(f"{record['signal_id']} : {exc}")
+        self._update(state="ERROR" if errors else "ACTIVE", last_error=" ; ".join(errors)[:500],
+                     pending_signals=len(self.registry.pending()), events_total=self.registry.events_total())
         return written
 
     def _process_signal(self, record, by_tag, now) -> int:
@@ -602,8 +676,10 @@ class SignalFeedbackWriter:
         # Clé = cumul atteint : une reprise retrouve la même ligne, jamais un second incrément.
         dedupe_key = f"{item_key}:{decimal_text(quantity)}"
         cumulative = dict(quantity=quantity, quote=max(quote, float(last["quote"]) + delta_quote))
-        if self.registry.event_exists(signal_id, event_type, dedupe_key):
-            self.registry.set_reported(signal_id, item_key, fees=last["fees"], **cumulative)
+        existing = self.registry.event_row(signal_id, event_type, dedupe_key)
+        if existing is not None:
+            if existing["state"] == "PENDING":
+                return self._write(existing), False  # même ligne, même cumul, une seule transaction
             return 0, False
 
         trades = self._order_trades(symbol, order_id, quantity)
@@ -646,9 +722,8 @@ class SignalFeedbackWriter:
             signal_id, event_type, dedupe_key, symbol=symbol, occurred_at=occurred_at,
             quantity=delta_qty, price=delta_quote / delta_qty, quote_quantity=delta_quote,
             fee=fee, fee_asset=fee_asset, order_id=order_id, target_index=target_index, reason=reason,
+            reported=dict(item_key=item_key, fees=fees_seen, **cumulative),
         )
-        if written:
-            self.registry.set_reported(signal_id, item_key, fees=fees_seen, **cumulative)
         return written, False
 
     # ------------------------------------------------------------------
@@ -657,13 +732,23 @@ class SignalFeedbackWriter:
 
     def _emit(self, signal_id, event_type, dedupe_key, *, symbol, occurred_at, quantity=None, price=None,
               quote_quantity=None, fee=None, fee_asset=None, order_id=None, target_index=None,
-              reason=None, exit_policy_hash=None) -> int:
-        """Écrit une ligne si (signal, type, clé) est inédit ; retourne 1 si écrite, 0 sinon."""
-        if self.registry.event_exists(signal_id, event_type, dedupe_key):
-            return 0
-        sequence = self.registry.next_sequence(signal_id, event_type)
-        event = {
-            "event_id": build_event_id(signal_id, event_type, sequence),
+              reason=None, exit_policy_hash=None, reported=None) -> int:
+        """Écrit une ligne si (signal, type, clé) est inédit ; retourne 1 si écrite, 0 sinon.
+
+        Une intention déjà notée pour cette clé est réécrite telle quelle.
+        """
+        existing = self.registry.event_row(signal_id, event_type, dedupe_key)
+        if existing is not None:
+            return self._write(existing) if existing["state"] == "PENDING" else 0
+
+        def build(event_id):
+            event = dict(fields, event_id=event_id)
+            event = {key: event[key] for key in EVENT_FIELDS}
+            validate_event(event)
+            return event
+
+        fields = {
+            "event_id": "",
             "signal_id": signal_id,
             "event_type": event_type,
             "occurred_at": iso_utc(occurred_at),
@@ -681,22 +766,30 @@ class SignalFeedbackWriter:
             "exit_policy_hash": exit_policy_hash,
         }
         try:
-            validate_event(event)
+            row = self.registry.intend(signal_id, event_type, dedupe_key, build, reported=reported,
+                                       now=self.clock())
         except FeedbackContractError as exc:
-            logger.error("Retour d'exécution : événement %s non conforme, ignoré (%s)", event["event_id"], exc)
-            self._update(last_error=f"{event['event_id']} : {exc}")
+            logger.error("Retour d'exécution : événement %s/%s non conforme, ignoré (%s)", signal_id, event_type, exc)
+            self._update(last_error=f"{signal_id} {event_type} : {exc}")
             return 0
-        self._append_line(event)
-        # Enregistré APRÈS l'écriture : une reprise réécrit au pire la même ligne, même identifiant.
-        self.registry.record_event(event["event_id"], signal_id, event_type, dedupe_key, sequence,
-                                   now=self.clock())
+        return self._write(row) if row["state"] == "PENDING" else 0
+
+    def _write(self, row) -> int:
+        """Ajoute la ligne notée puis valide l'intention (événement + cumul, une transaction)."""
+        self._append_line(row["line"])
+        self.registry.complete(row["event_id"], now=self.clock())
         self._update(last_event_at=self.clock())
         return 1
 
-    def _append_line(self, event: dict) -> None:
+    def _append_line(self, line: str) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(event, ensure_ascii=False, allow_nan=False)
-        with open(self.path, "a", encoding="utf-8", newline="\n") as handle:
-            handle.write(line + "\n")
+        with open(self.path, "a+b") as handle:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() > 0:
+                handle.seek(-1, os.SEEK_END)
+                if handle.read(1) != b"\n":
+                    # Ligne précédente tronquée (arrêt pendant l'écriture) : ne jamais la prolonger.
+                    handle.write(b"\n")
+            handle.write(line.encode("utf-8") + b"\n")
             handle.flush()
             os.fsync(handle.fileno())
