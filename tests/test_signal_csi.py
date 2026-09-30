@@ -36,8 +36,8 @@ from test_commands import processor  # noqa: F401
 from test_signal_auto_execution import enabled_preferences, executor
 from test_signals import ABK, BICO, GALA, SIMPLE
 
-FIXED = "BSM_MARKET_TP_FIXED_SL_V1"
-BREAK_EVEN = "BSM_MARKET_TP_BREAK_EVEN_V1"
+FIXED = "BSM_MARKET_TP_FIXED_SL_V2"
+BREAK_EVEN = "BSM_MARKET_TP_BREAK_EVEN_V2"
 REGISTRY = json.loads(CSI_POLICY_REGISTRY.read_text(encoding="utf-8"))["policies"]
 
 # Exemple synthétique de la spécification producteur (tests/test_signals.py de CSI), verbatim.
@@ -192,7 +192,7 @@ def test_spec_example_parses_once_adapted_to_a_demo_pair_and_bsm_policy():
     assert result.decision_at == epoch("2026-09-29T12:00:00Z") and result.valid_from == CREATED
     assert result.expires_at == EXPIRES and result.entry_expires_at == ENTRY_EXPIRES
     assert result.entry_count == 1 and result.rr_reference == "ENTRY_1"
-    assert result.exit_policy_id == FIXED and result.exit_policy_hash == "26367cfb1c063bb4"
+    assert result.exit_policy_id == FIXED and result.exit_policy_hash == "0c49448ca40d2a8f"
     assert result.max_hold_minutes is None and result.news_status == "OFF"
     assert result.validation_status == "DEMO_ELIGIBLE"
     assert result.max_entry_deviation_bps == 20.0 and result.tp_weights == [0.25] * 4
@@ -238,8 +238,8 @@ def test_spec_example_parses_once_adapted_to_a_demo_pair_and_bsm_policy():
     ("MAX_HOLD_MINUTES=NONE", "MAX_HOLD_MINUTES=1440", "MAX_HOLD_MINUTES"),
     ("NEWS_STATUS=OFF", "NEWS_STATUS=NO_BAD_NEWS", "NEWS_STATUS"),
     ("ML_PROBABILITY=NONE", "ML_PROBABILITY=0.6", "vont ensemble"),
-    ("EXIT_POLICY_HASH=26367cfb1c063bb4", "EXIT_POLICY_HASH=0123456789abcdef", "EXIT_POLICY_HASH attendu"),
-    ("EXIT_POLICY_HASH=26367cfb1c063bb4", "EXIT_POLICY_HASH=XYZ", "EXIT_POLICY_HASH"),
+    ("EXIT_POLICY_HASH=0c49448ca40d2a8f", "EXIT_POLICY_HASH=0123456789abcdef", "EXIT_POLICY_HASH attendu"),
+    ("EXIT_POLICY_HASH=0c49448ca40d2a8f", "EXIT_POLICY_HASH=XYZ", "EXIT_POLICY_HASH"),
     ("STATUS=NEW", "STATUS=FILLED", "NEW"),
     ("SYMBOL=BTCUSDT\n", "", "manquantes"),
 ], ids=lambda value: value if isinstance(value, str) and len(value) < 40 else None)
@@ -324,6 +324,14 @@ def csi_root():
     here = Path(__file__).resolve()
     candidates += [parent / "CryptoSignalIntelligence" for parent in list(here.parents)[:6]]
     return next((root for root in candidates if (root / "config" / "exit_policies.json").exists()), None)
+
+
+def test_v2_policies_have_the_expected_hashes_and_v1_are_refused():
+    assert BSM_EXIT_POLICY_HASHES == {FIXED: "0c49448ca40d2a8f", BREAK_EVEN: "b34dee623d3b61ed"}
+    for policy_id in ("BSM_MARKET_TP_FIXED_SL_V1", "BSM_MARKET_TP_BREAK_EVEN_V1"):
+        assert policy_id in REGISTRY  # connue du producteur, mais pas exactement BSM
+        errors = parse_csi_signal(csi_text(EXIT_POLICY_ID=policy_id)).errors
+        assert any("EXIT_POLICY" in e and "non exécutée" in e for e in errors), errors
 
 
 def test_policy_copy_is_self_consistent_and_matches_bsm_rules():

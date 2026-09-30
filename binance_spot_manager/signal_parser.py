@@ -284,15 +284,18 @@ def _bsm_policy(policy_id: str, stop_rule: str) -> dict:
 
     TP vendu AU MARCHÉ dès que le dernier prix atteint le niveau (automation_engine),
     stop STOP_LOSS_LIMIT à 30 points de base sous le stop (StopLoss.limit_offset_percent),
-    aucune sortie temporelle, stop déplacé après confirmation du fill du TP, parts de TP
-    appliquées à la quantité achetée (nette de frais en base), dernier TP = restant,
-    tranche sous les minimums reportée sur le TP suivant, entrée annulée à
-    ENTRY_EXPIRES_AT ou au premier TP, une seule entrée.
+    vendu au marché si Binance le refuse parce que le prix l'a déjà franchi
+    (STOP_LIMIT_MARKET_IF_CROSSED, bot_worker._exit_on_crossed_stop), aucune sortie
+    temporelle, stop déplacé après confirmation du fill du TP, parts de TP appliquées
+    à la quantité NETTE achetée (frais payés en actif de base déduits), dernier TP =
+    restant, tranche sous les minimums reportée sur le TP suivant, entrée annulée à
+    ENTRY_EXPIRES_AT ou au premier TP, une seule entrée. Break-even : prix moyen
+    d'achat réel, posé après le premier TP effectivement rempli (y compris un report).
     """
     return {
         "policy_id": policy_id, "stop_rule": stop_rule, "time_exit": False,
-        "tp_execution": "MARKET_ON_TRIGGER", "stop_order": "STOP_LIMIT", "stop_limit_offset_bps": 30,
-        "stop_move_applies": "AFTER_TP_FILL_CONFIRMED", "tp_weight_basis": "FILLED_BASE_QUANTITY",
+        "tp_execution": "MARKET_ON_TRIGGER", "stop_order": "STOP_LIMIT_MARKET_IF_CROSSED", "stop_limit_offset_bps": 30,
+        "stop_move_applies": "AFTER_TP_FILL_CONFIRMED", "tp_weight_basis": "NET_FILLED_BASE_QUANTITY",
         "remainder_rule": "LAST_TP_SELLS_REMAINDER", "below_minimum_rule": "MERGE_INTO_NEXT_TP",
         "unfilled_entries_rule": "CANCEL_AT_ENTRY_EXPIRY_OR_FIRST_TP", "max_entries": 1, "schema_version": 1,
     }
@@ -305,9 +308,11 @@ def exit_policy_hash(rules: dict) -> str:
 
 
 #: Seules politiques acceptées : celles que BSM exécute réellement, identifiant ET empreinte.
+#: Les V1 (stop STOP_LIMIT seul, poids sur la quantité brute, break-even après TP1) ne
+#: décrivent pas exactement BSM : elles sont refusées comme toute autre politique.
 BSM_EXIT_POLICIES = {
-    "BSM_MARKET_TP_FIXED_SL_V1": _bsm_policy("BSM_MARKET_TP_FIXED_SL_V1", "FIXED"),
-    "BSM_MARKET_TP_BREAK_EVEN_V1": _bsm_policy("BSM_MARKET_TP_BREAK_EVEN_V1", "BREAK_EVEN_AFTER_TP1"),
+    "BSM_MARKET_TP_FIXED_SL_V2": _bsm_policy("BSM_MARKET_TP_FIXED_SL_V2", "FIXED"),
+    "BSM_MARKET_TP_BREAK_EVEN_V2": _bsm_policy("BSM_MARKET_TP_BREAK_EVEN_V2", "BREAK_EVEN_AVG_FILL_AFTER_FIRST_TP"),
 }
 BSM_EXIT_POLICY_HASHES = {policy_id: exit_policy_hash(rules) for policy_id, rules in BSM_EXIT_POLICIES.items()}
 

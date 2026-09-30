@@ -382,7 +382,7 @@ affiche le détail.
 - **Dépôt direct de signaux par fichiers** (`data/signal_drop/`) : JSON v1 du générateur ML
   local, ou TXT `SIGNAL_VERSION=3` de CryptoSignalIntelligence (fenêtre `VALID_FROM` /
   `EXPIRES_AT`, expiration de l'entrée `ENTRY_EXPIRES_AT`, écart d'entrée maximal, clé
-  d'idempotence, poids de TP, seules politiques de sortie `BSM_MARKET_TP_*` avec leur
+  d'idempotence, poids de TP, seules politiques de sortie `BSM_MARKET_TP_*_V2` avec leur
   empreinte, exécution automatique réservée à `DEMO_ELIGIBLE`, retour d'exécution v2 JSONL
   dans `outgoing/` avec frais réels lus sur myTrades, hors `DRY_RUN`). Détails et limites :
   [docs/SIGNAUX.md](docs/SIGNAUX.md).

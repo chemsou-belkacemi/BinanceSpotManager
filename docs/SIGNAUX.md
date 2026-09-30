@@ -193,19 +193,26 @@ sortie temporelle) produit une erreur contenant `EXIT_POLICY` :
 
 | Politique | Empreinte | Règle de SL appliquée par BSM |
 |---|---|---|
-| `BSM_MARKET_TP_FIXED_SL_V1` | `26367cfb1c063bb4` | aucun changement |
-| `BSM_MARKET_TP_BREAK_EVEN_V1` | `54baf617eccc613d` | break-even (prix moyen d'achat) après chaque TP sauf le dernier |
+| `BSM_MARKET_TP_FIXED_SL_V2` | `0c49448ca40d2a8f` | aucun changement (`stop_rule=FIXED`) |
+| `BSM_MARKET_TP_BREAK_EVEN_V2` | `b34dee623d3b61ed` | break-even au prix moyen d'achat réel après le premier TP effectivement rempli, y compris un TP issu d'un report (`stop_rule=BREAK_EVEN_AVG_FILL_AFTER_FIRST_TP`) |
+
+Les V1 (`BSM_MARKET_TP_FIXED_SL_V1`, `BSM_MARKET_TP_BREAK_EVEN_V1`) restent dans le registre
+du producteur mais sont **refusées** : elles ne décrivent pas exactement BSM (poids sur la
+quantité brute, stop-limit sans vente au marché si franchi, break-even au prix d'entrée).
 
 Règles communes vérifiées dans le code : TP vendu **au marché** dès que le dernier
 prix atteint le niveau (`MARKET_ON_TRIGGER`), stop `STOP_LOSS_LIMIT` avec une limite
-à 30 points de base sous le stop, aucune sortie temporelle, stop déplacé seulement
-après la confirmation du fill du TP, parts de TP appliquées à la quantité achetée,
+à 30 points de base sous le stop, vendu au marché si Binance refuse le stop parce que
+le prix l'a déjà franchi (`STOP_LIMIT_MARKET_IF_CROSSED`), aucune sortie temporelle,
+stop déplacé seulement après la confirmation du fill du TP, parts de TP appliquées à
+la quantité **nette** achetée, frais payés en actif de base déduits
+(`NET_FILLED_BASE_QUANTITY`),
 dernier TP = tout le restant, **tranche sous les minimums Binance reportée sur le TP
 suivant** (le TP suivant vend `1 − (1 − p)(1 − q)` du restant, soit exactement la
 part cumulée), entrée annulée à `ENTRY_EXPIRES_AT` ou au premier TP, une seule entrée.
 Le report des tranches n'est actif que pour les positions issues d'un signal CSI
 (`automation.merge_below_minimum_tp`) ; les autres stratégies gardent leur
-comportement. Écarts connus : voir la section Limites.
+comportement.
 
 #### Réception, deux expirations, exécution
 

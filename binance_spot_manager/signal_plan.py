@@ -21,7 +21,8 @@ SIGNAL_SL_AFTER_TP_RULES = (
 #: sont reconnues : aucune règle n'est devinée.
 STOP_RULE_SL_AFTER_TP = {
     "FIXED": SLRuleAfterTP.NO_CHANGE,
-    "BREAK_EVEN_AFTER_TP1": SLRuleAfterTP.BREAK_EVEN,
+    # Prix moyen d'achat réel, après le premier TP rempli (règle posée sur chaque TP sauf le dernier).
+    "BREAK_EVEN_AVG_FILL_AFTER_FIRST_TP": SLRuleAfterTP.BREAK_EVEN,
 }
 
 
