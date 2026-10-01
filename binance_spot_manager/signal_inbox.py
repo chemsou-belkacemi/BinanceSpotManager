@@ -28,6 +28,43 @@ class SignalInbox:
         db.row_factory = sqlite3.Row
         try:
             db.execute("PRAGMA synchronous=FULL")
+            self._migrate(db)
+            yield db
+        finally:
+            db.close()
+
+    #: Colonnes ajoutees apres la premiere version du schema (migration ALTER TABLE).
+    MIGRATED_COLUMNS = (
+        ("source_timestamp", "REAL NOT NULL DEFAULT 0"),
+        ("auto_state", "TEXT NOT NULL DEFAULT ''"),
+        ("auto_detail", "TEXT NOT NULL DEFAULT ''"),
+        # Avis de CryptoSignalIntelligence : information affichée, jamais un ordre.
+        ("csi_verdict", "TEXT NOT NULL DEFAULT ''"),
+        ("csi_detail", "TEXT NOT NULL DEFAULT ''"),
+        ("csi_evaluated_at", "TEXT NOT NULL DEFAULT ''"),
+    )
+    TABLES = ("signals", "telegram_offsets", "signal_origins")
+
+    def _schema_ready(self, db):
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if not set(self.TABLES) <= tables:
+            return False
+        columns = {row[1] for row in db.execute("PRAGMA table_info(signals)")}
+        return all(name in columns for name, _ in self.MIGRATED_COLUMNS)
+
+    def _migrate(self, db):
+        """Cree ou complete le schema, sure en concurrence (UI, worker, threads).
+
+        Lire les colonnes puis ALTER TABLE hors transaction laissait deux connexions voir la
+        meme colonne manquante : la seconde echouait (« duplicate column name »). Le schema est
+        donc relu APRES avoir pris le verrou d'ecriture (BEGIN IMMEDIATE), et ALTER TABLE ne
+        porte que sur ce qui manque encore a cet instant. Le cas courant (schema a jour) ne
+        prend aucun verrou d'ecriture.
+        """
+        if self._schema_ready(db):
+            return
+        db.execute("BEGIN IMMEDIATE")
+        try:
             db.execute("""CREATE TABLE IF NOT EXISTS signals (
                 id TEXT PRIMARY KEY, scope TEXT NOT NULL, hash TEXT NOT NULL,
                 source TEXT NOT NULL, external_id TEXT NOT NULL, received REAL NOT NULL,
@@ -37,15 +74,7 @@ class SignalInbox:
                 auto_detail TEXT NOT NULL DEFAULT '',
                 UNIQUE(scope, hash))""")
             columns = {row[1] for row in db.execute("PRAGMA table_info(signals)")}
-            for name, definition in (
-                ("source_timestamp", "REAL NOT NULL DEFAULT 0"),
-                ("auto_state", "TEXT NOT NULL DEFAULT ''"),
-                ("auto_detail", "TEXT NOT NULL DEFAULT ''"),
-                # Avis de CryptoSignalIntelligence : information affichée, jamais un ordre.
-                ("csi_verdict", "TEXT NOT NULL DEFAULT ''"),
-                ("csi_detail", "TEXT NOT NULL DEFAULT ''"),
-                ("csi_evaluated_at", "TEXT NOT NULL DEFAULT ''"),
-            ):
+            for name, definition in self.MIGRATED_COLUMNS:
                 if name not in columns:
                     db.execute(f"ALTER TABLE signals ADD COLUMN {name} {definition}")
             db.execute("""CREATE TABLE IF NOT EXISTS telegram_offsets (
@@ -54,9 +83,9 @@ class SignalInbox:
                 scope TEXT NOT NULL, external_id TEXT NOT NULL, signal_id TEXT NOT NULL,
                 PRIMARY KEY(scope, external_id, signal_id))""")
             db.commit()
-            yield db
-        finally:
-            db.close()
+        except BaseException:
+            db.rollback()
+            raise
 
     @staticmethod
     def decode(row):
