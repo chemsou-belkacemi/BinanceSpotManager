@@ -251,3 +251,15 @@ def test_creer_compte_script_prints_secret_once_and_checks_code(store, capsys):
     assert "otpauth://totp/" in out
     # Le code de vérification n'a pas été consommé : il reste utilisable pour la connexion.
     assert store.authenticate("nouveau", PASSWORD, codes[0], now=NOW).ok
+
+
+def test_creer_compte_script_without_a_terminal_skips_the_optional_code(store):
+    """`docker compose run -T` : pas de terminal, la question facultative reçoit une fin de fichier."""
+    from scripts import creer_compte
+
+    def no_terminal(_):
+        raise EOFError
+
+    assert creer_compte.main(["sansterminal"], store=store, password_prompt=lambda: PASSWORD,
+                             code_prompt=no_terminal, clock=lambda: NOW) == 0
+    assert "sansterminal" in json.loads(store.path.read_text())["accounts"]

@@ -70,7 +70,10 @@ def main(argv=None, *, store: AccountStore | None = None, password_prompt=ask_pa
     print()
     # Vérifie que l'application est bien configurée, sans consommer le code pour la connexion.
     now = (clock or time.time)()
-    code = code_prompt("Code affiché par l'application (Entrée pour passer) : ").strip()
+    try:
+        code = code_prompt("Code affiché par l'application (Entrée pour passer) : ").strip()
+    except EOFError:                       # pas de terminal (script, `docker compose run -T`) : vérification sautée
+        code = ""
     if code:
         if verify_totp(account.totp_secret, code, now) is None:
             print("Code incorrect : vérifier l'heure du téléphone et le secret saisi.", file=sys.stderr)
