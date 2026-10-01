@@ -30,9 +30,16 @@ def positive(value, name):
     return value
 
 
+#: Commandes qui ouvrent une NOUVELLE entrée : seules soumises a la licence de location.
+#: Les sorties (annulation, deplacement du stop, clotures) ne sont jamais bloquees.
+NEW_ENTRY_ACTIONS = frozenset({"SUBMIT_POSITION", "SIMPLE_BUY"})
+
+
 class CommandProcessor:
-    def __init__(self, store, positions, execution, risk_limits, settings_supplier=None):
+    def __init__(self, store, positions, execution, risk_limits, settings_supplier=None, entry_gate=None):
         self.store, self.positions, self.execution = store, positions, execution
+        #: Renvoie "" si une nouvelle entree est autorisee, sinon la raison du refus (licence).
+        self.entry_gate = entry_gate
         self.settings = execution.settings
         self.scope = account_scope(self.settings)
         self.risk_limits = risk_limits
@@ -73,6 +80,9 @@ class CommandProcessor:
             return None
         try:
             self.settings.assert_write_allowed("worker command")
+            refusal = self.entry_gate() if self.entry_gate and command["action"] in NEW_ENTRY_ACTIONS else ""
+            if refusal:
+                raise RejectedCommand(refusal)
             result = getattr(self, "_" + command["action"].lower())(command["payload"])
             state = "SUCCEEDED"
         except RejectedCommand as exc:

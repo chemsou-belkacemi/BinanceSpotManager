@@ -60,6 +60,7 @@ from binance_spot_manager.position_engine import PositionEngine, finish_position
 from binance_spot_manager.position_store import PositionStore, RuntimeStore, get_settings_store  # noqa: E402
 from binance_spot_manager.reconciliation_engine import ReconciliationEngine, find_orphan_bot_orders  # noqa: E402
 from binance_spot_manager.csi_client import CsiClient  # noqa: E402
+from binance_spot_manager.licence import LicenceGate  # noqa: E402
 from binance_spot_manager.signal_auto_execution import AutomaticSignalExecutor  # noqa: E402
 from binance_spot_manager.signal_inbox import SignalInbox  # noqa: E402
 from binance_spot_manager.symbol_rules import SymbolRulesCache  # noqa: E402
@@ -139,7 +140,12 @@ class Worker:
         self.commands = CommandStore()
         self.signal_inbox = SignalInbox()
         risk_service = DashboardService(self.settings, position_store=self.positions, client=self.client, events=self.events)
-        self.command_processor = CommandProcessor(self.commands, self.positions, self.execution, risk_service.risk_limits)
+        # Licence de location : ne bloque que les NOUVELLES entrées, jamais le suivi des positions.
+        self.licence_gate = LicenceGate()
+        self.command_processor = CommandProcessor(
+            self.commands, self.positions, self.execution, risk_service.risk_limits,
+            entry_gate=self.licence_gate.refusal,
+        )
         self.fee_token_monitor = FeeTokenMonitor(
             self.client, self.events, lambda: get_settings_store().load(), interval_seconds=60,
         )
@@ -155,6 +161,7 @@ class Worker:
             self.client, self.rules_cache, risk_service.risk_limits,
             lambda: get_settings_store().load(), self.events,
             csi_client=CsiClient.from_env(),
+            entry_gate=self.licence_gate.refusal,
         )
 
         self._running = True
@@ -337,7 +344,22 @@ class Worker:
     # Un tour de boucle
     # ------------------------------------------------------------------
 
+    def _check_licence(self) -> None:
+        """Un evenement a chaque changement d'etat de la licence (pas a chaque tour)."""
+        gate = getattr(self, "licence_gate", None)
+        if gate is None:
+            return
+        refusal = gate.refusal()
+        if refusal == getattr(self, "_licence_report", ""):
+            return
+        self._licence_report = refusal
+        if refusal:
+            self.events.append(EventType.ERROR, refusal, level="CRITICAL")
+        else:
+            self.events.append(EventType.POSITION_UPDATED, "Licence valide : nouvelles entrées autorisées", level="INFO")
+
     def _tick(self) -> int:
+        self._check_licence()
         if hasattr(self, "fee_token_monitor"):
             self.fee_token_monitor.check()
         if hasattr(self, "auto_signal_executor"):
