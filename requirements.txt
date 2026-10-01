@@ -3,6 +3,8 @@ pydantic>=2.7,<3
 requests>=2.31,<3
 websockets>=12,<17
 python-dotenv>=1.0,<2
+# Coffre des cles (AES-256-GCM) et licence (Ed25519).
+cryptography>=46,<48
 pandas>=2.2,<3
 psutil>=5.9,<7
 pytest>=9.0.3,<10

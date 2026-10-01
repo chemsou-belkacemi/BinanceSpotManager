@@ -122,6 +122,12 @@ class Settings(BaseModel):
     demo_api_key: str = Field(default="", repr=False, exclude=True)
     demo_api_secret: str = Field(default="", repr=False, exclude=True)
 
+    #: Origine des clés Demo : "env" (variables d'environnement, prioritaires), "vault" (coffre
+    #: chiffré de l'instance, saisi dans Settings) ou "" (aucune). Jamais le secret lui-même.
+    credentials_source: str = ""
+    #: Raison, sans secret, pour laquelle le coffre n'a pas pu être lu ("" sinon).
+    credentials_error: str = ""
+
     live_base_url: str = "https://api.binance.com"
     live_api_key: str = Field(default="", repr=False, exclude=True)
     live_api_secret: str = Field(default="", repr=False, exclude=True)
@@ -225,10 +231,26 @@ class Settings(BaseModel):
             "base_url": self.base_url,
             "api_key_set": bool(self.api_key),
             "api_secret_set": bool(self.api_secret),
+            "credentials_source": self.credentials_source,
             "quote_asset": self.quote_asset,
             "worker_interval": self.worker_interval,
             "capital_reserve_percent": self.capital_reserve_percent,
         }
+
+
+def _vault_credentials() -> tuple[tuple[str, str] | None, str]:
+    """Clés Demo du coffre chiffré, ou (None, raison sans secret)."""
+    from .key_vault import KeyVault, VaultError  # import tardif : key_vault importe config
+
+    vault = KeyVault()
+    if not vault.exists():
+        return None, ""
+    try:
+        return vault.load_binance_keys(), ""
+    except VaultError as exc:
+        return None, str(exc)
+    except OSError as exc:  # droits, disque : jamais bloquer le chargement de la configuration
+        return None, f"Coffre ou clé maîtresse illisible ({exc.strerror or type(exc).__name__})"
 
 
 def load_settings() -> Settings:
@@ -243,16 +265,31 @@ def load_settings() -> Settings:
         run_mode = RunMode(mode_raw)
     except ValueError:
         run_mode = RunMode.DRY_RUN
-    if run_mode is RunMode.LIVE:
-        # Refus explicite : jamais de bascule Live automatique.
+    if run_mode is RunMode.LIVE or environment is Environment.LIVE:
+        # Refus explicite : jamais de bascule Live automatique. BSM_ENV=LIVE ne donne qu'un
+        # environnement inerte (DRY_RUN) : aucune écriture, et assert_write_allowed refuse tout.
         run_mode = RunMode.DRY_RUN
+
+    demo_api_key = _env_str("BSM_DEMO_API_KEY")
+    demo_api_secret = _env_str("BSM_DEMO_API_SECRET")
+    credentials_source = "env" if (demo_api_key or demo_api_secret) else ""
+    credentials_error = ""
+    if not credentials_source:
+        # L'environnement garde la priorité (installation actuelle du propriétaire) ; sinon les
+        # clés saisies par le client dans SA propre instance, chiffrées dans le coffre local.
+        stored, credentials_error = _vault_credentials()
+        if stored is not None:
+            demo_api_key, demo_api_secret = stored
+            credentials_source = "vault"
 
     return Settings(
         environment=environment,
         run_mode=run_mode,
         demo_base_url=_env_str("BSM_DEMO_BASE_URL", "https://testnet.binance.vision"),
-        demo_api_key=_env_str("BSM_DEMO_API_KEY"),
-        demo_api_secret=_env_str("BSM_DEMO_API_SECRET"),
+        demo_api_key=demo_api_key,
+        demo_api_secret=demo_api_secret,
+        credentials_source=credentials_source,
+        credentials_error=credentials_error,
         live_base_url=_env_str("BSM_LIVE_BASE_URL", "https://api.binance.com"),
         live_api_key=_env_str("BSM_LIVE_API_KEY"),
         live_api_secret=_env_str("BSM_LIVE_API_SECRET"),
