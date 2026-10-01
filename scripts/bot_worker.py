@@ -58,7 +58,7 @@ from binance_spot_manager.notification_engine import NotificationEngine  # noqa:
 from binance_spot_manager.market_price_stream import DemoMarketPriceStream  # noqa: E402
 from binance_spot_manager.position_engine import PositionEngine, finish_position, recompute_position  # noqa: E402
 from binance_spot_manager.position_store import PositionStore, RuntimeStore, get_settings_store  # noqa: E402
-from binance_spot_manager.reconciliation_engine import ReconciliationEngine  # noqa: E402
+from binance_spot_manager.reconciliation_engine import ReconciliationEngine, find_orphan_bot_orders  # noqa: E402
 from binance_spot_manager.csi_client import CsiClient  # noqa: E402
 from binance_spot_manager.signal_auto_execution import AutomaticSignalExecutor  # noqa: E402
 from binance_spot_manager.signal_inbox import SignalInbox  # noqa: E402
@@ -70,6 +70,11 @@ from binance_spot_manager.dashboard_service import DashboardService
 
 #: Un cycle de reconciliation tous les N passages de boucle.
 RECONCILE_EVERY = 12
+
+#: Controle des ordres BSM orphelins : au premier tour (et en sortie de veille), puis tous les N
+#: tours ; apres un echec, nouvel essai RECONCILE_EVERY tours plus tard. Un seul appel openOrders
+#: sans symbole (poids 80) couvre toutes les paires du compte.
+ORPHAN_AUDIT_EVERY = 60
 
 #: Achats envoyes dont le remplissage n'est connu que par la reconciliation.
 AWAITING_FILL = frozenset({EntryStatus.SUBMITTED, EntryStatus.PARTIALLY_FILLED})
@@ -90,6 +95,11 @@ class Worker:
     #: Docker (le process ne redemarre pas, _loop ne repasse jamais a 1). Remis a False une fois
     #: la reconciliation faite : un tour en erreur avant elle la reporte au tour suivant.
     _resume_reconcile = False
+    #: Tour du prochain controle des ordres orphelins (0 : des le prochain tour).
+    _next_orphan_audit = 0
+    #: Dernier constat signale (ensemble d'ordres orphelins, "ECHEC" ou None) : un seul evenement
+    #: par nouveau constat, pas a chaque controle.
+    _orphan_report = None
 
     def __init__(self) -> None:
         self.settings = get_settings()
@@ -295,6 +305,7 @@ class Worker:
         executes), le premier tour reconcilie donc toutes les positions, comme un redemarrage."""
         self._in_standby = False
         self._resume_reconcile = True
+        self._next_orphan_audit = 0
         self.events.append(EventType.WORKER_STARTED, "Worker relance depuis le Dashboard")
 
     def _worker_interval(self) -> int:
@@ -321,6 +332,10 @@ class Worker:
         if hasattr(self, "fee_token_monitor"):
             self.fee_token_monitor.check()
         if hasattr(self, "auto_signal_executor"):
+            # Toujours AVANT une mise en file automatique : au demarrage, aucun signal ne part
+            # tant que les ordres ouverts du compte n'ont pas ete compares aux positions locales.
+            if self._loop >= self._next_orphan_audit:
+                self._audit_orphan_orders()
             self.auto_signal_executor.process_pending()
         if hasattr(self, "command_processor"):
             self.command_processor.run_one()
@@ -660,6 +675,60 @@ class Worker:
                 )
             if report.has_desync or position.sync_status != previous_sync_status:
                 self.positions.save(position)
+
+    def _audit_orphan_orders(self) -> None:
+        """Ordres « BSM-… » ouverts chez Binance qu'aucune position locale ne connait (lacune L2).
+
+        Ils viennent d'un second worker sur la meme cle, d'un stockage perdu ou restaure, ou d'un
+        arret entre l'envoi et l'enregistrement. Tant qu'il en existe, ou que le controle est
+        impossible, l'execution AUTOMATIQUE des signaux est suspendue (echec sur) ; le suivi des
+        positions et les commandes confirmees dans l'interface continuent. Rien n'est annule.
+        """
+        executor = self.auto_signal_executor
+        try:
+            open_orders = self.execution.get_open_orders()  # toutes les paires du compte
+            orphans = find_orphan_bot_orders(open_orders, self.positions.list_all())
+        except Exception as exc:  # noqa: BLE001 - echec sur, le worker continue
+            self._next_orphan_audit = self._loop + RECONCILE_EVERY
+            executor.suspend(f"Contrôle des ordres orphelins impossible : {exc}")
+            if self._orphan_report != "ECHEC":
+                self._orphan_report = "ECHEC"
+                self.events.append(
+                    EventType.ERROR,
+                    f"Contrôle des ordres orphelins impossible ({exc}) : exécution automatique des "
+                    "signaux suspendue jusqu'au prochain contrôle réussi",
+                    level="WARNING",
+                )
+            return
+        self._next_orphan_audit = self._loop + ORPHAN_AUDIT_EVERY
+        if not orphans:
+            if executor.suspended_reason:
+                self.events.append(
+                    EventType.POSITION_UPDATED,
+                    "Aucun ordre BSM orphelin chez Binance : exécution automatique des signaux rétablie",
+                    level="INFO",
+                )
+            executor.resume()
+            self._orphan_report = None
+            return
+        found = frozenset((str(o.get("symbol")), str(o.get("clientOrderId"))) for o in orphans)
+        listing = ", ".join(f"{symbol} {client_id}" for symbol, client_id in sorted(found))
+        executor.suspend(f"{len(found)} ordre(s) BSM ouvert(s) chez Binance sans position locale : {listing}")
+        if self._orphan_report != found:
+            self._orphan_report = found
+            self.events.append(
+                EventType.DESYNC_DETECTED,
+                f"Ordre(s) BSM orphelin(s) chez Binance : {listing}. Exécution automatique des "
+                "signaux suspendue, suivi des positions maintenu. Vérifier un second worker sur la "
+                "même clé ou un stockage restauré ; aucun ordre n'est annulé automatiquement.",
+                level="CRITICAL",
+                orders=[
+                    {"symbol": o.get("symbol"), "order_id": o.get("orderId"),
+                     "client_order_id": o.get("clientOrderId"), "side": o.get("side"),
+                     "type": o.get("type")}
+                    for o in orphans
+                ],
+            )
 
     def _sync_quote_balance(self) -> None:
         """Memorise le solde quote pour que le Dashboard fonctionne hors ligne."""

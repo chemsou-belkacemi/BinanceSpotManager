@@ -47,6 +47,9 @@ class AutomaticSignalExecutor:
         # Avis de CryptoSignalIntelligence (lecture et évaluation seulement) : il peut retenir
         # un signal automatique, jamais l'envoyer. Absent = CSI considéré injoignable.
         self.csi_client = csi_client
+        #: Raison d'une suspension (échec sûr), vide sinon : posée par le worker tant que des ordres
+        #: BSM orphelins existent chez Binance ou que leur contrôle est impossible.
+        self.suspended_reason = ""
         self._diagnostics = {
             "state": "DISABLED",
             "queued_total": 0,
@@ -62,11 +65,24 @@ class AutomaticSignalExecutor:
     def _update(self, **values):
         self._diagnostics.update(values)
 
+    def suspend(self, reason):
+        """Plus aucune mise en file automatique tant que la raison tient (suivi des positions et
+        commandes confirmées à la main continuent ailleurs)."""
+        self.suspended_reason = str(reason) or "Exécution automatique suspendue"
+
+    def resume(self):
+        self.suspended_reason = ""
+
     def process_pending(self, limit=3):
         preferences = self.preferences_loader()
         preferences = preferences if isinstance(preferences, dict) else {}
         if not preferences.get("signal_auto_execute_enabled", False):
             self._update(state="DISABLED", last_detail="")
+            return []
+        if self.suspended_reason:
+            # Les signaux reçus pendant la suspension restent dans la boîte ; à la reprise, seuls
+            # ceux encore assez récents (âge maximal des réglages) partent automatiquement.
+            self._update(state="SUSPENDED", last_detail=self.suspended_reason)
             return []
         if not (preferences.get("signal_telegram_enabled", False)
                 and preferences.get("signal_telegram_auto_enabled", False)):
