@@ -124,9 +124,16 @@ with st.expander("Détails (bilan des groupes, stratégies, historique)"):
         st.markdown("**Bilan des groupes Telegram**")
         st.caption(f"Règle : {report.get('rule', '')}.")
         if records:
-            st.dataframe([{"Groupe": r.get("source"), "Évalués": r.get("evaluated"), "Résolus": r.get("resolved"),
+            needed = int(report.get("min_resolved") or 20)
+            st.dataframe([{"Groupe": r.get("source"),
+                           "Vers une conclusion": min(1.0, (r.get("resolved") or 0) / needed),
+                           "Résolus": f"{r.get('resolved') or 0}/{needed}", "Évalués": r.get("evaluated"),
                            "Écart moyen (R)": r.get("edge_r"), "Conclusion": r.get("conclusion")} for r in records],
-                         hide_index=True, width="stretch")
+                         hide_index=True, width="stretch",
+                         column_config={"Vers une conclusion": st.column_config.ProgressColumn(
+                             "Vers une conclusion", min_value=0.0, max_value=1.0, format="percent",
+                             help=f"CSI conclut sur un groupe après {needed} signaux résolus "
+                                  f"(sur au moins {report.get('min_days') or 10} jours)")})
         strategies = client.strategies()
         if strategies:
             st.markdown("**Stratégies de CSI (dernier test)**")

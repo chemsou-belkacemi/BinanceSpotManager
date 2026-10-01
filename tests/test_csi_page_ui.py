@@ -49,7 +49,10 @@ class FakeClient:
         return list(self.found)
 
     def sources(self):
-        return {"sources": [], "rule": "aucune conclusion avant 20 signaux résolus sur au moins 10 jours"}
+        return {"sources": [{"source": "Suhaib", "evaluated": 9, "resolved": 7, "edge_r": 0.1,
+                             "conclusion": "trop peu de signaux résolus (7 < 20) : aucune conclusion"}],
+                "min_resolved": 20, "min_days": 10,
+                "rule": "aucune conclusion avant 20 signaux résolus sur au moins 10 jours"}
 
     def strategies(self):
         return [{"strategy": "EMA_PULLBACK_CONTINUATION", "verdict": "REJECTED", "expectancy_r": -0.16,
@@ -91,6 +94,8 @@ def test_verify_a_pasted_signal_in_one_click(monkeypatch, tmp_path):
     assert FakeClient.evaluations == [(SIGNAL, "Suhaib", True, True)]      # collé ici : validé par toi
     assert any("Déconseillé" in e.value for e in app.error)
     assert any("Aucun signal trouvé" in c.value for c in app.caption)
+    groups = next(df.value for df in app.dataframe if "Groupe" in df.value.columns)
+    assert groups.iloc[0]["Résolus"] == "7/20" and groups.iloc[0]["Vers une conclusion"] == 0.35
 
 
 def test_found_signal_can_be_sent_to_the_signal_page_for_a_manual_demo_test(monkeypatch, tmp_path):
