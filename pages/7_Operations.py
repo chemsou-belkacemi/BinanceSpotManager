@@ -19,6 +19,11 @@ from binance_spot_manager.accounting import accounting_snapshot
 from binance_spot_manager.protection_status import protection_overview
 from ui_common import get_service, banner, sidebar_status, pnl_dataframe
 
+from ui_common import require_login  # noqa: E402
+
+# Connexion exigee avant tout affichage (comptes : scripts/creer_compte.py).
+require_login()
+
 st.set_page_config(page_title="Operations — BinanceSpotManager", page_icon=":material/fact_check:", layout="wide")
 st.title("Operations")
 st.caption("Demandes au worker, protection et reprise — Binance Demo uniquement")

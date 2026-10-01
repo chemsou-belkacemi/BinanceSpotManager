@@ -15,6 +15,11 @@ from binance_spot_manager.csi_client import CsiUnavailable  # noqa: E402
 from binance_spot_manager.signal_inbox import SignalInbox  # noqa: E402
 from ui_common import banner, page_header, sidebar_status  # noqa: E402
 
+from ui_common import require_login  # noqa: E402
+
+# Connexion exigee avant tout affichage (comptes : scripts/creer_compte.py).
+require_login()
+
 st.set_page_config(page_title="CSI — Binance Demo", page_icon=":material/psychology:", layout="wide")
 page_header("CSI", "Le cerveau : il vérifie tes signaux et en cherche lui-même. Il ne passe jamais d'ordre.")
 settings = get_settings()

@@ -19,6 +19,7 @@ from binance_spot_manager.browser_notifications import (
     browser_alert_preferences, notification_html,
 )
 from binance_spot_manager.ui_alerts import unseen_alerts
+from binance_spot_manager import auth
 
 MODE_COLORS = {
     "DRY_RUN": "🟦",
@@ -37,6 +38,81 @@ def get_service() -> DashboardService:
 @st.cache_resource(show_spinner=False)
 def get_rules_cache() -> SymbolRulesCache:
     return SymbolRulesCache(BinanceSpotClient(get_settings()))
+
+
+def _login_required(store: "auth.AccountStore") -> bool:
+    try:
+        return auth.auth_required(store)
+    except Exception:  # noqa: BLE001 - echec sur : en cas de doute, connexion exigee
+        return True
+
+
+def require_login() -> Optional[str]:
+    """Garde appelee par CHAQUE page AVANT tout affichage.
+
+    Renvoie l'identifiant connecte, ou None si la connexion n'est pas exigee (aucun compte cree
+    et BSM_AUTH_REQUIRED non defini). Sinon affiche la page de connexion et arrete la page.
+    """
+    store = auth.AccountStore()
+    if not _login_required(store):
+        return None
+    try:
+        user = auth.current_user(st.session_state, store)
+    except Exception:  # noqa: BLE001
+        user = None
+    if user:
+        return user
+    _login_page(store)
+    st.stop()
+    return None  # jamais atteint : st.stop() interrompt la page
+
+
+def _login_page(store: "auth.AccountStore") -> None:
+    st.title("BinanceSpotManager")
+    st.caption("Connexion requise")
+    try:
+        has_accounts = store.has_accounts() and bool(store.usernames())
+    except RuntimeError as exc:
+        st.error(str(exc))
+        return
+    if not has_accounts:
+        st.error(
+            "Connexion exigée (BSM_AUTH_REQUIRED) mais aucun compte n'existe. Créer le premier compte "
+            "en ligne de commande : `python scripts/creer_compte.py <identifiant>` "
+            "(Docker : `make compte NAME=<identifiant>`)."
+        )
+        return
+    with st.form("bsm_login", clear_on_submit=True):
+        username = st.text_input("Identifiant", autocomplete="username")
+        password = st.text_input("Mot de passe", type="password", autocomplete="current-password")
+        code = st.text_input("Code à 6 chiffres (application d'authentification)", max_chars=6,
+                             autocomplete="one-time-code")
+        submitted = st.form_submit_button("Se connecter", type="primary")
+    if submitted:
+        try:
+            result = store.authenticate(username, password, code)
+        except Exception as exc:  # noqa: BLE001 - coffre ou fichier illisible : rester ferme
+            st.error(f"Connexion impossible : {exc}")
+            return
+        if result.ok:
+            auth.open_session(st.session_state, result)
+            st.rerun()
+        st.error(result.message)
+    st.caption(
+        f"Session fermée après {auth.idle_timeout_seconds() // 60} min d'inactivité. "
+        f"{auth.MAX_FAILURES} échecs bloquent le compte {auth.LOCK_SECONDS // 60} minutes."
+    )
+
+
+def session_still_valid() -> bool:
+    """Controle sans prolonger la session (rafraichissements automatiques des fragments)."""
+    store = auth.AccountStore()
+    if not _login_required(store):
+        return True
+    try:
+        return auth.current_user(st.session_state, store, touch=False) is not None
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def page_header(title: str, subtitle: str = "") -> None:
@@ -103,7 +179,19 @@ def sidebar_status(settings: Optional[Settings] = None) -> None:
         st.markdown(f"**Mode** : {settings.environment.value}")
         st.markdown(f"**Run** : {settings.run_mode.value}")
         if not settings.has_credentials:
-            st.warning("Clés API non configurées (.env)")
+            st.warning("Clés API non configurées : Settings → Sécurité")
+        elif settings.credentials_source == "vault":
+            st.caption("Clés API : coffre chiffré de l'instance")
+        if settings.credentials_error:
+            st.error(f"Coffre des clés : {settings.credentials_error}")
+        licence_sidebar()
+        session = st.session_state.get(auth.SESSION_KEY)
+        if isinstance(session, dict) and session.get("username"):
+            st.divider()
+            st.caption(f"Connecté : {session['username']}")
+            if st.button("Se déconnecter", key="bsm_logout"):
+                auth.close_session(st.session_state)
+                st.rerun()
 
         st.divider()
         summary = service.summary()
@@ -111,6 +199,21 @@ def sidebar_status(settings: Optional[Settings] = None) -> None:
         st.caption(f"{summary['total']} positions au total")
 
     global_alerts()
+
+
+def licence_sidebar() -> None:
+    """Etat de la licence de location, quand elle est exigee."""
+    from binance_spot_manager import licence
+
+    if not licence.licence_required():
+        return
+    status = licence.current_status()
+    if not status.valid:
+        st.error(f"Licence : {status.reason}. Aucune nouvelle entrée ; positions ouvertes suivies.")
+    elif status.expiring_soon:
+        st.warning(f"Licence : fin le {status.fin} ({status.days_left} j)")
+    else:
+        st.caption(f"Licence {status.offre} valable jusqu'au {status.fin}")
 
 
 def alert_tone() -> bytes:
@@ -132,6 +235,9 @@ def alert_tone() -> bytes:
 @st.fragment(run_every="1s")
 def global_alerts() -> None:
     """Surveille les evenements depuis chaque page, sans rejouer l'historique."""
+    if not session_still_valid():
+        # Session expiree pendant que la page se rafraichit seule : retour a la connexion.
+        st.rerun()
     service = get_service()
     preferences = browser_alert_preferences(service.user_settings())
     records = service.events.tail(limit=100)
