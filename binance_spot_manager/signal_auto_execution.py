@@ -13,6 +13,7 @@ from .signal_plan import (
     automatic_signal_selection,
     automatic_tp_allocations,
     prepare_signal,
+    signal_identity,
 )
 from .signal_sizing import SignalSizingPolicy, suggest_signal_budget_from_account
 
@@ -162,6 +163,10 @@ class AutomaticSignalExecutor:
                     current_price=current_price,
                     signal_id=signal_id,
                     source="telegram",
+                    # Même signal, même compte : même position et mêmes clientOrderId sur toute
+                    # installation BSM (deux workers sur la même clé n'achètent pas deux fois).
+                    account_scope=self.scope,
+                    signal_key=signal_identity(row),
                     touch_stop=bool(preferences.get("signal_auto_touch_stop", False)),
                     trail_stop=bool(preferences.get(TRAIL_STOP_KEY, True)),
                     validity_confirmed=True,

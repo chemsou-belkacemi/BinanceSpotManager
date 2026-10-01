@@ -16,7 +16,7 @@ from binance_spot_manager.command_store import account_scope
 from binance_spot_manager.config import get_settings
 from binance_spot_manager.signal_inbox import SignalInbox
 from binance_spot_manager.signal_parser import ParsedSignal, TEMPLATES, parse_signal
-from binance_spot_manager.signal_plan import TRAIL_STOP_KEY, prepare_signal
+from binance_spot_manager.signal_plan import TRAIL_STOP_KEY, prepare_signal, signal_identity
 from binance_spot_manager.signal_sizing import (
     SignalSizingPolicy,
     suggest_signal_budget_from_account,
@@ -266,7 +266,8 @@ if st.button("Vérifier sur Binance Demo et simuler", disabled=not (budget > 0 a
             available_quote=float(balances.get(rules.quote_asset, {}).get("free", 0)),
             reserve_percent=service.risk_limits().min_reserve_percent,
             current_price=current_price or 0, signal_id=selected, source=row["source"],
-            touch_stop=touch, validity_confirmed=validity, trail_stop=trail_stop)
+            touch_stop=touch, validity_confirmed=validity, trail_stop=trail_stop,
+            account_scope=scope, signal_key=signal_identity(row))
         st.session_state["signal_preview"] = (signature, plan, payload)
     except Exception as exc:
         st.error(f"Simulation refusée : {exc}")
@@ -289,7 +290,10 @@ if preview and preview[0] == signature:
     st.markdown(f"SL : {plan.stop_loss.price} · Perte théorique au SL hors frais/glissement : "
                 + colored_pnl(-abs(plan.loss_max_estimated), f"{-abs(plan.loss_max_estimated):.4f} {plan.quote_asset}"))
     st.caption("Simulation valable 120 secondes. Le worker recontrôle prix, solde, risque et frais avant tout achat. Une simulation valide peut encore être refusée.")
-    confirm = st.checkbox("Je confirme ces achats LIMIT et cette stratégie sur Binance Demo", key=f"confirm_{payload['position']['position_id']}")
+    # Une case par simulation : le position_id d'un signal est désormais stable, une nouvelle
+    # simulation ne doit jamais hériter de la confirmation de la précédente.
+    confirm = st.checkbox("Je confirme ces achats LIMIT et cette stratégie sur Binance Demo",
+                          key=f"confirm_{payload['position']['position_id']}_{payload['signal_confirmation_expires_at']}")
     if st.button("Transmettre au worker Demo", disabled=not confirm):
         try:
             if time.time() >= payload["signal_confirmation_expires_at"]:

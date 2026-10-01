@@ -1,5 +1,6 @@
 """Convert a reviewed signal to the existing worker's guarded command protocol."""
 from dataclasses import replace
+import hashlib
 import math
 import re
 import time
@@ -7,8 +8,37 @@ import time
 from .candle_stop import kline_interval
 from .models import OrderType, PriceMode, SLMode, SLRuleAfterTP, SLTrigger, SignalSource
 from .position_engine import PositionEngine
-from .signal_parser import ParsedSignal
+from .signal_parser import ParsedSignal, content_hash
 from .strategy_engine import EntrySpec, SLSpec, StrategyEngine, StrategySpec, TPSpec
+
+
+def signal_identity(row) -> str:
+    """Identifiant stable d'un signal reçu, le même sur deux installations BSM.
+
+    Signal CSI au contrat V3 (dépôt de fichiers) : son IDEMPOTENCY_KEY. Sinon (Telegram, texte
+    collé, signal CSI importé en texte depuis la page CSI) : l'empreinte du texte normalisé, déjà
+    clé de dédoublonnage de la boîte de réception. L'identifiant de ligne de la boîte (aléatoire)
+    ne convient pas : il diffère d'une installation à l'autre.
+    """
+    key = str((row.get("parsed") or {}).get("idempotency_key") or "").strip()
+    if key:
+        return "csi:" + key
+    return "text:" + (row.get("hash") or content_hash(row["raw"]))
+
+
+def signal_position_id(account_scope: str, signal_key: str) -> str:
+    """position_id déterministe d'une position issue d'un signal (lacune L3, audit du 2026-10-01).
+
+    Deux workers sur la même clé Demo (même scope, donc même mode) qui traitent le même signal
+    obtiennent la même position, donc les mêmes clientOrderId : Binance refuse le doublon, ou
+    l'ordre déjà envoyé est retrouvé et adopté ; jamais deux achats. Le mode fait partie du scope :
+    un essai DRY_RUN du signal ne bloque pas son exécution Demo sur la même machine. Les positions
+    manuelles (New Trade, Investissement) gardent un identifiant aléatoire.
+    """
+    if not account_scope or not signal_key:
+        raise ValueError("Scope du compte et identifiant stable du signal requis.")
+    digest = hashlib.sha256(f"{account_scope}\n{signal_key}".encode()).hexdigest()
+    return "pos_sig_" + digest[:24]
 
 
 def automatic_signal_selection(parsed: ParsedSignal, *, entry_count=1, tp_count=2):
@@ -106,7 +136,9 @@ def trailing_stop_rules(entries, targets, enabled=True):
 def prepare_signal(parsed: ParsedSignal, rules, *, budget, available_quote, reserve_percent,
                    current_price, signal_id, source="manual", touch_stop=False,
                    validity_confirmed=False, entry_allocations=None, tp_allocations=None,
-                   trail_stop=True):
+                   trail_stop=True, account_scope="", signal_key=""):
+    """`signal_key` (voir signal_identity) et `account_scope` rendent le position_id déterministe ;
+    les deux appelants (exécution automatique, page Signaux) les fournissent toujours."""
     if parsed.errors:
         raise ValueError(" ; ".join(parsed.errors))
     if not validity_confirmed:
@@ -172,6 +204,8 @@ def prepare_signal(parsed: ParsedSignal, rules, *, budget, available_quote, rese
         if errors:
             raise ValueError("Budget insuffisant pour les tranches TP (marge de quantité 1 %) : " + " ; ".join(errors))
     position = PositionEngine(rules).from_plan(plan, spec)
+    if signal_key:
+        position.position_id = signal_position_id(account_scope, signal_key)
     if candle_interval:
         position.stop_loss.trigger = SLTrigger.CANDLE_CLOSE
         position.stop_loss.candle_interval = candle_interval
