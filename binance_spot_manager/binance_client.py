@@ -102,6 +102,9 @@ class BinanceSpotClient:
     def __init__(self, settings: Optional[Settings] = None) -> None:
         self.settings = settings or get_settings()
         self._session = requests.Session()
+        # Ni proxy (HTTPS_PROXY), ni autorite de certification (REQUESTS_CA_BUNDLE), ni .netrc
+        # venus de l'environnement : la connexion a Binance ne doit pas pouvoir etre interceptee.
+        self._session.trust_env = False
         self._session.headers.update({"User-Agent": "BinanceSpotManager/2.0"})
         self._time_offset_ms: int = 0
         self._time_synced_at: float = 0.0

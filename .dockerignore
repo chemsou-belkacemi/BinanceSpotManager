@@ -21,6 +21,15 @@ __pycache__/
 .coverage
 htmlcov/
 
+# Cles (cle maitresse du coffre, cle privee de licence) : jamais dans l'image
+*.key
+*.pem
+master.key
+licence*.json
+
+# Copies de travail des agents Claude Code (plusieurs Mo de code non relu)
+.claude/
+
 # OS / IDE
 .DS_Store
 Thumbs.db

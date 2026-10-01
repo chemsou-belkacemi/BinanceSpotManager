@@ -20,7 +20,10 @@ RUN pip install -r requirements.txt
 # Code en lecture seule pour l'utilisateur applicatif ; seuls data/ et logs/
 # lui appartiennent (les volumes nommes heritent de ces droits a la creation).
 COPY . .
-RUN mkdir -p data logs && chown bsm:bsm data logs
+# /var/lib/bsm-keys : point de montage du volume de la cle maitresse (droits 700, utilisateur bsm).
+RUN mkdir -p data logs /var/lib/bsm-keys \
+    && chown bsm:bsm data logs /var/lib/bsm-keys \
+    && chmod 700 /var/lib/bsm-keys
 
 USER bsm
 

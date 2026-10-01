@@ -6,6 +6,7 @@ Le consommateur doit utiliser REST lorsque ``prices`` ne fournit pas un symbole.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import math
@@ -45,7 +46,9 @@ class DemoMarketPriceStream:
                 self.enabled = False
                 self._disabled_reason = "Dependance websockets absente : fallback REST"
             else:
-                connect = websocket_connect
+                # websockets >= 15 suit HTTPS_PROXY par defaut : les prix qui declenchent stops et
+                # objectifs ne doivent pas pouvoir passer par un intermediaire de l'environnement.
+                connect = functools.partial(websocket_connect, proxy=None)
         self._connect = connect
         self._lock = threading.Lock()
         self._watched: set[str] = set()

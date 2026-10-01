@@ -13,6 +13,7 @@ import json
 import logging
 import queue
 import smtplib
+import ssl
 import threading
 import time
 import urllib.error
@@ -160,7 +161,8 @@ class EmailChannel(NotificationChannel):
             with smtplib.SMTP(
                 self.settings.smtp_host, self.settings.smtp_port, timeout=10
             ) as smtp:
-                smtp.starttls()
+                # Certificat et nom d'hote verifies : sans contexte, starttls() n'en verifie aucun.
+                smtp.starttls(context=ssl.create_default_context())
                 if self.settings.smtp_user:
                     smtp.login(self.settings.smtp_user, self.settings.smtp_password)
                 smtp.send_message(message)
