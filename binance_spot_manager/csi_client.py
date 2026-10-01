@@ -34,6 +34,7 @@ VERDICT_ICONS = {"REFUSE": "⛔", "DEFAVORABLE": "🔴", "INDETERMINE": "🟡", 
 #: L'API refuse un corps de plus de 16 Ko : le texte est tronqué bien avant.
 MAX_TEXT_CHARS = 12_000
 MAX_SOURCE_CHARS = 80
+EVALUATE_TIMEOUT_SECONDS = 30.0
 
 #: Clés des réglages (data/settings.json, Settings → Signaux).
 GATE_ENABLED_KEY = "signal_csi_gate_enabled"
@@ -91,13 +92,14 @@ class CsiClient:
             self._session = requests.Session()
         return self._session
 
-    def _request(self, method: str, path: str, *, json=None, params=None) -> dict:
+    def _request(self, method: str, path: str, *, json=None, params=None, timeout: float | None = None) -> dict:
         headers = {"Accept": "application/json"}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         try:
             response = self.session.request(
-                method, self.base_url + path, json=json, params=params, headers=headers, timeout=self.timeout,
+                method, self.base_url + path, json=json, params=params, headers=headers,
+                timeout=timeout or self.timeout,
             )
         except (requests.RequestException, OSError) as exc:
             # Pas le message brut : il peut contenir l'URL complète ; jamais le jeton.
@@ -152,6 +154,8 @@ class CsiClient:
             "POST", "/evaluate",
             json={"text": text[:MAX_TEXT_CHARS], "source": source, "record": bool(record),
                   "user_validated": bool(user_validated)},
+            # Une paire nouvelle est vérifiée sur Binance pendant la requête (jusqu'à ~15 s avec les reprises).
+            timeout=max(self.timeout, EVALUATE_TIMEOUT_SECONDS),
         )
         verdict = str(payload.get("verdict") or "")
         if verdict not in VERDICT_LABELS:

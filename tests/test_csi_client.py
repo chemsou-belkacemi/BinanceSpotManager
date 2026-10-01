@@ -44,6 +44,7 @@ def test_evaluate_sends_token_and_builds_an_opinion():
     method, url, kwargs = session.calls[0]
     assert (method, url) == ("POST", "http://csi-api:8503/evaluate")
     assert kwargs["headers"]["Authorization"] == "Bearer secret"
+    assert kwargs["timeout"] == 30.0                     # évaluation : délai long (vérification Binance côté CSI)
     assert kwargs["json"] == {"text": "PAIR: ETH/USDT\nENTRY 1: 100\nT1: 110\nSL: 95", "source": "Groupe A",
                               "record": False, "user_validated": False}
     assert result.verdict == "DEFAVORABLE" and result.label == "Défavorable" and result.holds_execution
