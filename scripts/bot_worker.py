@@ -79,6 +79,11 @@ ORPHAN_AUDIT_EVERY = 60
 #: Achats envoyes dont le remplissage n'est connu que par la reconciliation.
 AWAITING_FILL = frozenset({EntryStatus.SUBMITTED, EntryStatus.PARTIALLY_FILLED})
 
+#: Entre deux reconciliations completes, les positions dont un achat attend son remplissage sont
+#: relues au plus une fois toutes les N secondes (horloge monotone). Les relire a chaque tour
+#: (1 s) approchait la limite de poids Binance (6 000/min) avec 5 positions en attente.
+AWAITING_FILL_RECONCILE_SECONDS = 10
+
 
 def awaiting_fill(position) -> bool:
     """Vrai si un achat est chez Binance sans remplissage complet constate : tant que la quantite
@@ -95,6 +100,10 @@ class Worker:
     #: Docker (le process ne redemarre pas, _loop ne repasse jamais a 1). Remis a False une fois
     #: la reconciliation faite : un tour en erreur avant elle la reporte au tour suivant.
     _resume_reconcile = False
+    #: Horloge monotone (remplacable dans les tests) de la cadence des achats en attente.
+    _monotonic = staticmethod(time.monotonic)
+    #: Instant monotone de la derniere relecture des achats en attente (None : jamais).
+    _awaiting_reconciled_at = None
     #: Tour du prochain controle des ordres orphelins (0 : des le prochain tour).
     _next_orphan_audit = 0
     #: Dernier constat signale (ensemble d'ordres orphelins, "ECHEC" ou None) : un seul evenement
@@ -358,18 +367,23 @@ class Worker:
                 processed.append(position)
 
         # Reconciliation (section 19) : au premier tour (reprise apres un arret ou une veille : achats
-        # remplis, stops executes pendant l'arret), puis tous les RECONCILE_EVERY tours ; et a CHAQUE
-        # tour pour une position dont un achat attend son remplissage, sinon le stop n'est pose que
-        # jusqu'a RECONCILE_EVERY tours apres l'achat.
+        # remplis, stops executes pendant l'arret), puis tous les RECONCILE_EVERY tours ; entre deux,
+        # les positions dont un achat attend son remplissage sont relues au plus une fois toutes les
+        # AWAITING_FILL_RECONCILE_SECONDS, sinon le stop n'est pose que jusqu'a RECONCILE_EVERY tours
+        # apres l'achat.
         # Ne pas reconcilier un objet potentiellement modifie par un cycle echoue.
+        now = self._monotonic()
         if self._resume_reconcile or self._loop % RECONCILE_EVERY == 0:
             self._reconcile(processed)
             self._sync_quote_balance()
             self._resume_reconcile = False
+            self._awaiting_reconciled_at = now  # les achats en attente viennent d'etre relus
         else:
             pending = [position for position in processed if awaiting_fill(position)]
-            if pending:
+            last = self._awaiting_reconciled_at
+            if pending and (last is None or now - last >= AWAITING_FILL_RECONCILE_SECONDS):
                 self._reconcile(pending)
+                self._awaiting_reconciled_at = now
 
         if errors:
             raise RuntimeError("Erreur de suivi : " + " ; ".join(errors))

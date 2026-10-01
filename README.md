@@ -342,10 +342,11 @@ résultat incertain (timeout, `5xx`) bloque pour vérification.
 
 **Reprise et ordres orphelins.** Au démarrage du worker et à sa sortie de veille,
 toutes les positions sont réconciliées au premier tour, puis tous les 12 tours ;
-une position dont un achat attend son remplissage l'est à chaque tour, pour que le
-SL soit posé dès l'achat constaté. Au même premier tour (avant tout signal
-automatique), puis tous les 60 tours, le worker compare aussi les ordres ouverts
-du compte (toutes paires) aux positions
+entre deux, une position dont un achat attend son remplissage est relue au plus
+toutes les 10 s (horloge monotone), pour que le SL soit posé peu après l'achat
+constaté sans approcher la limite de poids Binance. Au même premier tour (avant
+tout signal automatique), puis tous les 60 tours, le worker compare aussi les
+ordres ouverts du compte (toutes paires) aux positions
 locales : un ordre `BSM-…` inconnu (second worker sur la même clé, stockage
 restauré…) déclenche une alerte critique et suspend l'exécution automatique des
 signaux, jusqu'à ce qu'un contrôle n'en trouve plus. Le suivi des positions et

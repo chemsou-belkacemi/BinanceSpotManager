@@ -115,7 +115,7 @@ def test_worker_persists_partial_then_completed_purchase_across_restart(recovery
     assert restored.entries[0].status is EntryStatus.FILLED
 
 
-def ticking_worker(engine, store, loop, *, restarted=False):
+def ticking_worker(engine, store, loop, *, restarted=False, clock=None):
     from scripts.bot_worker import Worker
 
     worker = Worker.__new__(Worker)
@@ -126,18 +126,56 @@ def ticking_worker(engine, store, loop, *, restarted=False):
     worker._resume_reconcile = restarted        # pose par Worker.__init__ (demarrage) et _leave_standby (veille)
     worker._price_provider = lambda symbols: (lambda symbol: None)     # aucun prix : seul le suivi compte
     worker._sync_quote_balance = lambda: None
+    if clock is not None:
+        worker._monotonic = lambda: clock[0]    # horloge monotone simulee, en secondes
     return worker
 
 
 def test_a_filled_limit_entry_is_recorded_on_the_next_tick_not_twelve_ticks_later(recovery):
-    """Lacune L1 (audit du 2026-10-01) : tant que l'achat rempli n'est pas constate, aucun stop."""
+    """Lacune L1 (audit du 2026-10-01) : tant que l'achat rempli n'est pas constate, aucun stop.
+    Premiere relecture d'un achat en attente : au tour suivant, puis au plus toutes les 10 s."""
     engine, state, position, store = recovery
     store.save(position)
     state["order"] = order("FILLED", 1.0)
-    ticking_worker(engine, store, loop=5)._tick()                    # ni premier tour, ni multiple de 12
+    ticking_worker(engine, store, loop=5, clock=[1000.0])._tick()   # ni premier tour, ni multiple de 12
     restored = store.load(position.position_id)
     assert restored.entries[0].status is EntryStatus.FILLED
     assert restored.metrics.net_qty == pytest.approx(0.999)
+
+
+def test_a_pending_entry_is_reread_at_most_once_every_ten_seconds(recovery):
+    """Charge Binance : a 1 s par tour, relire un achat en attente a chaque tour approchait la
+    limite de poids (6 000/min) avec 5 positions ; une relecture toutes les 10 s suffit."""
+    from scripts.bot_worker import AWAITING_FILL_RECONCILE_SECONDS
+
+    engine, _, position, store = recovery
+    store.save(position)                                            # entree SUBMITTED : en attente
+    seen = []
+    spy = SimpleNamespace(reconcile=lambda p: seen.append(p.position_id) or engine.reconcile(p))
+    clock = [1000.0]
+    worker = ticking_worker(spy, store, loop=5, clock=clock)        # ni reprise, ni multiple de 12
+    worker._tick()
+    clock[0], worker._loop = clock[0] + 1, 6                        # tour suivant, 1 s plus tard
+    worker._tick()
+    assert seen == [position.position_id]
+    clock[0], worker._loop = 1000.0 + AWAITING_FILL_RECONCILE_SECONDS, 7
+    worker._tick()                                                  # 10 s apres la premiere relecture
+    assert seen == [position.position_id] * 2
+
+
+def test_a_full_reconciliation_also_counts_as_a_reread_of_pending_entries(recovery):
+    from scripts.bot_worker import RECONCILE_EVERY
+
+    engine, _, position, store = recovery
+    store.save(position)
+    seen = []
+    spy = SimpleNamespace(reconcile=lambda p: seen.append(p.position_id) or engine.reconcile(p))
+    clock = [1000.0]
+    worker = ticking_worker(spy, store, loop=RECONCILE_EVERY, clock=clock)
+    worker._tick()                                                  # reconciliation complete
+    clock[0], worker._loop = clock[0] + 1, RECONCILE_EVERY + 1
+    worker._tick()                                                  # pas de seconde lecture 1 s apres
+    assert seen == [position.position_id]
 
 
 def test_a_starting_worker_owes_a_full_reconciliation_on_its_first_tick(monkeypatch):
