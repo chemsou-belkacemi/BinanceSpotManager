@@ -56,6 +56,14 @@ et peuvent se remplir immédiatement si leur limite est au-dessus du marché.
 Les TP représentent des parts égales de la position : le pourcentage transmis
 au moteur existant est converti en pourcentage du restant, dernier TP à 100 %.
 Le premier TP confirmé demande l'annulation des entrées encore ouvertes.
+
+**Suivi du stop loss** (Settings → Signaux, activé par défaut, signaux manuels et automatiques) :
+après TP1 le SL passe à l'Entry 1, il reste à l'Entry 1 après TP2, puis à partir de TP3 il suit
+deux objectifs en arrière (TP3 → TP1, TP4 → TP2…). Désactivé : le SL reste au prix du signal
+pendant tout le trade. Un SL de clôture de bougie (`15m`, `4h`…) n'est jamais converti en silence :
+la conversion en stop au prix exige toujours une autorisation explicite, car la surveillance des
+clôtures n'est pas implémentée. La règle est enregistrée dans chaque TP à la création du trade :
+changer le réglage ne modifie que les nouveaux trades, les trades ouverts gardent leur comportement.
 Cette version utilise les TP du worker et sa gestion SL existante, **pas un OCO
 par tranche**. Frais, arrondis et exécutions partielles peuvent changer les
 quantités réellement vendables. Les contrôles de minimum ne garantissent pas

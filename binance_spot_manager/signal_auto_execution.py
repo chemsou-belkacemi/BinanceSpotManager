@@ -8,6 +8,7 @@ from .csi_client import CsiUnavailable, GatePolicy, source_label
 from .models import EventType
 from .signal_parser import ParsedSignal
 from .signal_plan import (
+    TRAIL_STOP_KEY,
     automatic_entry_allocations,
     automatic_signal_selection,
     automatic_tp_allocations,
@@ -162,6 +163,7 @@ class AutomaticSignalExecutor:
                     signal_id=signal_id,
                     source="telegram",
                     touch_stop=bool(preferences.get("signal_auto_touch_stop", False)),
+                    trail_stop=bool(preferences.get(TRAIL_STOP_KEY, True)),
                     validity_confirmed=True,
                     entry_allocations=automatic_entry_allocations(
                         len(parsed.entries),

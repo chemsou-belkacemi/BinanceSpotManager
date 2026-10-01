@@ -126,3 +126,28 @@ def test_csi_gate_settings_are_saved_and_csi_outage_is_shown(monkeypatch, tmp_pa
     next(b for b in app.button if b.label == "Enregistrer l'avis CSI").click().run()
     assert any("Nom de groupe invalide" in e.value for e in app.error)
     assert store.load()["signal_csi_source_names"] == "-1001234=Suhaib"
+
+
+def test_signal_stop_trailing_is_on_by_default_and_can_be_turned_off(monkeypatch, tmp_path):
+    store = JsonFileStore(tmp_path / "settings.json")
+    monkeypatch.setattr(
+        "binance_spot_manager.position_store.get_settings_store", lambda: store,
+    )
+    monkeypatch.setattr(
+        "binance_spot_manager.binance_client.BinanceSpotClient.get_balances",
+        lambda self: {"BNB": {"free": 0.1, "locked": 0}},
+    )
+    monkeypatch.setattr(
+        "binance_spot_manager.binance_client.BinanceSpotClient.get_price",
+        lambda self, symbol: 500,
+    )
+    app_path = Path(__file__).resolve().parents[1] / "app.py"
+    app = AppTest.from_file(str(app_path), default_timeout=20).run()
+    app.switch_page("pages/5_Settings.py").run()
+    assert not app.exception
+    assert app.get_by_key("signal_trail_stop_toggle").value is True
+
+    app.get_by_key("signal_trail_stop_toggle").set_value(False)
+    next(b for b in app.button if b.label == "Enregistrer le suivi du SL").click().run()
+    assert not app.exception
+    assert store.load()["signal_trail_stop"] is False

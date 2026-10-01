@@ -163,6 +163,25 @@ def test_saved_policy_limits_entries_and_targets_with_early_sales(tmp_path):
     assert position["entries"][0]["resolved_price"] == 84000
     assert [tp["target_price"] for tp in position["take_profits"]] == [90000, 95000]
     assert [tp["sell_percent"] for tp in position["take_profits"]] == pytest.approx([70, 100])
+    # Suivi du SL activé par défaut : après TP1, le SL passe à l'Entry 1.
+    assert [(tp["sl_rule_after_hit"], tp["sl_rule_value"]) for tp in position["take_profits"]] == [
+        ("FIXED_PRICE", 84000), ("NO_CHANGE", None)]
+
+
+@pytest.mark.parametrize("trail_stop,expected", [
+    (True, ["FIXED_PRICE", "NO_CHANGE", "FIXED_PRICE"]),
+    (False, ["NO_CHANGE"] * 3),
+])
+def test_saved_stop_trailing_setting_applies_to_automatic_signals(tmp_path, trail_stop, expected):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    text = "PAIR: BTC/USDT\nENTRY 1: 84000\nT1: 90000\nT2: 95000\nT3: 100000\nSL: 80000"
+    row = inbox.receive("demo", text, source="telegram", external_id="trail", source_timestamp=995)
+    preferences = enabled_preferences(signal_auto_tp_count=3, signal_trail_stop=trail_stop)
+    worker, commands = executor(tmp_path, inbox, preferences)
+
+    assert worker.process_pending() == ["QUEUED"]
+    position = commands.get_by_request_key("demo", f"signal:{row['id']}")["payload"]["position"]
+    assert [tp["sl_rule_after_hit"] for tp in position["take_profits"]] == expected
 
 
 def test_saved_custom_policy_applies_to_entries_and_targets(tmp_path):

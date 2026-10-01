@@ -4,7 +4,7 @@ import math
 import re
 import time
 
-from .models import OrderType, PriceMode, SLMode, SignalSource
+from .models import OrderType, PriceMode, SLMode, SLRuleAfterTP, SignalSource
 from .position_engine import PositionEngine
 from .signal_parser import ParsedSignal
 from .strategy_engine import EntrySpec, SLSpec, StrategyEngine, StrategySpec, TPSpec
@@ -80,9 +80,31 @@ def automatic_tp_allocations(count: int, mode="EARLY", custom="") -> list[float]
     return [100.0 * weight / total for weight in weights]
 
 
+TRAIL_STOP_KEY = "signal_trail_stop"
+
+
+def trailing_stop_rules(entries, targets, enabled=True):
+    """SL rule attached to each TP: after TP1 the SL moves to Entry 1, from TP3 it trails two
+    targets behind (TP3 → TP1, TP4 → TP2…). Disabled: the signal's stop never moves.
+
+    The rules are stored in the position when it is created, so a change of the setting only
+    affects new trades; open trades keep the behaviour they started with.
+    """
+    rules = []
+    for index in range(len(targets)):
+        if not enabled or index == 1:
+            rules.append((SLRuleAfterTP.NO_CHANGE, None))
+        elif index == 0:
+            rules.append((SLRuleAfterTP.FIXED_PRICE, entries[0]))
+        else:
+            rules.append((SLRuleAfterTP.FIXED_PRICE, targets[index - 2]))
+    return rules
+
+
 def prepare_signal(parsed: ParsedSignal, rules, *, budget, available_quote, reserve_percent,
                    current_price, signal_id, source="manual", touch_stop=False,
-                   validity_confirmed=False, entry_allocations=None, tp_allocations=None):
+                   validity_confirmed=False, entry_allocations=None, tp_allocations=None,
+                   trail_stop=True):
     if parsed.errors:
         raise ValueError(" ; ".join(parsed.errors))
     if not validity_confirmed:
@@ -121,8 +143,10 @@ def prepare_signal(parsed: ParsedSignal, rules, *, budget, available_quote, rese
             for price, allocation in zip(entries, entry_allocations)
         ],
         take_profits=[
-            TPSpec(price_mode=PriceMode.FIXED_PRICE, price=price, sell_percent=allocation)
-            for price, allocation in zip(targets, allocations)
+            TPSpec(price_mode=PriceMode.FIXED_PRICE, price=price, sell_percent=allocation,
+                   sl_rule_after_hit=rule, sl_rule_value=value)
+            for price, allocation, (rule, value)
+            in zip(targets, allocations, trailing_stop_rules(entries, targets, trail_stop))
         ],
         stop_loss=SLSpec(mode=SLMode.FIXED_PRICE, value=stop),
         source=SignalSource(source), source_name=f"Signal {parsed.template}",

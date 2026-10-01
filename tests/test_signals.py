@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from binance_spot_manager.models import Position, SLRuleAfterTP
+from binance_spot_manager.position_engine import apply_tp_sl_rule
 from binance_spot_manager.signal_parser import content_hash, parse_signal
 from binance_spot_manager.signal_inbox import SignalInbox
 from binance_spot_manager.signal_plan import (
@@ -14,6 +16,7 @@ from binance_spot_manager.signal_plan import (
     automatic_tp_allocations,
     custom_signal_allocations,
     prepare_signal,
+    trailing_stop_rules,
 )
 from binance_spot_manager.telegram_signals import (
     TelegramSignalPoller,
@@ -385,6 +388,34 @@ def test_custom_allocations_are_strictly_validated(raw, count):
 def test_preparation_blocks_unsafe_inputs(rules, overrides):
     with pytest.raises(ValueError):
         prepare(SIMPLE, rules, **overrides)
+
+
+FIVE_TP = SIMPLE.replace("ENTRY 1: 84000", "ENTRY 1: 84000\nENTRY 2: 83000").replace(
+    "T1: 90000", "T1: 90000\nT2: 95000\nT3: 100000\nT4: 105000\nT5: 110000")
+
+
+def stops_after_each_tp(payload):
+    """SL price the worker sets after each TP, in order (apply_tp_sl_rule, as automation does)."""
+    position = Position.model_validate(payload["position"])
+    stops = []
+    for tp in position.take_profits:
+        position.stop_loss.resolved_price = apply_tp_sl_rule(position, tp)
+        stops.append(position.stop_loss.resolved_price)
+    return stops
+
+
+def test_signal_stop_trails_by_default_entry_1_after_tp1_then_two_targets_behind(rules):
+    _, payload = prepare(FIVE_TP, rules)
+    assert stops_after_each_tp(payload) == [84000, 84000, 90000, 95000, 100000]
+    assert trailing_stop_rules([84000], [90000]) == [(SLRuleAfterTP.FIXED_PRICE, 84000)]
+
+
+def test_signal_stop_stays_where_the_signal_put_it_when_trailing_is_off(rules):
+    _, payload = prepare(FIVE_TP, rules, trail_stop=False)
+    assert all(tp["sl_rule_after_hit"] == "NO_CHANGE" for tp in payload["position"]["take_profits"])
+    assert stops_after_each_tp(payload) == [80000] * 5
+    with pytest.raises(ValueError, match="SL conditionnel"):
+        prepare(FIVE_TP.replace("SL: 80000", "SL: 80000 (1h)"), rules, touch_stop=False, trail_stop=False)
 
 
 def test_conditional_stop_requires_explicit_interpretation(rules):

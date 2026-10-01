@@ -15,7 +15,7 @@ from binance_spot_manager.command_store import account_scope
 from binance_spot_manager.config import get_settings
 from binance_spot_manager.signal_inbox import SignalInbox
 from binance_spot_manager.signal_parser import ParsedSignal, TEMPLATES, parse_signal
-from binance_spot_manager.signal_plan import prepare_signal
+from binance_spot_manager.signal_plan import TRAIL_STOP_KEY, prepare_signal
 from binance_spot_manager.signal_sizing import (
     SignalSizingPolicy,
     suggest_signal_budget_from_account,
@@ -238,7 +238,8 @@ if sizing_warning:
 validity = st.checkbox("J'ai vérifié la date source et ce signal est encore valable maintenant", key=f"valid_{selected}")
 touch = st.checkbox(f"Je choisis un stop au prix {parsed.stop}, sans attendre une clôture {parsed.stop_timeframe}",
                     key=f"touch_{selected}") if parsed.stop_timeframe else True
-signature = (scope, selected, budget, validity, touch)
+trail_stop = bool(preferences.get(TRAIL_STOP_KEY, True))
+signature = (scope, selected, budget, validity, touch, trail_stop)
 if st.button("Vérifier sur Binance Demo et simuler", disabled=not (budget > 0 and validity and touch)):
     st.session_state.pop("signal_preview", None)
     try:
@@ -251,7 +252,7 @@ if st.button("Vérifier sur Binance Demo et simuler", disabled=not (budget > 0 a
             available_quote=float(balances.get(rules.quote_asset, {}).get("free", 0)),
             reserve_percent=service.risk_limits().min_reserve_percent,
             current_price=current_price or 0, signal_id=selected, source=row["source"],
-            touch_stop=touch, validity_confirmed=validity)
+            touch_stop=touch, validity_confirmed=validity, trail_stop=trail_stop)
         st.session_state["signal_preview"] = (signature, plan, payload)
     except Exception as exc:
         st.error(f"Simulation refusée : {exc}")
@@ -260,8 +261,11 @@ if preview and preview[0] == signature:
     _, plan, payload = preview
     st.dataframe([{"Entrée": entry.sequence, "Prix limite": entry.price, "Quantité": entry.qty,
                    "Montant": entry.notional} for entry in plan.entries], hide_index=True)
-    st.dataframe([{"TP": tp.sequence, "Prix": tp.target_price, "Part initiale (%)": tp.sell_percent}
+    st.dataframe([{"TP": tp.sequence, "Prix": tp.target_price, "Part initiale (%)": tp.sell_percent,
+                   "SL après ce TP": tp.sl_rule_value if tp.sl_rule_value else "inchangé"}
                   for tp in plan.take_profits], hide_index=True)
+    st.caption("Suivi du SL activé (Settings → Signaux) : SL à l'Entry 1 après TP1, puis deux TP en arrière à partir de TP3."
+               if trail_stop else "Suivi du SL désactivé : le SL du signal reste à son prix pendant tout le trade.")
     st.markdown(f"SL : {plan.stop_loss.price} · Perte théorique au SL hors frais/glissement : "
                 + colored_pnl(-abs(plan.loss_max_estimated), f"{-abs(plan.loss_max_estimated):.4f} {plan.quote_asset}"))
     st.caption("Simulation valable 120 secondes. Le worker recontrôle prix, solde, risque et frais avant tout achat. Une simulation valide peut encore être refusée.")

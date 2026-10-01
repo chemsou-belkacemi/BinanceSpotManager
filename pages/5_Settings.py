@@ -46,6 +46,7 @@ tabs = st.tabs(["Sécurité", "Worker & risque", "Presets", "Notifications", "Di
 with tabs[5]:
     from binance_spot_manager.position_store import get_settings_store
     from binance_spot_manager.signal_plan import (
+        TRAIL_STOP_KEY,
         automatic_entry_allocations,
         automatic_tp_allocations,
     )
@@ -178,6 +179,28 @@ with tabs[5]:
                     "signal_low_balance_budget_percent": float(low_percent),
                 })
                 st.success("Stratégie de budget enregistrée pour les prochains signaux.")
+
+    st.divider()
+    st.subheader("Suivi du stop loss")
+    with st.form("signal_trail_stop_preferences"):
+        trail_stop = st.toggle(
+            "Remonter le SL au fil des TP",
+            value=bool(signal_preferences.get(TRAIL_STOP_KEY, True)),
+            key="signal_trail_stop_toggle",
+            help=(
+                "Activé (par défaut) : après TP1, le SL passe à l'Entry 1 ; à partir de TP3, il suit "
+                "deux objectifs en arrière (TP3 → TP1, TP4 → TP2…). Désactivé : le SL reste exactement "
+                "là où le signal l'a placé pendant tout le trade, au même prix, et un SL de clôture de "
+                "bougie n'est jamais converti en stop instantané."
+            ),
+        )
+        st.caption(
+            "S'applique aux nouveaux trades issus de signaux, manuels ou automatiques. "
+            "Les trades ouverts gardent le comportement avec lequel ils ont démarré."
+        )
+        if st.form_submit_button("Enregistrer le suivi du SL"):
+            get_settings_store().update({TRAIL_STOP_KEY: bool(trail_stop)})
+            st.success("Suivi du SL enregistré pour les prochains signaux.")
 
     st.divider()
     st.subheader("Exécution automatique")
