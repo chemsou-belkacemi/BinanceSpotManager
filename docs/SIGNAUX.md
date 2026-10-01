@@ -44,9 +44,9 @@ les messages édités et les signaux déjà confirmés ne peuvent pas être réa
    ou mode adaptatif. Par défaut, le mode adaptatif propose 5 % du portefeuille et
    descend à 2 % lorsque le libre de la devise de la paire passe sous 30 % du total.
    La réserve de capital reste prioritaire et le montant demeure modifiable.
-3. Pour `SL (1h)` ou `(15min)`, ne rien exécuter si la règle est une clôture
-   de bougie. Cette version permet seulement un choix explicite de stop au prix,
-   ce qui **change la stratégie source**. Les clôtures de bougie ne sont pas gérées.
+3. Pour `SL (1h)` ou `(15min)`, choisir le déclenchement : **à la clôture de la bougie**
+   (par défaut, comme le signal) ou stop au prix, ce qui **change la stratégie source**.
+   Une clôture sans durée reconnue (« candle close ») n'autorise que le stop au prix.
 4. Simuler avec les règles et soldes Binance Demo ; confirmer dans les 120 secondes.
 5. Le worker revalide solde, risque, prix, frais et expiration avant les achats.
    Redémarrer un ancien worker : une capacité `signal_v1` est exigée.
@@ -60,10 +60,21 @@ Le premier TP confirmé demande l'annulation des entrées encore ouvertes.
 **Suivi du stop loss** (Settings → Signaux, activé par défaut, signaux manuels et automatiques) :
 après TP1 le SL passe à l'Entry 1, il reste à l'Entry 1 après TP2, puis à partir de TP3 il suit
 deux objectifs en arrière (TP3 → TP1, TP4 → TP2…). Désactivé : le SL reste au prix du signal
-pendant tout le trade. Un SL de clôture de bougie (`15m`, `4h`…) n'est jamais converti en silence :
-la conversion en stop au prix exige toujours une autorisation explicite, car la surveillance des
-clôtures n'est pas implémentée. La règle est enregistrée dans chaque TP à la création du trade :
+pendant tout le trade, et un SL de clôture de bougie le reste. Activé, un SL de clôture déplacé
+devient un stop au prix sur Binance. La règle est enregistrée dans chaque TP à la création du trade :
 changer le réglage ne modifie que les nouveaux trades, les trades ouverts gardent leur comportement.
+
+**SL à la clôture de bougie** (`SL: 0.02446 (15m)`, `(1h)`, `(4H close)`, `daily close`…) :
+aucun ordre stop n'est placé sur Binance, car il se déclencherait au toucher. Le worker lit chaque
+bougie clôturée de l'intervalle (15m, 30m, 1h, 4h, 1d, 1w…). Si une bougie clôturée **après l'achat**
+termine au niveau du SL ou dessous, il vend au marché la quantité nette de cette position (clôture
+au marché : intention enregistrée, aucun renvoi d'une vente incertaine). La clôture fait foi : un
+rebond ensuite ne l'annule pas, et la vente peut se faire sous le SL. La bougie en cours n'est jamais
+jugée. Les bougies clôturées pendant un arrêt du worker sont rattrapées au redémarrage, mais **la
+position n'est pas protégée tant que le worker est arrêté**. Si Settings → *Vendre au marché si le
+stop est déjà franchi* est désactivé, la position est mise en pause avec une alerte critique au
+lieu d'être vendue. Un déplacement manuel du SL le transforme en stop au prix. Le worker doit
+annoncer la capacité `candle_stop_v1` (le redémarrer après mise à jour).
 Cette version utilise les TP du worker et sa gestion SL existante, **pas un OCO
 par tranche**. Frais, arrondis et exécutions partielles peuvent changer les
 quantités réellement vendables. Les contrôles de minimum ne garantissent pas
@@ -107,8 +118,9 @@ Les messages reçus avant l'activation, édités, anciens,
 ambigus, hors Binance Spot ou incompatibles avec les règles sont conservés avec un
 motif de refus et ne créent aucune commande.
 
-Un SL portant une mention `1h` ou `15min` reste refusé sauf si l'autorisation
-séparée **Interpréter les SL comme des stops au toucher** est activée. Le worker
+Un SL portant une mention `1h` ou `15min` attend la clôture de sa bougie (voir plus haut), sauf
+si l'option **Interpréter les SL temporisés comme des stops au toucher** est activée. Une
+clôture sans durée reconnue reste refusée en automatique. Le worker
 recontrôle ensuite le prix, les soldes, la réserve, les frais BNB et les limites de
 risque avant toute écriture Binance. La déduplication du signal et de la commande
 empêche un second envoi après redémarrage.
@@ -163,8 +175,8 @@ pas besoin de CSI : une panne est simulée, jamais un appel réseau.
 
 ## Non activé dans cette version
 
-Suivi des clôtures de bougie, remappage Bitget/forex et apprentissage libre de
-formats. Le mode automatique actuel reste limité aux conversations Telegram
+Stop de secours sur Binance pendant un SL à la clôture, remappage Bitget/forex et apprentissage
+libre de formats. Le mode automatique actuel reste limité aux conversations Telegram
 autorisées et à Binance Demo Spot.
 
-Tests hors réseau : `make test TESTS="tests/test_signal_sizing.py tests/test_signals.py tests/test_signals_ui.py tests/test_commands.py tests/test_automation.py"`.
+Tests hors réseau : `make test TESTS="tests/test_signal_sizing.py tests/test_signals.py tests/test_signals_ui.py tests/test_commands.py tests/test_automation.py tests/test_candle_stop.py"`.

@@ -123,18 +123,31 @@ def test_resending_old_unconfirmed_text_refreshes_telegram_age_and_queues_once(t
     assert len(commands.list_recent("demo")) == 1
 
 
-def test_conditional_stop_requires_saved_touch_authorization(tmp_path):
+@pytest.mark.parametrize("touch,trigger,interval", [(False, "CANDLE_CLOSE", "1h"), (True, "TOUCH", "")])
+def test_timed_stop_waits_for_its_candle_close_unless_touch_is_saved(tmp_path, touch, trigger, interval):
     inbox = SignalInbox(tmp_path / "signals.db")
     row = inbox.receive(
         "demo", SIMPLE.replace("SL: 80000", "SL: 80000 (1h)"),
         source="telegram", external_id="conditional", source_timestamp=995,
+    )
+    worker, commands = executor(tmp_path, inbox, enabled_preferences(signal_auto_touch_stop=touch))
+
+    assert worker.process_pending() == ["QUEUED"]
+    stop = commands.get_by_request_key("demo", f"signal:{row['id']}")["payload"]["position"]["stop_loss"]
+    assert (stop["trigger"], stop["candle_interval"], stop["resolved_price"]) == (trigger, interval, 80000)
+
+
+def test_stop_with_an_unknown_candle_is_never_executed_automatically(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    row = inbox.receive(
+        "demo", SIMPLE.replace("SL: 80000", "SL: 80000 on candle close"),
+        source="telegram", external_id="unknown-candle", source_timestamp=995,
     )
     worker, commands = executor(tmp_path, inbox, enabled_preferences())
 
     assert worker.process_pending() == ["REJECTED"]
     saved = inbox.recent("demo")[0]
     assert saved["id"] == row["id"]
-    assert saved["auto_state"] == "REJECTED"
     assert "SL conditionnel" in saved["auto_detail"]
     assert commands.list_recent("demo") == []
 

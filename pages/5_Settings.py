@@ -189,7 +189,8 @@ with tabs[5]:
             key="signal_trail_stop_toggle",
             help=(
                 "Activé (par défaut) : après TP1, le SL passe à l'Entry 1 ; à partir de TP3, il suit "
-                "deux objectifs en arrière (TP3 → TP1, TP4 → TP2…). Désactivé : le SL reste exactement "
+                "deux objectifs en arrière (TP3 → TP1, TP4 → TP2…) ; un SL de clôture de bougie déplacé "
+                "devient un stop au prix sur Binance. Désactivé : le SL reste exactement "
                 "là où le signal l'a placé pendant tout le trade, au même prix, et un SL de clôture de "
                 "bougie n'est jamais converti en stop instantané."
             ),
@@ -219,7 +220,11 @@ with tabs[5]:
         value=bool(signal_preferences.get("signal_auto_touch_stop", False)),
         disabled=not auto_execute,
         key="signal_auto_touch_stop_toggle",
-        help="Exemple : « Stop: 0.93 (4h) » déclenchera la protection dès que le prix touche 0.93, sans attendre la clôture 4h.",
+        help=(
+            "Désactivé (par défaut) : « Stop: 0.93 (4h) » attend qu'une bougie 4h clôture à 0.93 ou dessous, "
+            "surveillée par le worker, puis vend au marché. Activé : la protection part dès que le prix "
+            "touche 0.93 (ordre stop sur Binance), sans attendre la clôture."
+        ),
     )
     auto_entry_count = st.number_input(
         "Nombre maximal d'entrées repris du signal",

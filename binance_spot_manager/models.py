@@ -71,6 +71,15 @@ class SLMode(str, Enum):
     LAST_ENTRY_PERCENT = "LAST_ENTRY_PERCENT"
 
 
+class SLTrigger(str, Enum):
+    """Ce qui declenche le SL."""
+
+    #: ordre STOP_LOSS_LIMIT sur Binance, declenche des que le prix touche le stop
+    TOUCH = "TOUCH"
+    #: aucun ordre stop sur Binance : le worker vend si une bougie cloture au stop ou dessous
+    CANDLE_CLOSE = "CANDLE_CLOSE"
+
+
 class SLRuleAfterTP(str, Enum):
     """Regle d'evolution du SL apres un TP (section 17)."""
 
@@ -160,6 +169,7 @@ class CloseReason(str, Enum):
     SL_EXECUTED = "SL_EXECUTED"
     MANUAL_CLOSE = "MANUAL_CLOSE"
     STOP_CROSSED = "STOP_CROSSED"
+    SL_CANDLE_CLOSE = "SL_CANDLE_CLOSE"
     CANCELED_BEFORE_FILL = "CANCELED_BEFORE_FILL"
     ERROR = "ERROR"
 
@@ -378,6 +388,13 @@ class StopLoss(BSMModel):
 
     #: decalage du prix limite sous le stopPrice, en % (STOP_LOSS_LIMIT)
     limit_offset_percent: float = 0.3
+
+    #: TOUCH : ordre stop Binance. CANDLE_CLOSE : cloture de bougie surveillee par le worker.
+    trigger: SLTrigger = SLTrigger.TOUCH
+    #: intervalle Binance de la bougie surveillee (15m, 1h, 4h...) en mode CANDLE_CLOSE
+    candle_interval: str = ""
+    #: closeTime (ms) de la derniere bougie cloturee deja evaluee
+    candle_checked_until: Optional[int] = None
 
     executed_qty: float = 0.0
     average_fill_price: float = 0.0

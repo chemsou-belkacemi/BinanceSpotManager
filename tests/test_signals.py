@@ -414,13 +414,28 @@ def test_signal_stop_stays_where_the_signal_put_it_when_trailing_is_off(rules):
     _, payload = prepare(FIVE_TP, rules, trail_stop=False)
     assert all(tp["sl_rule_after_hit"] == "NO_CHANGE" for tp in payload["position"]["take_profits"])
     assert stops_after_each_tp(payload) == [80000] * 5
-    with pytest.raises(ValueError, match="SL conditionnel"):
-        prepare(FIVE_TP.replace("SL: 80000", "SL: 80000 (1h)"), rules, touch_stop=False, trail_stop=False)
+    # Off : un SL de clôture reste un SL de clôture, au même prix, pendant tout le trade.
+    _, payload = prepare(FIVE_TP.replace("SL: 80000", "SL: 80000 (15min)"), rules, touch_stop=False, trail_stop=False)
+    stop = payload["position"]["stop_loss"]
+    assert (stop["trigger"], stop["candle_interval"], stop["resolved_price"]) == ("CANDLE_CLOSE", "15m", 80000)
+    assert all(tp["sl_rule_after_hit"] == "NO_CHANGE" for tp in payload["position"]["take_profits"])
 
 
-def test_conditional_stop_requires_explicit_interpretation(rules):
+@pytest.mark.parametrize("stop_text,trigger,interval", [
+    ("SL: 80000 (1h)", "CANDLE_CLOSE", "1h"), ("SL: 80000 (4H close)", "CANDLE_CLOSE", "4h"),
+    ("SL: 80000 daily close", "CANDLE_CLOSE", "1d"), ("SL: 80000", "TOUCH", ""),
+])
+def test_timed_stop_waits_for_its_candle_close_by_default(rules, stop_text, trigger, interval):
+    _, payload = prepare(SIMPLE.replace("SL: 80000", stop_text), rules, touch_stop=False)
+    stop = payload["position"]["stop_loss"]
+    assert (stop["trigger"], stop["candle_interval"]) == (trigger, interval)
+
+
+def test_conditional_stop_requires_explicit_interpretation_only_for_an_unknown_candle(rules):
     with pytest.raises(ValueError, match="SL conditionnel"):
-        prepare(SIMPLE.replace("SL: 80000", "SL: 80000 (1h)"), rules, touch_stop=False)
+        prepare(SIMPLE.replace("SL: 80000", "SL: 80000 on candle close"), rules, touch_stop=False)
+    _, payload = prepare(SIMPLE.replace("SL: 80000", "SL: 80000 (1h)"), rules, touch_stop=True)
+    assert payload["position"]["stop_loss"]["trigger"] == "TOUCH"
 
 
 def test_telegram_allowlist_offset_and_edits(tmp_path):

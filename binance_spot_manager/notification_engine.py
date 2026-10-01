@@ -399,6 +399,23 @@ class NotificationEngine:
             symbol=position.symbol,
         )
 
+    def candle_stop_exit(
+        self, position: Position, stop_price: float, interval: str, close_price: float, outcome: str
+    ) -> Notification:
+        return Notification(
+            event="SL_EXECUTED",
+            title=f"SL à la clôture {interval} — sortie au marché — {position.symbol}",
+            body=(
+                f"Bougie {interval} clôturée au SL ou dessous\n"
+                f"Stop : {stop_price}\n"
+                f"Clôture : {close_price}\n"
+                f"Résultat : {outcome}"
+            ),
+            level="WARNING",
+            position_id=position.position_id,
+            symbol=position.symbol,
+        )
+
     def stop_crossed_exit(
         self, position: Position, stop_price: float, market_price: float, outcome: str
     ) -> Notification:

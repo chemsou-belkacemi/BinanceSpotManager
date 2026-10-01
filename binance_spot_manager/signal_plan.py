@@ -4,7 +4,8 @@ import math
 import re
 import time
 
-from .models import OrderType, PriceMode, SLMode, SLRuleAfterTP, SignalSource
+from .candle_stop import kline_interval
+from .models import OrderType, PriceMode, SLMode, SLRuleAfterTP, SLTrigger, SignalSource
 from .position_engine import PositionEngine
 from .signal_parser import ParsedSignal
 from .strategy_engine import EntrySpec, SLSpec, StrategyEngine, StrategySpec, TPSpec
@@ -85,7 +86,8 @@ TRAIL_STOP_KEY = "signal_trail_stop"
 
 def trailing_stop_rules(entries, targets, enabled=True):
     """SL rule attached to each TP: after TP1 the SL moves to Entry 1, from TP3 it trails two
-    targets behind (TP3 → TP1, TP4 → TP2…). Disabled: the signal's stop never moves.
+    targets behind (TP3 → TP1, TP4 → TP2…); a moved candle-close SL becomes a price stop.
+    Disabled: the signal's stop never moves and keeps its mode (candle close stays candle close).
 
     The rules are stored in the position when it is created, so a change of the setting only
     affects new trades; open trades keep the behaviour they started with.
@@ -109,8 +111,15 @@ def prepare_signal(parsed: ParsedSignal, rules, *, budget, available_quote, rese
         raise ValueError(" ; ".join(parsed.errors))
     if not validity_confirmed:
         raise ValueError("La validité et l'âge du signal doivent être vérifiés manuellement.")
+    # A timed SL waits for its candle close (no Binance stop order) unless a price stop is chosen.
+    candle_interval = ""
     if parsed.stop_timeframe and not touch_stop:
-        raise ValueError("SL conditionnel : confirmer explicitement un stop au prix, ou ne pas exécuter.")
+        candle_interval = kline_interval(parsed.stop_timeframe) or ""
+        if not candle_interval:
+            raise ValueError(
+                f"SL conditionnel « {parsed.stop_timeframe} » : bougie inconnue, choisir explicitement "
+                "un stop au prix, ou ne pas exécuter."
+            )
     if rules.symbol != parsed.symbol or not rules.is_trading or rules.quote_asset not in {"USDT", "USDC"}:
         raise ValueError("Paire Binance Demo incompatible")
     if not math.isfinite(budget) or budget <= 0 or not math.isfinite(current_price) or current_price <= 0:
@@ -163,6 +172,9 @@ def prepare_signal(parsed: ParsedSignal, rules, *, budget, available_quote, rese
         if errors:
             raise ValueError("Budget insuffisant pour les tranches TP (marge de quantité 1 %) : " + " ; ".join(errors))
     position = PositionEngine(rules).from_plan(plan, spec)
+    if candle_interval:
+        position.stop_loss.trigger = SLTrigger.CANDLE_CLOSE
+        position.stop_loss.candle_interval = candle_interval
     for group in position.source_groups:
         group.signal_id = signal_id
     for entry in position.entries:

@@ -83,7 +83,9 @@ def test_signal_refused_by_an_older_parser_is_re_read_when_the_page_opens(monkey
     app = AppTest.from_file(str(PAGE)).run()
     assert not app.exception
     assert not app.error
-    assert any("clôture 1h" in c.label for c in app.checkbox)
+    stop_mode = app.radio[0]
+    assert stop_mode.label == "Déclenchement du SL"
+    assert "clôture d'une bougie 1h" in stop_mode.value  # par défaut : comme le signal
     next(b for b in app.button if b.label == "Réanalyser ce signal").click().run()
     assert not app.exception
     assert not app.error

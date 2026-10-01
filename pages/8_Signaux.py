@@ -11,6 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from binance_spot_manager import csi_client
+from binance_spot_manager.candle_stop import kline_interval
 from binance_spot_manager.command_store import account_scope
 from binance_spot_manager.config import get_settings
 from binance_spot_manager.signal_inbox import SignalInbox
@@ -236,11 +237,24 @@ if sizing_suggestion:
 if sizing_warning:
     st.warning(sizing_warning)
 validity = st.checkbox("J'ai vérifié la date source et ce signal est encore valable maintenant", key=f"valid_{selected}")
-touch = st.checkbox(f"Je choisis un stop au prix {parsed.stop}, sans attendre une clôture {parsed.stop_timeframe}",
-                    key=f"touch_{selected}") if parsed.stop_timeframe else True
+candle = kline_interval(parsed.stop_timeframe) if parsed.stop_timeframe else None
+if not parsed.stop_timeframe:
+    touch, stop_ready = True, True
+elif candle:
+    stop_choice = st.radio(
+        "Déclenchement du SL",
+        [f"À la clôture d'une bougie {candle}, comme le signal (surveillée par le worker)",
+         f"Stop au prix : dès que le prix touche {parsed.stop}"],
+        key=f"stop_mode_{selected}",
+    )
+    touch, stop_ready = stop_choice.startswith("Stop au prix"), True
+else:
+    touch = st.checkbox(f"Je choisis un stop au prix {parsed.stop} (clôture « {parsed.stop_timeframe} » non reconnue)",
+                        key=f"touch_{selected}")
+    stop_ready = touch
 trail_stop = bool(preferences.get(TRAIL_STOP_KEY, True))
 signature = (scope, selected, budget, validity, touch, trail_stop)
-if st.button("Vérifier sur Binance Demo et simuler", disabled=not (budget > 0 and validity and touch)):
+if st.button("Vérifier sur Binance Demo et simuler", disabled=not (budget > 0 and validity and stop_ready)):
     st.session_state.pop("signal_preview", None)
     try:
         rules, error = load_rules(parsed.symbol)
@@ -264,8 +278,14 @@ if preview and preview[0] == signature:
     st.dataframe([{"TP": tp.sequence, "Prix": tp.target_price, "Part initiale (%)": tp.sell_percent,
                    "SL après ce TP": tp.sl_rule_value if tp.sl_rule_value else "inchangé"}
                   for tp in plan.take_profits], hide_index=True)
-    st.caption("Suivi du SL activé (Settings → Signaux) : SL à l'Entry 1 après TP1, puis deux TP en arrière à partir de TP3."
-               if trail_stop else "Suivi du SL désactivé : le SL du signal reste à son prix pendant tout le trade.")
+    candle_interval = payload["position"]["stop_loss"].get("candle_interval")
+    st.caption("Suivi du SL activé (Settings → Signaux) : SL à l'Entry 1 après TP1, puis deux TP en arrière à partir de TP3"
+               + (" ; le SL déplacé devient un stop au prix." if candle_interval else ".")
+               if trail_stop else "Suivi du SL désactivé : le SL du signal reste à son prix et dans son mode pendant tout le trade.")
+    if candle_interval:
+        st.info(f"SL à la clôture {candle_interval} : aucun ordre stop sur Binance. Le worker vend au marché si une "
+                f"bougie {candle_interval} clôture à {plan.stop_loss.price} ou dessous ; la vente peut se faire sous le "
+                "SL, et la position n'est pas protégée si le worker est arrêté.")
     st.markdown(f"SL : {plan.stop_loss.price} · Perte théorique au SL hors frais/glissement : "
                 + colored_pnl(-abs(plan.loss_max_estimated), f"{-abs(plan.loss_max_estimated):.4f} {plan.quote_asset}"))
     st.caption("Simulation valable 120 secondes. Le worker recontrôle prix, solde, risque et frais avant tout achat. Une simulation valide peut encore être refusée.")
@@ -278,6 +298,9 @@ if preview and preview[0] == signature:
                 raise ValueError("Redémarrer le worker avant de confirmer un signal (nouveaux garde-fous).")
             if "independent_positions_v1" not in service.runtime().command_capabilities:
                 raise ValueError("Redémarrer le worker pour activer les positions indépendantes.")
+            if (payload["position"]["stop_loss"].get("trigger") == "CANDLE_CLOSE"
+                    and "candle_stop_v1" not in service.runtime().command_capabilities):
+                raise ValueError("Redémarrer le worker pour activer le SL à la clôture de bougie.")
             status = service.worker_status()
             if not status.running or status.heartbeat_age is None or status.heartbeat_age >= 20:
                 raise ValueError("Démarrer le worker avant de confirmer un signal.")

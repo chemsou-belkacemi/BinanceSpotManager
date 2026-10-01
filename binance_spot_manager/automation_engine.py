@@ -15,9 +15,11 @@ sequentiel — un TP ne se declenche qu'un par cycle pour garder un etat coheren
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+from .candle_stop import CandleBreach, INTERVAL_MS, evaluate_closed_candles, next_check_due
 from .event_store import EventStore
 from .execution_engine import ExecutionEngine, normalize_order_response
 from .models import (
@@ -28,6 +30,7 @@ from .models import (
     Position,
     PositionStatus,
     SLStatus,
+    SLTrigger,
     SyncStatus,
     TPExecutionPolicy,
     TPStatus,
@@ -60,6 +63,8 @@ class CycleResult:
     exits_blocked: bool = False
     #: Stop refuse par Binance car deja franchi : le worker decide de la sortie.
     stop_crossed_at: Optional[float] = None
+    #: Bougie cloturee au SL ou dessous (mode CANDLE_CLOSE) : le worker vend au marche.
+    candle_stop_hit: Optional[CandleBreach] = None
 
     @property
     def changed(self) -> bool:
@@ -113,6 +118,8 @@ class AutomationEngine:
         self.rules_cache = rules_cache or self.execution.rules_cache
         self.events = events or EventStore()
         self.config = config or AutomationConfig()
+        #: horloge des bougies (remplacable dans les tests)
+        self.clock = time.time
 
     # ------------------------------------------------------------------
     # Point d'entree
@@ -193,6 +200,11 @@ class AutomationEngine:
 
         # Mode investissement TP seul : l'absence de SL est intentionnelle.
         if sl.status is SLStatus.NONE:
+            return
+
+        # SL a la cloture de bougie : aucun ordre stop Binance (il partirait au toucher).
+        if sl.trigger is SLTrigger.CANDLE_CLOSE and not sl.order_id and not sl.client_order_id:
+            self._check_candle_close(position, result)
             return
 
         if sl.status is SLStatus.CANCELED and any(
@@ -323,6 +335,45 @@ class AutomationEngine:
             else:
                 result.errors.append(f"SL non recree : {created.error}")
                 self._note_crossed_stop(result, created, sl.resolved_price)
+
+    def _check_candle_close(self, position: Position, result: CycleResult) -> None:
+        """Lit les bougies cloturees depuis la derniere lecture ; une cloture au SL ou dessous
+        demande au worker une vente au marche. Les bougies manquees (worker arrete) sont rattrapees.
+        """
+        sl = position.stop_loss
+        if position.metrics.net_qty <= QTY_EPSILON or not sl.resolved_price:
+            return
+        interval = sl.candle_interval
+        if interval not in INTERVAL_MS:
+            result.errors.append(f"SL à la clôture : intervalle « {interval} » inconnu, position non protégée")
+            return
+        now_ms = int(self.clock() * 1000)
+        if not next_check_due(sl.candle_checked_until, interval, now_ms):
+            return
+        filled = [entry.filled_at for entry in position.entries if entry.filled_at]
+        armed_at = int((min(filled) if filled else position.created_at).timestamp() * 1000)
+        start = sl.candle_checked_until + 1 if sl.candle_checked_until else armed_at - INTERVAL_MS[interval]
+        try:
+            klines = self.execution.client.get_klines(
+                position.symbol, interval, start_time=start, limit=1000
+            )
+            breach, checked = evaluate_closed_candles(
+                klines, stop_price=sl.resolved_price, armed_at_ms=armed_at, now_ms=now_ms
+            )
+        except Exception as exc:  # noqa: BLE001 - visible, jamais silencieux
+            result.errors.append(
+                f"SL à la clôture {interval} : bougies illisibles ({exc}), protection non vérifiée"
+            )
+            return
+        if checked is not None:
+            sl.candle_checked_until = checked
+        if breach is None:
+            return
+        result.candle_stop_hit = breach
+        result.exits_blocked = True
+        result.actions.append(
+            f"Bougie {interval} clôturée à {breach.close_price} <= SL {sl.resolved_price} : sortie au marché"
+        )
 
     def _record_sl_execution(self, position, status, result):
         """Enregistre les cumuls ; un SL partiel ne ferme pas toute la position."""
@@ -718,6 +769,10 @@ class AutomationEngine:
             return
 
         previous = position.stop_loss.resolved_price or 0.0
+        if (position.stop_loss.trigger is SLTrigger.CANDLE_CLOSE
+                and new_price == float(rules.round_price(previous, mode="down"))):
+            # Regle sans deplacement (NO_CHANGE) : le SL garde son prix ET sa cloture de bougie.
+            return
         if previous > 0:
             delta_percent = abs(new_price - previous) / previous * 100.0
             if delta_percent < self.config.sl_replace_threshold_percent:
@@ -753,6 +808,19 @@ class AutomationEngine:
                 level="CRITICAL",
             )
             return
+
+        if position.stop_loss.trigger is SLTrigger.CANDLE_CLOSE:
+            # Le SL deplace par la regle devient un stop au prix sur Binance ; sans regle
+            # (NO_CHANGE), il reste a la cloture de bougie et n'arrive jamais ici.
+            sl = position.stop_loss
+            sl.trigger, sl.candle_interval, sl.candle_checked_until = SLTrigger.TOUCH, "", None
+            sl.status = SLStatus.CANCELED  # _restore_stop_loss le pose aussitot
+            result.actions.append(f"SL clôture de bougie remplacé par un stop au prix {new_price}")
+            position.log(
+                EventType.SL_MOVED,
+                f"SL deplace vers {new_price} apres TP {tp.sequence_number} : stop au prix sur Binance",
+                tp_id=tp.tp_id,
+            )
 
         if position.stop_loss.status is not SLStatus.ACTIVE:
             position.stop_loss.resolved_price = new_price
