@@ -7,17 +7,21 @@ fill, deplacement du SL, fin de position) de facon deterministe.
 
 from __future__ import annotations
 
+import json
+import time
 from typing import Any, Optional
 
 import pytest
+import requests
 
 from binance_spot_manager.automation_engine import (
+    INTENT_SETTLE_MARGIN_SECONDS,
     AutomationConfig,
     AutomationEngine,
     CycleResult,
     planned_tp_quantity,
 )
-from binance_spot_manager.binance_client import BinanceError
+from binance_spot_manager.binance_client import BinanceError, BinanceSpotClient
 from binance_spot_manager.config import RunMode, Settings
 from binance_spot_manager.event_store import EventStore
 from binance_spot_manager.execution_engine import ExecutionEngine
@@ -1119,6 +1123,97 @@ def test_reused_client_id_still_blocks_as_uncertain(journaled, rules):
 
     assert result.status == "UNKNOWN"
     assert fake.posted == []
+
+
+def _http(payload, status=200):
+    response = requests.Response()
+    response.status_code = status
+    response._content = json.dumps(payload).encode()
+    return response
+
+
+def test_sl_intent_that_never_reached_binance_is_replaced_once_recv_window_has_passed(
+    settings, rules, events, tmp_path, monkeypatch
+):
+    """Lacune L4 (audit du 2026-10-01) : intention de SL inscrite au journal, POST coupe avant
+    Binance. Le SL restait REPLACING pour toujours : sorties bloquees, position sans protection."""
+    from binance_spot_manager.order_journal import OrderJournal
+
+    client = BinanceSpotClient(settings)
+    client._time_synced_at = time.time()
+    client._order_journal = OrderJournal(tmp_path / "order_intents.sqlite3")
+    accepted: dict[str, dict[str, Any]] = {}
+    posts: list[str] = []
+
+    def binance(method, url, params=None, **kwargs):
+        endpoint = url[len(settings.base_url):]
+        if method == "POST" and endpoint == "/api/v3/order":
+            posts.append(params["newClientOrderId"])
+            if len(posts) == 1:
+                raise requests.ConnectionError("coupure avant Binance")
+            order = {
+                "symbol": params["symbol"], "orderId": 500 + len(posts),
+                "clientOrderId": params["newClientOrderId"], "side": params["side"],
+                "type": params["type"], "status": "NEW", "origQty": params["quantity"],
+                "executedQty": "0", "cummulativeQuoteQty": "0", "fills": [],
+            }
+            accepted[order["clientOrderId"]] = order
+            return _http(order)
+        if method == "GET" and endpoint == "/api/v3/openOrders":
+            return _http([o for o in accepted.values() if o["status"] == "NEW"])
+        if method == "GET" and endpoint == "/api/v3/order":
+            found = accepted.get(params.get("origClientOrderId")) or next(
+                (o for o in accepted.values() if o["orderId"] == params.get("orderId")), None)
+            return _http(found) if found else _http({"code": -2013, "msg": "Order does not exist."}, 400)
+        pytest.fail(f"Appel Binance inattendu : {method} {endpoint}")
+
+    monkeypatch.setattr(client._session, "request", binance)
+    execution = build_execution(settings, rules, events, client)
+    automation = build_automation(execution, rules, events)
+    position = make_position(rules)
+    position.stop_loss.status = SLStatus.PLANNED
+    position.stop_loss.order_id = None
+    position.stop_loss.client_order_id = None
+
+    automation.run_cycle(position, 84000)  # intention inscrite, POST jamais arrive
+    lost = position.stop_loss.client_order_id
+    assert position.stop_loss.status is SLStatus.REPLACING and lost.endswith("-SL")
+    claimed = client.intent_created_at("BTCUSDT", lost)
+    deadline = claimed.timestamp() + settings.recv_window / 1000 + INTENT_SETTLE_MARGIN_SECONDS
+
+    automation.clock = lambda: deadline - 1  # Binance pourrait encore accepter la requete
+    for _ in range(3):
+        assert automation.run_cycle(position, 84000).exits_blocked
+    assert position.stop_loss.status is SLStatus.REPLACING
+    assert posts == [lost]  # rien n'est renvoye avant le delai
+
+    automation.clock = lambda: deadline + 1
+    for _ in range(3):
+        automation.run_cycle(position, 84000)
+    replacement = execution._sl_client_order_id(position, 1)
+    assert replacement.endswith("-SL1")
+    assert posts == [lost, replacement]
+    assert list(accepted) == [replacement]  # exactement un nouveau SL
+    assert position.stop_loss.client_order_id == replacement
+    assert position.stop_loss.status is SLStatus.ACTIVE
+    assert position.stop_loss.replace_count == 1
+
+
+def test_uncertain_sl_without_journal_trace_stays_blocked(engine, events, monkeypatch):
+    """Sans date d'intention, un « ordre inconnu » ne prouve rien : aucun renvoi."""
+    execution, fake, rules = engine
+    position = make_position(rules)
+    position.stop_loss.status = SLStatus.REPLACING
+    position.stop_loss.order_id = None
+    position.stop_loss.client_order_id = "BSM-D-BTC-NOTRACE-SL"
+    fake.orders.clear()
+    automation = build_automation(execution, rules, events)
+    automation.clock = lambda: time.time() + 10 * 24 * 3600
+
+    for _ in range(3):
+        assert automation.run_cycle(position, 84000).exits_blocked
+    assert position.stop_loss.status is SLStatus.REPLACING
+    assert fake.created == []
 
 
 def test_transport_failure_checks_before_retry(engine):
