@@ -46,6 +46,7 @@ from binance_spot_manager.models import (  # noqa: E402
     BotRuntime,
     CloseReason,
     Commission,
+    EntryStatus,
     EventType,
     SLStatus,
     SyncStatus,
@@ -70,12 +71,25 @@ from binance_spot_manager.dashboard_service import DashboardService
 #: Un cycle de reconciliation tous les N passages de boucle.
 RECONCILE_EVERY = 12
 
+#: Achats envoyes dont le remplissage n'est connu que par la reconciliation.
+AWAITING_FILL = frozenset({EntryStatus.SUBMITTED, EntryStatus.PARTIALLY_FILLED})
+
+
+def awaiting_fill(position) -> bool:
+    """Vrai si un achat est chez Binance sans remplissage complet constate : tant que la quantite
+    achetee n'est pas connue, aucun stop ne peut la proteger."""
+    return position.oco_exit is None and any(entry.status in AWAITING_FILL for entry in position.entries)
+
 
 class Worker:
     """Boucle principale, minimale et resiliente."""
 
     #: Vrai pendant la veille Docker (arret demande, process maintenu).
     _in_standby = False
+    #: Reconciliation complete due a la reprise : au demarrage du process et en sortie de veille
+    #: Docker (le process ne redemarre pas, _loop ne repasse jamais a 1). Remis a False une fois
+    #: la reconciliation faite : un tour en erreur avant elle la reporte au tour suivant.
+    _resume_reconcile = False
 
     def __init__(self) -> None:
         self.settings = get_settings()
@@ -126,6 +140,7 @@ class Worker:
 
         self._running = True
         self._loop = 0
+        self._resume_reconcile = True
         self._price_cache: dict[str, float] = {}
         self._price_fetched_at = 0.0
 
@@ -239,8 +254,7 @@ class Worker:
                     time.sleep(1)
                     continue
                 if self._in_standby:
-                    self._in_standby = False
-                    self.events.append(EventType.WORKER_STARTED, "Worker relance depuis le Dashboard")
+                    self._leave_standby()
                 positions_monitored = self._tick()
                 self._set_state(
                     WorkerState.MONITORING if self._has_open_positions() else WorkerState.IDLE,
@@ -275,6 +289,13 @@ class Worker:
             self._in_standby = True
             self.events.append(EventType.WORKER_STOPPED, "Worker en veille (arret demande)")
         self._set_state(WorkerState.PAUSED, "En veille : arret demande depuis le Dashboard")
+
+    def _leave_standby(self) -> None:
+        """Relance apres une veille : rien n'a ete suivi pendant l'arret (achats remplis, stops
+        executes), le premier tour reconcilie donc toutes les positions, comme un redemarrage."""
+        self._in_standby = False
+        self._resume_reconcile = True
+        self.events.append(EventType.WORKER_STARTED, "Worker relance depuis le Dashboard")
 
     def _worker_interval(self) -> int:
         """Cadence sauvegardee dans Settings, avec repli sur la configuration."""
@@ -321,11 +342,19 @@ class Worker:
             else:
                 processed.append(position)
 
-        # Reconciliation periodique (section 19)
-        if self._loop % RECONCILE_EVERY == 0:
-            # Ne pas reconcilier un objet potentiellement modifie par un cycle echoue.
+        # Reconciliation (section 19) : au premier tour (reprise apres un arret ou une veille : achats
+        # remplis, stops executes pendant l'arret), puis tous les RECONCILE_EVERY tours ; et a CHAQUE
+        # tour pour une position dont un achat attend son remplissage, sinon le stop n'est pose que
+        # jusqu'a RECONCILE_EVERY tours apres l'achat.
+        # Ne pas reconcilier un objet potentiellement modifie par un cycle echoue.
+        if self._resume_reconcile or self._loop % RECONCILE_EVERY == 0:
             self._reconcile(processed)
             self._sync_quote_balance()
+            self._resume_reconcile = False
+        else:
+            pending = [position for position in processed if awaiting_fill(position)]
+            if pending:
+                self._reconcile(pending)
 
         if errors:
             raise RuntimeError("Erreur de suivi : " + " ; ".join(errors))
