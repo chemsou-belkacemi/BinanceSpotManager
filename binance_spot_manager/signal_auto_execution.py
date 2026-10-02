@@ -197,9 +197,11 @@ class AutomaticSignalExecutor:
                 if float(payload.get("signal_confirmation_expires_at") or 0) <= now:
                     raise ValueError("Préparation automatique expirée avant sa mise en file")
             else:
-                allowed, csi_detail = self._csi_gate(row, preferences)
-                if not allowed:
-                    raise ValueError(csi_detail)
+                if not parsed.is_csi:
+                    # Avis de CSI sur un signal texte ; un signal V3 vient déjà de CSI.
+                    allowed, csi_detail = self._csi_gate(row, preferences)
+                    if not allowed:
+                        raise ValueError(csi_detail)
                 rules = self.rules_cache.get(parsed.symbol, refresh=True)
                 balances = self.client.get_balances()
                 prices = self.client.get_prices()

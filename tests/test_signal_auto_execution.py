@@ -318,3 +318,16 @@ def test_csi_gate_disabled_never_calls_csi(tmp_path):
 
     assert worker.process_pending() == ["QUEUED"]
     assert csi.calls == [] and len(commands.list_recent("demo")) == 1
+
+
+def test_csi_gate_is_never_asked_about_csi_own_signals(tmp_path):
+    from test_signal_csi import NOW, csi_text, drop_preferences, receive_csi
+
+    inbox = SignalInbox(tmp_path / "signals.db")
+    receive_csi(inbox, csi_text())
+    csi = FakeCsi("REFUSE")
+    worker, _ = executor(tmp_path, inbox, drop_preferences(signal_csi_gate_enabled=True),
+                         now=NOW, csi_client=csi)
+
+    assert worker.process_pending() == ["QUEUED"]   # un signal V3 vient déjà de CSI
+    assert csi.calls == []
