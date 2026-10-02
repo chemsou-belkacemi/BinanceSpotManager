@@ -1,7 +1,10 @@
 from types import SimpleNamespace
 from datetime import datetime, timezone
 
+import pytest
+
 from binance_spot_manager.command_store import CommandStore
+from binance_spot_manager.csi_client import CsiOpinion, CsiUnavailable
 from binance_spot_manager.event_store import EventStore
 from binance_spot_manager.risk_engine import RiskLimits
 from binance_spot_manager.signal_auto_execution import AutomaticSignalExecutor
@@ -13,6 +16,21 @@ SIMPLE = "PAIR: BTC/USDT\nENTRY 1: 84000\nT1: 90000\nSL: 80000"
 #: Empreinte du bot (sha256 du token) : forme réelle de l'identifiant externe Telegram.
 BOT = "ab" * 32
 TRUSTED_CHAT = -100123
+
+
+class FakeCsi:
+    """Client CSI factice : un verdict fixe, ou une panne."""
+
+    def __init__(self, verdict="FAVORABLE", *, fail=False):
+        self.verdict, self.fail, self.calls = verdict, fail, []
+
+    def evaluate(self, text, *, source, record=True, user_validated=False):
+        assert user_validated is False                     # le worker ne valide jamais une paire
+        self.calls.append((text, source, record))
+        if self.fail:
+            raise CsiUnavailable("CSI injoignable sur http://csi-api:8503 (ConnectionError)")
+        return CsiOpinion(verdict=self.verdict, summary=f"résumé {self.verdict}", source=source,
+                          evaluated_at="2026-09-30T10:00:00+00:00")
 
 
 def telegram_id(message=1, chat=TRUSTED_CHAT):
@@ -27,7 +45,7 @@ def positions_stub(items=(), read_errors=()):
 
 
 def executor(tmp_path, inbox, preferences, *, now=1000, run_mode="DEMO_AUTO", positions=None,
-             notify=None, client=None, rules=None):
+             notify=None, client=None, rules=None, csi_client=None):
     rules = rules or parse_symbol_rules({
         "symbol": "BTCUSDT", "baseAsset": "BTC", "quoteAsset": "USDT",
         "status": "TRADING", "filters": [
@@ -48,7 +66,7 @@ def executor(tmp_path, inbox, preferences, *, now=1000, run_mode="DEMO_AUTO", po
         lambda: RiskLimits(),
         lambda: preferences, EventStore(tmp_path / "events.jsonl"),
         clock=lambda: now, positions=positions if positions is not None else positions_stub(),
-        notify=notify, run_mode=run_mode,
+        notify=notify, run_mode=run_mode, csi_client=csi_client,
     )
     return worker, commands
 
@@ -67,6 +85,8 @@ def enabled_preferences(**overrides):
         "signal_auto_touch_stop": False,
         "signal_sizing_mode": "FIXED",
         "signal_fixed_budget": 90,
+        # Les tests historiques n'ont pas de client CSI : contrôle désactivé, sauf mention contraire.
+        "signal_csi_gate_enabled": False,
     } | overrides
 
 
@@ -135,11 +155,25 @@ def test_resending_old_unconfirmed_text_refreshes_telegram_age_and_queues_once(t
     assert len(commands.list_recent("demo")) == 1
 
 
-def test_conditional_stop_requires_saved_touch_authorization(tmp_path):
+@pytest.mark.parametrize("touch,trigger,interval", [(False, "CANDLE_CLOSE", "1h"), (True, "TOUCH", "")])
+def test_timed_stop_waits_for_its_candle_close_unless_touch_is_saved(tmp_path, touch, trigger, interval):
     inbox = SignalInbox(tmp_path / "signals.db")
     row = inbox.receive(
         "demo", SIMPLE.replace("SL: 80000", "SL: 80000 (1h)"),
         source="telegram", external_id=telegram_id(3), source_timestamp=995,
+    )
+    worker, commands = executor(tmp_path, inbox, enabled_preferences(signal_auto_touch_stop=touch))
+
+    assert worker.process_pending() == ["QUEUED"]
+    stop = commands.get_by_request_key("demo", f"signal:{row['id']}")["payload"]["position"]["stop_loss"]
+    assert (stop["trigger"], stop["candle_interval"], stop["resolved_price"]) == (trigger, interval, 80000)
+
+
+def test_stop_with_an_unknown_candle_is_never_executed_automatically(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    row = inbox.receive(
+        "demo", SIMPLE.replace("SL: 80000", "SL: 80000 on candle close"),
+        source="telegram", external_id="unknown-candle", source_timestamp=995,
     )
     worker, commands = executor(tmp_path, inbox, enabled_preferences())
 
@@ -151,6 +185,78 @@ def test_conditional_stop_requires_saved_touch_authorization(tmp_path):
     assert '"C_SL_CANDLE"' in saved["route"]
     assert saved["payload"] is None
     assert commands.list_recent("demo") == []
+
+
+def test_saved_policy_limits_entries_and_targets_with_early_sales(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    text = (
+        "PAIR: BTC/USDT\nENTRY 1: 84000\nENTRY 2: 83000\n"
+        "T1: 90000\nT2: 95000\nT3: 100000\nSL: 80000 (4h)"
+    )
+    row = inbox.receive(
+        "demo", text, source="telegram", external_id=telegram_id(20), source_timestamp=995,
+    )
+    preferences = enabled_preferences(
+        signal_auto_touch_stop=True,
+        signal_auto_entry_count=1,
+        signal_auto_tp_count=2,
+        signal_auto_tp_distribution="EARLY",
+    )
+    worker, commands = executor(tmp_path, inbox, preferences)
+
+    assert worker.process_pending() == ["QUEUED"]
+    command = commands.get_by_request_key("demo", f"signal:{row['id']}")
+    position = command["payload"]["position"]
+    assert len(position["entries"]) == 1
+    assert position["entries"][0]["resolved_price"] == 84000
+    assert [tp["target_price"] for tp in position["take_profits"]] == [90000, 95000]
+    assert [tp["sell_percent"] for tp in position["take_profits"]] == pytest.approx([70, 100])
+    # Suivi du SL activé par défaut : après TP1, le SL passe à l'Entry 1.
+    assert [(tp["sl_rule_after_hit"], tp["sl_rule_value"]) for tp in position["take_profits"]] == [
+        ("FIXED_PRICE", 84000), ("NO_CHANGE", None)]
+
+
+@pytest.mark.parametrize("trail_stop,expected", [
+    (True, ["FIXED_PRICE", "NO_CHANGE", "FIXED_PRICE"]),
+    (False, ["NO_CHANGE"] * 3),
+])
+def test_saved_stop_trailing_setting_applies_to_automatic_signals(tmp_path, trail_stop, expected):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    text = "PAIR: BTC/USDT\nENTRY 1: 84000\nT1: 90000\nT2: 95000\nT3: 100000\nSL: 80000"
+    row = inbox.receive("demo", text, source="telegram", external_id=telegram_id(21), source_timestamp=995)
+    preferences = enabled_preferences(signal_auto_tp_count=3, signal_trail_stop=trail_stop)
+    worker, commands = executor(tmp_path, inbox, preferences)
+
+    assert worker.process_pending() == ["QUEUED"]
+    position = commands.get_by_request_key("demo", f"signal:{row['id']}")["payload"]["position"]
+    assert [tp["sl_rule_after_hit"] for tp in position["take_profits"]] == expected
+
+
+def test_saved_custom_policy_applies_to_entries_and_targets(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    text = (
+        "PAIR: BTC/USDT\nENTRY 1: 84000\nENTRY 2: 83000\n"
+        "T1: 90000\nT2: 95000\nSL: 80000"
+    )
+    row = inbox.receive(
+        "demo", text, source="telegram", external_id=telegram_id(22), source_timestamp=995,
+    )
+    preferences = enabled_preferences(
+        signal_auto_entry_count=2,
+        signal_auto_entry_distribution="CUSTOM",
+        signal_auto_entry_custom_percentages="30;70",
+        signal_auto_tp_count=2,
+        signal_auto_tp_distribution="CUSTOM",
+        signal_auto_tp_custom_percentages="80;20",
+    )
+    worker, commands = executor(tmp_path, inbox, preferences)
+
+    assert worker.process_pending() == ["QUEUED"]
+    position = commands.get_by_request_key(
+        "demo", f"signal:{row['id']}"
+    )["payload"]["position"]
+    assert [entry["capital_percent"] for entry in position["entries"]] == [30, 70]
+    assert [tp["sell_percent"] for tp in position["take_profits"]] == pytest.approx([80, 100])
 
 
 def test_telegram_timestamp_is_authoritative_over_text_timezone(tmp_path):
@@ -182,3 +288,84 @@ def test_fresh_resend_can_retry_rejected_signal_without_existing_payload(tmp_pat
     assert resent["source_timestamp"] == 998
     assert resent["auto_state"] == ""
     assert resent["auto_detail"] == ""
+
+
+def test_csi_gate_holds_unfavourable_signals_for_manual_confirmation(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    row = inbox.receive(
+        "demo", SIMPLE, source="telegram", external_id=telegram_id(7), source_timestamp=995,
+    )
+    csi = FakeCsi("DEFAVORABLE")
+    preferences = enabled_preferences(
+        signal_csi_gate_enabled=True, signal_csi_source_names="-100123=Suhaib",
+    )
+    worker, commands = executor(tmp_path, inbox, preferences, csi_client=csi)
+
+    # Retenu = « À confirmer » (motif de confiance), jamais un refus définitif.
+    assert worker.process_pending() == ["REVIEW"]
+    saved = inbox.recent("demo")[0]
+    assert saved["id"] == row["id"] and saved["auto_state"] == "REVIEW"
+    assert "Avis CSI Défavorable" in saved["auto_detail"] and "retenue" in saved["auto_detail"]
+    assert '"C_CSI_OPINION"' in saved["route"] and saved["payload"] is None
+    assert saved["csi_verdict"] == "DEFAVORABLE" and saved["csi_detail"] == "résumé DEFAVORABLE"
+    assert csi.calls == [(SIMPLE, "Suhaib", True)]
+    assert commands.list_recent("demo") == []          # aucun ordre : confirmation manuelle possible
+
+
+def test_csi_gate_lets_favourable_signals_through_and_keeps_the_opinion(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    row = inbox.receive("demo", SIMPLE, source="telegram", external_id=telegram_id(8), source_timestamp=995)
+    csi = FakeCsi("FAVORABLE")
+    worker, commands = executor(tmp_path, inbox, enabled_preferences(signal_csi_gate_enabled=True), csi_client=csi)
+
+    assert worker.process_pending() == ["QUEUED"]
+    saved = inbox.recent("demo")[0]
+    assert saved["csi_verdict"] == "FAVORABLE" and saved["auto_state"] == "QUEUED"
+    assert csi.calls == [(SIMPLE, "telegram -100123", True)]
+    command = commands.get_by_request_key("demo", f"signal:{row['id']}")
+    assert command is not None and command["payload"]["confirmation_mode"] == "AUTO"
+
+
+def test_csi_gate_is_never_asked_about_csi_own_signals(tmp_path):
+    from test_signal_csi import NOW, csi_text, drop_preferences, receive_csi
+
+    inbox = SignalInbox(tmp_path / "signals.db")
+    receive_csi(inbox, csi_text())
+    csi = FakeCsi("REFUSE")
+    worker, _ = executor(tmp_path, inbox, drop_preferences(signal_csi_gate_enabled=True),
+                         now=NOW, csi_client=csi)
+
+    assert worker.process_pending() == ["QUEUED"]   # un signal V3 vient déjà de CSI
+    assert csi.calls == []
+
+
+def test_csi_gate_holds_when_csi_is_unreachable_unless_allowed_by_setting(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    inbox.receive("demo", SIMPLE, source="telegram", external_id=telegram_id(31), source_timestamp=995)
+    worker, commands = executor(
+        tmp_path, inbox, enabled_preferences(signal_csi_gate_enabled=True), csi_client=FakeCsi(fail=True),
+    )
+    assert worker.process_pending() == ["REVIEW"]
+    saved = inbox.recent("demo")[0]
+    assert "Avis CSI indisponible" in saved["auto_detail"] and saved["csi_verdict"] == ""
+    assert commands.list_recent("demo") == []
+
+    lenient = SignalInbox(tmp_path / "lenient.db")
+    lenient.receive("demo", SIMPLE, source="telegram", external_id=telegram_id(32), source_timestamp=995)
+    worker, commands = executor(
+        tmp_path / "lenient", lenient,
+        enabled_preferences(signal_csi_gate_enabled=True, signal_csi_when_unavailable="ALLOW"),
+        csi_client=FakeCsi(fail=True),
+    )
+    assert worker.process_pending() == ["QUEUED"]
+    assert len(commands.list_recent("demo")) == 1
+
+
+def test_csi_gate_disabled_never_calls_csi(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    inbox.receive("demo", SIMPLE, source="telegram", external_id=telegram_id(33), source_timestamp=995)
+    csi = FakeCsi("REFUSE")
+    worker, commands = executor(tmp_path, inbox, enabled_preferences(), csi_client=csi)
+
+    assert worker.process_pending() == ["QUEUED"]
+    assert csi.calls == [] and len(commands.list_recent("demo")) == 1

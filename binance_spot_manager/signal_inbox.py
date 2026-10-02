@@ -7,8 +7,15 @@ import time
 import uuid
 
 from .config import DATA_DIR
-from .signal_parser import content_hash, first_line_is_csi, parse_signal
+from .signal_parser import (
+    UNVERIFIABLE_SOURCE_DATE_WARNING,
+    content_hash,
+    first_line_is_csi,
+    parse_signal,
+)
 
+# Errors that freeze a signal: an edited source is never re-parsed into an executable one.
+EDIT_BLOCKS = ("Message édité", "Message source édité", "Révision d'un message")
 #: Origines pouvant alimenter l'exécution automatique : Telegram et dépôt direct (ML).
 AUTO_SOURCES = frozenset({"telegram", "api"})
 #: Préfixe de l'identifiant externe des signaux CSI : seul le dépôt TXT l'emploie.
@@ -58,6 +65,9 @@ class SignalInbox:
                 auto_detail TEXT NOT NULL DEFAULT '',
                 expires_at REAL NOT NULL DEFAULT 0,
                 route TEXT NOT NULL DEFAULT '',
+                csi_verdict TEXT NOT NULL DEFAULT '',
+                csi_detail TEXT NOT NULL DEFAULT '',
+                csi_evaluated_at TEXT NOT NULL DEFAULT '',
                 UNIQUE(scope, hash))""")
             columns = {row[1] for row in db.execute("PRAGMA table_info(signals)")}
             for name, definition in (
@@ -68,9 +78,18 @@ class SignalInbox:
                 ("expires_at", "REAL NOT NULL DEFAULT 0"),
                 # Décision de routage (JSON : motifs, seuils, métriques) ; '' si jamais routé.
                 ("route", "TEXT NOT NULL DEFAULT ''"),
+                # Avis de CryptoSignalIntelligence : information affichée, jamais un ordre.
+                ("csi_verdict", "TEXT NOT NULL DEFAULT ''"),
+                ("csi_detail", "TEXT NOT NULL DEFAULT ''"),
+                ("csi_evaluated_at", "TEXT NOT NULL DEFAULT ''"),
             ):
                 if name not in columns:
-                    db.execute(f"ALTER TABLE signals ADD COLUMN {name} {definition}")
+                    try:
+                        db.execute(f"ALTER TABLE signals ADD COLUMN {name} {definition}")
+                    except sqlite3.OperationalError as exc:
+                        # Une autre connexion vient d'ajouter la même colonne.
+                        if "duplicate column" not in str(exc):
+                            raise
             db.execute("""CREATE TABLE IF NOT EXISTS telegram_offsets (
                 bot TEXT PRIMARY KEY, offset INTEGER NOT NULL)""")
             db.execute("""CREATE TABLE IF NOT EXISTS signal_origins (
@@ -93,7 +112,15 @@ class SignalInbox:
     def decode(row):
         if row is None:
             return None
-        return dict(row) | {"parsed": json.loads(row["parsed"]),
+        parsed = json.loads(row["parsed"])
+        # Telegram provides its own server timestamp. It is the authoritative
+        # freshness source, so an absent date inside the message is not a warning.
+        if row["source"] == "telegram":
+            parsed["warnings"] = [
+                warning for warning in parsed.get("warnings", [])
+                if warning != UNVERIFIABLE_SOURCE_DATE_WARNING
+            ]
+        return dict(row) | {"parsed": parsed,
                             "payload": json.loads(row["payload"]) if row["payload"] else None}
 
     @staticmethod
@@ -164,6 +191,11 @@ class SignalInbox:
                 parsed, source, external_id, idempotency_key, producer_signal_id)
         elif idempotency_key or producer_signal_id:
             raise ValueError("Clé d'idempotence et SIGNAL_ID réservés aux signaux CSI du dépôt TXT")
+        if source == "telegram":
+            parsed["warnings"] = [
+                warning for warning in parsed["warnings"]
+                if warning != UNVERIFIABLE_SOURCE_DATE_WARNING
+            ]
         if edited:
             parsed["errors"].append("Message édité : vérifier manuellement via New Trade ; aucun ordre remplacé.")
         digest = content_hash(raw)
@@ -194,6 +226,13 @@ class SignalInbox:
                         raw[:20000], json.dumps(parsed, allow_nan=False), float(source_timestamp or 0),
                         float(parsed.get("expires_at") or 0)))
             row = db.execute("SELECT * FROM signals WHERE scope=? AND hash=?", (scope, digest)).fetchone()
+            # The same text imported again after a parser upgrade must not return the old
+            # analysis: refresh it like reanalyse(), never once confirmed or edited.
+            stored = json.loads(row["parsed"])
+            if (row["payload"] is None and not edited and not revised and stored != parsed
+                    and not any(error.startswith(EDIT_BLOCKS) for error in stored["errors"])):
+                db.execute("UPDATE signals SET parsed=? WHERE id=?", (json.dumps(parsed, allow_nan=False), row["id"]))
+                row = db.execute("SELECT * FROM signals WHERE id=?", (row["id"],)).fetchone()
             if external_id:
                 db.execute("INSERT OR IGNORE INTO signal_origins VALUES (?, ?, ?)", (scope, external_id, row["id"]))
             if idempotency_key:
@@ -253,13 +292,34 @@ class SignalInbox:
             if row is None or row["payload"] is not None:
                 raise ValueError("Signal absent ou déjà confirmé : réanalyse impossible.")
             previous = json.loads(row["parsed"])
-            if any(error.startswith(("Message édité", "Message source édité", "Révision d'un message"))
-                   for error in previous["errors"]):
+            if any(error.startswith(EDIT_BLOCKS) for error in previous["errors"]):
                 raise ValueError("Message source édité : réanalyse bloquée, vérifier manuellement via New Trade.")
             parsed = parse_signal(row["raw"], template).to_dict()
             db.execute("UPDATE signals SET parsed=? WHERE scope=? AND id=?",
                        (json.dumps(parsed, allow_nan=False), scope, signal_id))
             return self.decode(db.execute("SELECT * FROM signals WHERE scope=? AND id=?", (scope, signal_id)).fetchone())
+
+    def refresh_refused(self, scope):
+        """Re-read signals an older parser refused; confirmed, edited or valid ones never change.
+
+        The automatic state is kept: a Telegram signal rejected at reception stays REJECTED and
+        can only be confirmed by hand, never sent automatically later.
+        """
+        refreshed = 0
+        with self.connect() as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute("SELECT id, raw, parsed FROM signals WHERE scope=? AND payload IS NULL",
+                              (scope,)).fetchall()
+            for row in rows:
+                stored = json.loads(row["parsed"])
+                if not stored["errors"] or any(error.startswith(EDIT_BLOCKS) for error in stored["errors"]):
+                    continue
+                parsed = parse_signal(row["raw"]).to_dict()
+                if parsed != stored:
+                    db.execute("UPDATE signals SET parsed=? WHERE scope=? AND id=?",
+                               (json.dumps(parsed, allow_nan=False), scope, row["id"]))
+                    refreshed += 1
+        return refreshed
 
     def freeze(self, scope, signal_id, payload):
         """First confirmation wins, including random IDs; never overwrite a sent/uncertain plan."""
@@ -385,3 +445,12 @@ class SignalInbox:
 
     def count_review(self, scope, *, now=None):
         return len(self.pending_review(scope, now=now, limit=500))
+
+    def set_csi_opinion(self, scope, signal_id, verdict, detail="", evaluated_at=""):
+        """Dernier avis de CryptoSignalIntelligence sur ce signal (affiché, jamais exécuté)."""
+        with self.connect() as db, db:
+            changed = db.execute("""UPDATE signals SET csi_verdict=?, csi_detail=?, csi_evaluated_at=?
+                WHERE scope=? AND id=?""",
+                (str(verdict)[:32], str(detail)[:2000], str(evaluated_at)[:64], scope, signal_id)).rowcount
+            if changed != 1:
+                raise ValueError("Signal absent")

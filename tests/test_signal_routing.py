@@ -102,7 +102,7 @@ def test_confidence_reasons(tmp_path, case, code, no_call):
     elif case == "no_timestamp":
         stamp = 0
     elif case == "candle_stop":
-        text = SIMPLE.replace("SL: 80000", "SL: 80000 (1h)")
+        text = SIMPLE.replace("SL: 80000", "SL: 80000 on candle close")  # bougie inconnue
     elif case == "demo_manual":
         run_mode = "DEMO_MANUAL"
     inbox, worker, commands, row = routed(

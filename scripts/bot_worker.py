@@ -58,6 +58,7 @@ from binance_spot_manager.market_price_stream import DemoMarketPriceStream  # no
 from binance_spot_manager.position_engine import PositionEngine, finish_position, recompute_position  # noqa: E402
 from binance_spot_manager.position_store import PositionStore, RuntimeStore, get_settings_store  # noqa: E402
 from binance_spot_manager.reconciliation_engine import ReconciliationEngine  # noqa: E402
+from binance_spot_manager.csi_client import CsiClient  # noqa: E402
 from binance_spot_manager.signal_auto_execution import AutomaticSignalExecutor  # noqa: E402
 from binance_spot_manager.signal_drop import SignalDropImporter  # noqa: E402
 from binance_spot_manager.signal_feedback import SignalFeedbackWriter  # noqa: E402
@@ -138,6 +139,7 @@ class Worker:
             lambda: get_settings_store().load(), self.events,
             positions=self.positions, notify=self.notifications.notify,
             run_mode=self.settings.run_mode.value,
+            csi_client=CsiClient.from_env(),
         )
 
         self._running = True
@@ -213,7 +215,7 @@ class Worker:
         runtime.command_scope = account_scope(self.settings)
         runtime.command_capabilities = [
             "signal_v1", "independent_positions_v1", "market_close_v1",
-            "telegram_getupdates_v1", "telegram_auto_execution_v1",
+            "telegram_getupdates_v1", "telegram_auto_execution_v1", "candle_stop_v1",
             "signal_drop_v1", "signal_drop_csi_v3", "signal_feedback_v2",
             "signal_routing_v1",
         ]
@@ -401,7 +403,9 @@ class Worker:
             self.notifications.notify_position_event(
                 position, self.notifications.position_finished(position)
             )
-        if outcome.stop_crossed_at is not None and position.is_open:
+        if outcome.candle_stop_hit is not None and position.is_open:
+            self._exit_on_candle_close(position, outcome.candle_stop_hit)
+        elif outcome.stop_crossed_at is not None and position.is_open:
             self._exit_on_crossed_stop(position, outcome.stop_crossed_at)
         if outcome.errors:
             raise RuntimeError(" ; ".join(outcome.errors))
@@ -448,6 +452,43 @@ class Worker:
             position,
             self.notifications.stop_crossed_exit(
                 position, stop_price, price, result.get("message", ""),
+            ),
+        )
+
+    def _exit_on_candle_close(self, position, breach) -> None:
+        """Une bougie a cloture au SL ou dessous : vendre au marche la quantite de cette position.
+
+        La cloture fait foi : le prix n'est pas relu, un rebond apres la cloture ne l'annule pas.
+        Meme chemin que la cloture manuelle (intention persistee, aucun renvoi automatique).
+        """
+        from binance_spot_manager.market_close import close_market
+
+        stop_price = position.stop_loss.resolved_price or 0.0
+        interval = position.stop_loss.candle_interval
+        saved = get_settings_store().load()
+        if isinstance(saved, dict) and not saved.get("exit_on_crossed_stop", True):
+            self._pause_on_crossed_stop(
+                position, stop_price,
+                f"Bougie {interval} cloturee a {breach.close_price} ; sortie automatique desactivee dans Settings",
+            )
+            return
+        self.events.append(
+            EventType.SL_EXECUTED,
+            f"SL a la cloture ({position.symbol}) : bougie {interval} cloturee a {breach.close_price} "
+            f"<= stop {stop_price}, vente au marche",
+            position_id=position.position_id, symbol=position.symbol, level="WARNING",
+        )
+        try:
+            result = close_market(
+                position, self.execution, self.positions, reason=CloseReason.SL_CANDLE_CLOSE,
+            )
+        except Exception as exc:  # noqa: BLE001 - issue incertaine : pause, jamais de renvoi
+            self._pause_on_crossed_stop(position, stop_price, f"Sortie au marche impossible : {exc}")
+            return
+        self.notifications.notify_position_event(
+            position,
+            self.notifications.candle_stop_exit(
+                position, stop_price, interval, breach.close_price, result.get("message", ""),
             ),
         )
 

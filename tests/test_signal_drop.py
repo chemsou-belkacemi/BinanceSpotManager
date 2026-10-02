@@ -11,7 +11,7 @@ from binance_spot_manager.models import SLRuleAfterTP
 from binance_spot_manager.signal_drop import MAX_FILE_BYTES, SignalDropImporter
 from binance_spot_manager.signal_inbox import SignalInbox
 from binance_spot_manager.signal_parser import parse_signal
-from binance_spot_manager.signal_plan import prepare_signal, signal_sl_after_tp
+from binance_spot_manager.signal_plan import TRAIL_STOP_KEY, prepare_signal, signal_sl_after_tp
 from binance_spot_manager.symbol_rules import parse_symbol_rules
 from test_signal_auto_execution import SIMPLE, enabled_preferences, executor, telegram_id
 
@@ -244,8 +244,9 @@ def rules():
 
 
 def prepare(rules, **overrides):
+    # La règle « SL après TP » ne s'applique que si le suivi du SL (actif par défaut) est coupé.
     kwargs = dict(budget=300, available_quote=1000, reserve_percent=20, current_price=84500,
-                  signal_id="sig", source="api", validity_confirmed=True)
+                  signal_id="sig", source="api", validity_confirmed=True, trail_stop=False)
     return prepare_signal(parse_signal(TEXT), rules, **(kwargs | overrides))
 
 
@@ -255,6 +256,13 @@ def test_sl_after_tp_defaults_to_no_change(rules):
         "NO_CHANGE", "NO_CHANGE",
     ]
     assert payload["position"]["source_groups"][0]["source"] == "api"
+
+
+def test_trailing_stop_takes_precedence_over_sl_after_tp(rules):
+    _, payload = prepare(rules, trail_stop=True, sl_after_tp="BREAK_EVEN")
+    assert [tp["sl_rule_after_hit"] for tp in payload["position"]["take_profits"]] == [
+        "FIXED_PRICE", "NO_CHANGE",
+    ]
 
 
 @pytest.mark.parametrize("rule", ["BREAK_EVEN", "BREAK_EVEN_WITH_FEES", "PREVIOUS_TP"])
@@ -278,7 +286,8 @@ def test_auto_executor_passes_saved_sl_rule(tmp_path):
     text = SIMPLE.replace("T1: 90000", "T1: 90000\nT2: 92000")
     row = inbox.receive("demo", text, source="telegram", external_id=telegram_id(2), source_timestamp=995)
     worker, commands = executor(
-        tmp_path, inbox, enabled_preferences(signal_sl_after_tp="BREAK_EVEN"),
+        tmp_path, inbox,
+        enabled_preferences(signal_sl_after_tp="BREAK_EVEN", **{TRAIL_STOP_KEY: False}),
     )
 
     assert worker.process_pending() == ["QUEUED"]

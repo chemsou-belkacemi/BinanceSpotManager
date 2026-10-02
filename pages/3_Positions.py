@@ -21,6 +21,7 @@ from binance_spot_manager.models import (  # noqa: E402
     EventType,
     SLRuleAfterTP,
     SLStatus,
+    SLTrigger,
     TPExecutionPolicy,
     TPStatus,
     utcnow,
@@ -175,7 +176,10 @@ def live_position_summary(position_id):
     )
     progress_cols[1].metric("TP atteints", f"{len(position.executed_tps)}/{len(position.take_profits)}")
     progress_cols[2].metric(
-        "SL", f"{fmt_price(position.stop_loss.resolved_price)} ({position.stop_loss.status.value})"
+        "SL", f"{fmt_price(position.stop_loss.resolved_price)} ("
+              + (f"clôture {position.stop_loss.candle_interval}"
+                 if position.stop_loss.trigger is SLTrigger.CANDLE_CLOSE else position.stop_loss.status.value)
+              + ")"
     )
     progress_cols[3].metric(
         "Référence break-even",
@@ -514,8 +518,14 @@ def live_stop_loss(position_id):
     if position is None:
         return
     sl = position.stop_loss
+    if sl.trigger is SLTrigger.CANDLE_CLOSE:
+        st.info(
+            f"SL à la clôture de bougie {sl.candle_interval} : aucun ordre stop sur Binance. "
+            f"Le worker vend au marché si une bougie {sl.candle_interval} clôture à "
+            f"{fmt_price(sl.resolved_price)} ou dessous ; il doit rester actif pour protéger la position."
+        )
     sl_cols = st.columns(5)
-    sl_cols[0].metric("Mode", sl.mode.value)
+    sl_cols[0].metric("Mode", f"Clôture {sl.candle_interval}" if sl.trigger is SLTrigger.CANDLE_CLOSE else sl.mode.value)
     sl_cols[1].metric("Valeur", sl.value)
     sl_cols[2].metric("Prix résolu", fmt_price(sl.resolved_price))
     sl_cols[3].metric("Quantité protégée", fmt_qty(sl.quantity))

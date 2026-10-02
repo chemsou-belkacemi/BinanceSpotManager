@@ -45,8 +45,25 @@ tabs = st.tabs(["Sécurité", "Worker & risque", "Presets", "Notifications", "Di
 
 with tabs[5]:
     from binance_spot_manager.position_store import get_settings_store
+    from binance_spot_manager.signal_plan import (
+        TRAIL_STOP_KEY,
+        automatic_entry_allocations,
+        automatic_tp_allocations,
+    )
     from binance_spot_manager.signal_sizing import SignalSizingPolicy
     from binance_spot_manager.telegram_signals import chat_allowlist
+    from binance_spot_manager import csi_client
+    from binance_spot_manager.csi_client import (
+        GATE_ENABLED_KEY,
+        GATE_HOLD_INDETERMINE_KEY,
+        GATE_WHEN_UNAVAILABLE_KEY,
+        SOURCE_NAMES_KEY,
+        GatePolicy,
+        source_names,
+    )
+
+    CSI_HOLD_LABEL = "Retenir le signal (prudent)"
+    CSI_ALLOW_LABEL = "Exécuter quand même, sans avis"
 
     st.subheader("Réception des signaux Telegram")
     st.caption("Le worker peut relever automatiquement les messages autorisés. L'exécution directe se règle séparément plus bas. Le token existant n'est ni affiché ni modifié.")
@@ -223,6 +240,29 @@ with tabs[5]:
                 st.success("Stratégie de budget enregistrée pour les prochains signaux.")
 
     st.divider()
+    st.subheader("Suivi du stop loss")
+    with st.form("signal_trail_stop_preferences"):
+        trail_stop = st.toggle(
+            "Remonter le SL au fil des TP",
+            value=bool(signal_preferences.get(TRAIL_STOP_KEY, True)),
+            key="signal_trail_stop_toggle",
+            help=(
+                "Activé (par défaut) : après TP1, le SL passe à l'Entry 1 ; à partir de TP3, il suit "
+                "deux objectifs en arrière (TP3 → TP1, TP4 → TP2…) ; un SL de clôture de bougie déplacé "
+                "devient un stop au prix sur Binance. Désactivé : le SL reste exactement "
+                "là où le signal l'a placé pendant tout le trade, au même prix, et un SL de clôture de "
+                "bougie n'est jamais converti en stop instantané."
+            ),
+        )
+        st.caption(
+            "S'applique aux nouveaux trades issus de signaux, manuels ou automatiques. "
+            "Les trades ouverts gardent le comportement avec lequel ils ont démarré."
+        )
+        if st.form_submit_button("Enregistrer le suivi du SL"):
+            get_settings_store().update({TRAIL_STOP_KEY: bool(trail_stop)})
+            st.success("Suivi du SL enregistré pour les prochains signaux.")
+
+    st.divider()
     st.subheader("Exécution automatique")
     auto_was_enabled = bool(signal_preferences.get("signal_auto_execute_enabled", False))
     auto_execute = st.toggle(
@@ -235,11 +275,90 @@ with tabs[5]:
         ),
     )
     auto_touch_stop = st.toggle(
-        "Interpréter les SL (1h/15min) comme des stops au toucher",
+        "Interpréter les SL temporisés (15min, 1h, 4h…) comme des stops au toucher",
         value=bool(signal_preferences.get("signal_auto_touch_stop", False)),
         disabled=not auto_execute,
         key="signal_auto_touch_stop_toggle",
-        help="Active cette option seulement si cette interprétation correspond à ta stratégie.",
+        help=(
+            "Désactivé (par défaut) : « Stop: 0.93 (4h) » attend qu'une bougie 4h clôture à 0.93 ou dessous, "
+            "surveillée par le worker, puis vend au marché. Activé : la protection part dès que le prix "
+            "touche 0.93 (ordre stop sur Binance), sans attendre la clôture."
+        ),
+    )
+    auto_entry_count = st.number_input(
+        "Nombre maximal d'entrées repris du signal",
+        min_value=1,
+        max_value=20,
+        value=int(signal_preferences.get("signal_auto_entry_count", 1)),
+        disabled=not auto_execute,
+        key="signal_auto_entry_count_input",
+        help="Les premières entrées sont conservées. Avec 1, Entry2 et les suivantes sont ignorées.",
+    )
+    entry_distribution_labels = {
+        "EQUAL": "Répartition égale",
+        "CUSTOM": "Personnalisée",
+    }
+    saved_entry_distribution = str(
+        signal_preferences.get("signal_auto_entry_distribution", "EQUAL")
+    )
+    if saved_entry_distribution not in entry_distribution_labels:
+        saved_entry_distribution = "EQUAL"
+    auto_entry_distribution = st.segmented_control(
+        "Répartition du budget entre les entrées retenues",
+        list(entry_distribution_labels),
+        default=saved_entry_distribution,
+        required=True,
+        format_func=entry_distribution_labels.get,
+        key="signal_auto_entry_distribution_choice",
+        disabled=not auto_execute,
+        width="stretch",
+    )
+    auto_entry_custom = st.text_input(
+        "Pourcentages personnalisés des entrées",
+        value=str(signal_preferences.get("signal_auto_entry_custom_percentages", "100")),
+        key="signal_auto_entry_custom_input",
+        disabled=not auto_execute or auto_entry_distribution != "CUSTOM",
+        help="Une valeur par entrée retenue, séparée par ; ou /. Exemple : 30;70.",
+    )
+    auto_tp_count = st.number_input(
+        "Nombre maximal de TP repris du signal",
+        min_value=1,
+        max_value=20,
+        value=int(signal_preferences.get("signal_auto_tp_count", 2)),
+        disabled=not auto_execute,
+        key="signal_auto_tp_count_input",
+        help="Les premiers objectifs sont conservés afin de viser une sortie plus proche.",
+    )
+    distribution_labels = {
+        "EARLY": "Sécuriser tôt",
+        "EQUAL": "Répartition égale",
+        "CUSTOM": "Personnalisée",
+    }
+    saved_tp_distribution = str(
+        signal_preferences.get("signal_auto_tp_distribution", "EARLY")
+    )
+    if saved_tp_distribution not in distribution_labels:
+        saved_tp_distribution = "EARLY"
+    auto_tp_distribution = st.segmented_control(
+        "Répartition des ventes entre les TP retenus",
+        list(distribution_labels),
+        default=saved_tp_distribution,
+        required=True,
+        format_func=distribution_labels.get,
+        key="signal_auto_tp_distribution_choice",
+        disabled=not auto_execute,
+        width="stretch",
+    )
+    if auto_tp_distribution == "EARLY":
+        st.caption("Par défaut : 1 TP = 100 % · 2 TP = 70/30 · 3 TP = 50/30/20. Au-delà, la répartition reste dégressive.")
+    elif auto_tp_distribution == "EQUAL":
+        st.caption("Chaque TP reçoit la même part de la position initiale.")
+    auto_tp_custom = st.text_input(
+        "Pourcentages personnalisés des TP",
+        value=str(signal_preferences.get("signal_auto_tp_custom_percentages", "70;30")),
+        key="signal_auto_tp_custom_input",
+        disabled=not auto_execute or auto_tp_distribution != "CUSTOM",
+        help="Une valeur par TP retenu, séparée par ; ou /. Exemple : 70;30.",
     )
     auto_max_age = st.number_input(
         "Âge maximal d'un message automatique (minutes)",
@@ -300,6 +419,12 @@ with tabs[5]:
                 float(signal_preferences.get("signal_drop_auto_enabled_since") or time.time())
                 if drop_auto and drop_auto_was_enabled else time.time() if drop_auto else 0.0
             )
+            entry_allocations = automatic_entry_allocations(
+                int(auto_entry_count), auto_entry_distribution, auto_entry_custom,
+            )
+            tp_allocations = automatic_tp_allocations(
+                int(auto_tp_count), auto_tp_distribution, auto_tp_custom,
+            )
             get_settings_store().update({
                 "signal_auto_execute_enabled": bool(auto_execute),
                 "signal_auto_execute_enabled_since": enabled_since,
@@ -307,6 +432,16 @@ with tabs[5]:
                 "signal_auto_max_age_minutes": int(auto_max_age),
                 "signal_drop_auto_enabled": drop_auto,
                 "signal_drop_auto_enabled_since": drop_since,
+                "signal_auto_entry_count": int(auto_entry_count),
+                "signal_auto_entry_distribution": auto_entry_distribution,
+                "signal_auto_entry_custom_percentages": ";".join(
+                    f"{value:g}" for value in entry_allocations
+                ),
+                "signal_auto_tp_count": int(auto_tp_count),
+                "signal_auto_tp_distribution": auto_tp_distribution,
+                "signal_auto_tp_custom_percentages": ";".join(
+                    f"{value:g}" for value in tp_allocations
+                ),
             })
             st.success(
                 ("Exécution automatique activée pour les nouveaux messages Telegram"
@@ -491,6 +626,59 @@ with tabs[5]:
                             level="INFO", changes=["signal_auto_breaker_reset_at"])
         st.success("Coupe-circuits réarmés : seules les pertes automatiques suivantes comptent.")
 
+    st.subheader("Avis CSI avant exécution automatique")
+    st.caption(
+        "CryptoSignalIntelligence évalue chaque signal Telegram (vetos, taux de base historique de la "
+        "même géométrie, bilan du groupe). Il ne place aucun ordre : il peut seulement RETENIR un signal "
+        "automatique pour confirmation manuelle, jamais l'envoyer tout seul. Détail : page CSI."
+    )
+    csi_policy = GatePolicy.from_mapping(signal_preferences)
+    with st.form("signal_csi_gate_preferences"):
+        csi_gate = st.toggle(
+            "Demander l'avis de CSI avant toute exécution automatique",
+            value=csi_policy.enabled,
+            key="signal_csi_gate_toggle",
+        )
+        csi_hold_indetermine = st.toggle(
+            "Retenir aussi les signaux jugés indéterminés",
+            value=csi_policy.hold_indetermine,
+            key="signal_csi_hold_indetermine_toggle",
+            help="Refusé et Défavorable sont toujours retenus. Indéterminé : pas assez d'éléments pour préférer ce signal au hasard.",
+        )
+        csi_unavailable = st.radio(
+            "Si CSI est injoignable",
+            [CSI_HOLD_LABEL, CSI_ALLOW_LABEL],
+            index=1 if csi_policy.allow_when_unavailable else 0,
+            key="signal_csi_when_unavailable_choice",
+        )
+        csi_names = st.text_area(
+            "Noms des groupes Telegram (identifiant=nom, un par ligne)",
+            value=str(signal_preferences.get(SOURCE_NAMES_KEY, "")),
+            key="signal_csi_source_names_input",
+            height=90,
+            help="Sert au bilan par groupe chez CSI. Exemple : -1001234567890=Suhaib. Sans nom : « telegram <identifiant> ».",
+        )
+        if st.form_submit_button("Enregistrer l'avis CSI"):
+            try:
+                source_names(csi_names)
+                get_settings_store().update({
+                    GATE_ENABLED_KEY: bool(csi_gate),
+                    GATE_HOLD_INDETERMINE_KEY: bool(csi_hold_indetermine),
+                    GATE_WHEN_UNAVAILABLE_KEY: "ALLOW" if csi_unavailable == CSI_ALLOW_LABEL else "HOLD",
+                    SOURCE_NAMES_KEY: csi_names.strip(),
+                })
+                st.success("Réglage enregistré. Le worker le relit automatiquement.")
+            except ValueError as exc:
+                st.error(str(exc))
+    csi_health, csi_failure = csi_client.CsiClient.from_env().probe()
+    if csi_health is None:
+        st.warning(
+            f"CSI injoignable : {csi_failure}. Tant que CSI ne répond pas, les signaux automatiques sont "
+            + ("exécutés sans avis (réglage)." if csi_policy.allow_when_unavailable
+               else "retenus pour confirmation manuelle.")
+        )
+    else:
+        (st.success if csi_health.get("ready") else st.info)(f"CSI : {csi_health.get('detail', '')}")
 
 # ==========================================================================
 # Sécurité

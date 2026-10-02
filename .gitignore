@@ -8,6 +8,9 @@ data/
 logs/
 backups/
 
+# Identifiants de l'acces public (make user-add)
+deploy/users.caddy*
+
 # Python
 .venv/
 venv/
@@ -27,3 +30,4 @@ htmlcov/
 Thumbs.db
 .vscode/
 .idea/
+.claude/

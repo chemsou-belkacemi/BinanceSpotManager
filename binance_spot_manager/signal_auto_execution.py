@@ -14,11 +14,19 @@ import logging
 import time
 
 from . import signal_routing
+from .csi_client import CsiUnavailable, GatePolicy, source_label
 from .models import EventType
 from .notification_engine import Notification
 from .risk_engine import RiskLimits
 from .signal_parser import ParsedSignal
-from .signal_plan import prepare_signal, signal_sl_after_tp
+from .signal_plan import (
+    TRAIL_STOP_KEY,
+    automatic_entry_allocations,
+    automatic_signal_selection,
+    automatic_tp_allocations,
+    prepare_signal,
+    signal_sl_after_tp,
+)
 from .signal_routing import (
     AUTO, CONFIANCE, DONNEES, EARLY_REVIEW_CODES, KIND_CSI, REVIEW, Reason, RouteDecision,
     RoutingDataError, RoutingPolicy,
@@ -62,7 +70,7 @@ class AutomaticSignalExecutor:
 
     def __init__(self, scope, inbox, commands, client, rules_cache, risk_limits,
                  preferences_loader, events, *, clock=time.time, positions=None,
-                 notify=None, run_mode=None):
+                 notify=None, run_mode=None, csi_client=None):
         self.scope = scope
         self.inbox = inbox
         self.commands = commands
@@ -79,6 +87,9 @@ class AutomaticSignalExecutor:
         #: Mode d'exécution du worker (DRY_RUN, DEMO_MANUAL, DEMO_AUTO) ; inconnu = manuel.
         self.run_mode = getattr(run_mode, "value", run_mode)
         self._new_enqueue = False
+        # Avis de CryptoSignalIntelligence (lecture et évaluation seulement) : il peut retenir
+        # un signal automatique, jamais l'envoyer. Absent = CSI considéré injoignable.
+        self.csi_client = csi_client
         self._diagnostics = {
             "state": "DISABLED",
             "queued_total": 0,
@@ -228,6 +239,14 @@ class AutomaticSignalExecutor:
             # Contrat CSI : VALID_FROM <= maintenant < EXPIRES_AT remplace la fenêtre d'âge.
             if now >= parsed.expires_at:
                 raise RejectSignal(f"Signal CSI expiré (EXPIRES_AT {_iso_utc(parsed.expires_at)}) : aucune exécution")
+        else:
+            # Signal texte : entrées et TP retenus selon les réglages automatiques. Jamais pour un signal
+            # CSI, dont le contrat fixe l'entrée, les TP et leurs parts.
+            parsed = automatic_signal_selection(
+                parsed,
+                entry_count=preferences.get("signal_auto_entry_count", 1),
+                tp_count=preferences.get("signal_auto_tp_count", 2),
+            )
         if row.get("payload"):
             # Reprise après arrêt : une préparation déjà gelée n'est jamais recalculée.
             payload = row["payload"]
@@ -238,6 +257,13 @@ class AutomaticSignalExecutor:
         reasons = signal_routing.confidence_reasons(row, policy, now=now, run_mode=self.run_mode)
         if any(reason.code in EARLY_REVIEW_CODES for reason in reasons):
             return self._review(row, signal_routing.decide(reasons), now=now, policy=policy, label=label)
+        csi_detail = ""
+        if not parsed.is_csi:
+            # Avis de CSI sur un signal texte, avant tout appel Binance : il ne peut que retenir.
+            allowed, csi_detail = self._csi_gate(row, preferences)
+            if not allowed:
+                reasons.append(Reason("C_CSI_OPINION", CONFIANCE, csi_detail))
+                return self._review(row, signal_routing.decide(reasons), now=now, policy=policy, label=label)
         try:
             rules = self.rules_cache.get(parsed.symbol, refresh=True)
             balances = self.client.get_balances()
@@ -270,7 +296,8 @@ class AutomaticSignalExecutor:
                 )
         try:
             # CSI : prepare_signal remplace la règle enregistrée par EXIT_POLICY_ID. Un SL sur
-            # clôture est interprété au toucher seulement pour chiffrer le risque : le motif
+            # clôture d'une bougie connue reste à la clôture (surveillé par le worker) ; une bougie
+            # inconnue est interprétée au toucher seulement pour chiffrer le risque : le motif
             # C_SL_CANDLE interdit alors tout envoi automatique.
             plan, payload = prepare_signal(
                 parsed, rules,
@@ -281,8 +308,20 @@ class AutomaticSignalExecutor:
                 signal_id=signal_id,
                 source=source,
                 sl_after_tp=signal_sl_after_tp(preferences.get("signal_sl_after_tp")),
-                touch_stop=bool(policy.touch_stop or parsed.stop_timeframe),
+                touch_stop=bool(policy.touch_stop
+                                or signal_routing.unknown_candle_stop(parsed.stop_timeframe)),
+                trail_stop=bool(preferences.get(TRAIL_STOP_KEY, True)),
                 validity_confirmed=True,
+                entry_allocations=automatic_entry_allocations(
+                    len(parsed.entries),
+                    preferences.get("signal_auto_entry_distribution", "EQUAL"),
+                    preferences.get("signal_auto_entry_custom_percentages", ""),
+                ),
+                tp_allocations=automatic_tp_allocations(
+                    len(parsed.targets),
+                    preferences.get("signal_auto_tp_distribution", "EARLY"),
+                    preferences.get("signal_auto_tp_custom_percentages", ""),
+                ),
             )
         except ValueError as exc:
             reasons.append(Reason("D_PLAN", DONNEES, f"Plan refusé à ce budget : {exc}"))
@@ -320,9 +359,9 @@ class AutomaticSignalExecutor:
         if parsed.is_csi:
             payload["signal_validation_status"] = parsed.validation_status
         payload = self.inbox.freeze(self.scope, signal_id, payload)
-        return self._enqueue(row, payload, parsed, now, label, request_key)
+        return self._enqueue(row, payload, parsed, now, label, request_key, csi_detail=csi_detail)
 
-    def _enqueue(self, row, payload, parsed, now, label, request_key):
+    def _enqueue(self, row, payload, parsed, now, label, request_key, *, csi_detail=""):
         signal_id = row["id"]
         command = self.commands.enqueue(
             self.scope, "SUBMIT_POSITION", payload,
@@ -334,7 +373,8 @@ class AutomaticSignalExecutor:
         self.inbox.set_auto_state(self.scope, signal_id, "QUEUED", detail)
         self.events.append(
             EventType.SIGNAL_AUTO_QUEUED,
-            f"{label} envoyé automatiquement au worker : {parsed.symbol}",
+            f"{label} envoyé automatiquement au worker : {parsed.symbol}"
+            + (f" · {csi_detail}" if csi_detail else ""),
             position_id=position["position_id"], symbol=parsed.symbol,
             signal_id=signal_id, command_id=command["id"],
         )
@@ -411,3 +451,24 @@ class AutomaticSignalExecutor:
             last_processed_at=now,
         )
         return "REJECTED"
+
+    def _csi_gate(self, row, preferences):
+        """(exécution automatique permise, détail) selon l'avis de CSI et le réglage GatePolicy.
+
+        L'avis est conservé dans la boîte de réception pour la page Signaux. Toute panne de CSI
+        est convertie en décision (retenir par défaut) : jamais une exception qui tuerait la boucle.
+        """
+        policy = GatePolicy.from_mapping(preferences)
+        if not policy.enabled:
+            return policy.decide(None)
+        opinion, failure = None, "aucun client CSI configuré"
+        if self.csi_client is not None:
+            try:
+                opinion = self.csi_client.evaluate(row["raw"], source=source_label(row, preferences))
+            except CsiUnavailable as exc:
+                failure = str(exc)
+            except Exception as exc:  # noqa: BLE001 - CSI ne doit jamais arrêter le worker
+                failure = f"erreur inattendue ({exc.__class__.__name__})"
+        if opinion is not None:
+            self.inbox.set_csi_opinion(self.scope, row["id"], opinion.verdict, opinion.summary, opinion.evaluated_at)
+        return policy.decide(opinion, failure=failure)

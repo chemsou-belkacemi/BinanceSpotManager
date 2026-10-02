@@ -31,6 +31,7 @@ import math
 import re
 from typing import Any, Iterable, Mapping
 
+from .candle_stop import kline_interval
 from .investment_plan import InvestmentPreview, investment_risk_context
 from .models import EntryStatus, Position, SLStatus
 from .risk_engine import RiskEngine, RiskLimits
@@ -323,6 +324,11 @@ def base_asset(symbol: str) -> str:
     return symbol
 
 
+def unknown_candle_stop(timeframe: Any) -> bool:
+    """SL « à la clôture » d'une bougie que le worker ne sait pas surveiller."""
+    return bool(timeframe) and not kline_interval(str(timeframe))
+
+
 def confidence_reasons(row: Mapping[str, Any], policy: RoutingPolicy, *, now: float,
                        run_mode: str | None) -> list[Reason]:
     """Motifs de confiance déclarée ; aucun appel réseau."""
@@ -373,10 +379,12 @@ def confidence_reasons(row: Mapping[str, Any], policy: RoutingPolicy, *, now: fl
             reasons.append(Reason("C_UNIVERSE", CONFIANCE,
                                   f"Actif {asset or '?'} hors de la liste validée pour l'automatique "
                                   "(univers à valider par le propriétaire)"))
-    if parsed.get("stop_timeframe") and not policy.touch_stop:
+    if unknown_candle_stop(parsed.get("stop_timeframe")) and not policy.touch_stop:
+        # Une bougie connue (15m, 1h, 4h…) est surveillée par le worker (candle_stop) ;
+        # seule une bougie inconnue reste sans exécution possible hors interprétation au toucher.
         reasons.append(Reason("C_SL_CANDLE", CONFIANCE,
-                              f"SL sur clôture de bougie ({parsed.get('stop_timeframe')}) sans autorisation "
-                              "d'interprétation au toucher"))
+                              f"SL sur clôture de bougie inconnue ({parsed.get('stop_timeframe')}) sans "
+                              "autorisation d'interprétation au toucher"))
     return reasons
 
 

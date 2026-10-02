@@ -16,9 +16,16 @@ x-app: &app
       required: false
   environment:
     BSM_WORKER_SUPERVISOR: docker
+    # Avis CSI : API locale de CryptoSignalIntelligence (lecture et evaluation seulement),
+    # jointe par le reseau partage csi-bridge. Le jeton facultatif vient de .env.
+    BSM_CSI_API_URL: ${BSM_CSI_API_URL:-http://csi-api:8503}
+    CSI_API_TOKEN: ${CSI_API_TOKEN:-}
   volumes:
     - bsm-data:/app/data
     - bsm-logs:/app/logs
+  networks:
+    - default
+    - csi-bridge
   restart: unless-stopped
 
 services:
@@ -46,6 +53,27 @@ services:
       start_period: 30s
       retries: 3
 
+  # Acces public (optionnel, COMPOSE_PROFILES=public dans .env) : HTTPS + mot de passe.
+  # Seule entree publique : l'interface reste liee a 127.0.0.1. Aucune cle Binance ici.
+  proxy:
+    image: caddy:2-alpine
+    profiles: ["public"]
+    init: true
+    depends_on: [ui]
+    entrypoint: ["sh", "/etc/caddy/deploy/proxy-entrypoint.sh"]
+    environment:
+      BSM_PUBLIC_HOST: ${BSM_PUBLIC_HOST:-}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      # Dossier entier (pas les fichiers) : make user-add remplace users.caddy et recharge.
+      - ./deploy:/etc/caddy/deploy:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+
   # Outils ponctuels (make test) : aucun volume, aucun secret.
   test:
     build: .
@@ -70,3 +98,15 @@ volumes:
   # n'ecrit que dans signal_drop/incoming/ ; le worker cree l'arborescence.
   bsm-data:
   bsm-logs:
+  # Certificats HTTPS : a conserver, sinon Let's Encrypt en reemet (limites de frequence).
+  caddy-data:
+  caddy-config:
+
+networks:
+  default: {}
+  # Reseau partage avec CryptoSignalIntelligence, cree une fois par `make network`
+  # (ou `docker network create csi-bridge`) ; aucun des deux projets ne le supprime.
+  # Les services test et integration ne le rejoignent pas : ils tournent sans CSI.
+  csi-bridge:
+    name: csi-bridge
+    external: true

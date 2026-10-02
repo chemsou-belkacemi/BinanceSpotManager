@@ -1,13 +1,23 @@
 """Offline parser, durable deduplication and preparation safety tests."""
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import json
 from types import SimpleNamespace
 
 import pytest
 
-from binance_spot_manager.signal_parser import parse_signal
+from binance_spot_manager.models import Position, SLRuleAfterTP
+from binance_spot_manager.position_engine import apply_tp_sl_rule
+from binance_spot_manager.signal_parser import content_hash, parse_signal
 from binance_spot_manager.signal_inbox import SignalInbox
-from binance_spot_manager.signal_plan import prepare_signal
+from binance_spot_manager.signal_plan import (
+    automatic_entry_allocations,
+    automatic_signal_selection,
+    automatic_tp_allocations,
+    custom_signal_allocations,
+    prepare_signal,
+    trailing_stop_rules,
+)
 from binance_spot_manager.telegram_signals import (
     TelegramSignalPoller,
     chat_allowlist,
@@ -105,6 +115,45 @@ def test_reanalysis_refreshes_old_parser_errors_without_creating_new_signal(tmp_
         inbox.reanalyse("demo", row["id"])
 
 
+def test_importing_the_same_text_again_refreshes_a_stale_analysis_but_never_a_frozen_one(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    row = inbox.receive("demo", GALA)
+    stale = dict(row["parsed"], entries=[], errors=["Objectif ambigu (ancien parseur)."])
+    with inbox.connect() as db, db:
+        db.execute("UPDATE signals SET parsed=? WHERE id=?", (json.dumps(stale), row["id"]))
+    again = inbox.receive("demo", GALA)
+    assert again["id"] == row["id"] and len(inbox.recent("demo")) == 1
+    assert again["parsed"]["errors"] == [] and again["parsed"]["entries"] == [.002116]
+
+    inbox.freeze("demo", row["id"], {"plan": 1})
+    with inbox.connect() as db, db:
+        db.execute("UPDATE signals SET parsed=? WHERE id=?", (json.dumps(stale), row["id"]))
+    assert inbox.receive("demo", GALA)["parsed"]["errors"] == stale["errors"]
+
+    edited = inbox.receive("demo", BICO, source="telegram", external_id="chat:9", edited=True)
+    assert inbox.receive("demo", BICO)["parsed"]["errors"] == edited["parsed"]["errors"] != []
+
+
+def test_signals_refused_by_an_older_parser_are_re_read_without_reopening_automation(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    stale = {"errors": ["Objectif ambigu (ancien parseur)."], "entries": []}
+    refused = inbox.receive("demo", GALA, source="telegram", external_id="chat:1", source_timestamp=1000)
+    inbox.set_auto_state("demo", refused["id"], "REJECTED", "ancien refus")
+    confirmed = inbox.receive("demo", ARK)
+    inbox.freeze("demo", confirmed["id"], {"plan": 1})
+    edited = inbox.receive("demo", BICO, source="telegram", external_id="chat:2", edited=True)
+    with inbox.connect() as db, db:
+        for row in (refused, confirmed):
+            db.execute("UPDATE signals SET parsed=? WHERE id=?", (json.dumps(dict(row["parsed"], **stale)), row["id"]))
+
+    assert inbox.refresh_refused("demo") == 1
+    assert inbox.refresh_refused("other") == 0
+    rows = {row["id"]: row for row in inbox.recent("demo")}
+    assert rows[refused["id"]]["parsed"]["errors"] == [] and rows[refused["id"]]["auto_state"] == "REJECTED"
+    assert rows[confirmed["id"]]["parsed"]["errors"] == stale["errors"]
+    assert rows[edited["id"]]["parsed"]["errors"] == edited["parsed"]["errors"] != []
+
+
 def test_reanalysis_preserves_source_edit_blocks_and_account_scope(tmp_path):
     inbox = SignalInbox(tmp_path / "signals.db")
     row = inbox.receive("demo", GALA, source="telegram", external_id="chat:1", edited=True)
@@ -128,6 +177,66 @@ def test_three_supported_examples(text, symbol, entries, targets, stop, timefram
     assert result.targets == targets
     assert result.stop == stop
     assert result.stop_timeframe == timeframe
+
+
+ABO_YASEEIN = """ABO YASEEIN
+──────────────────────
+✨ بسم الله توكلت على الله ✨
+──────────────────────
+💎 PAIR: MOVR/USDT
+🔶 ENTRY ZONE:
+✨ENTRY 1: 1.135
+✨ENTRY 2: 1.11861
+──────────────────────
+🎯 TARGETS:
+1️⃣ T1: 1.15602 📉 (1.35%)
+──────────────────────
+2️⃣ T2: 1.17221 📉 (2.77%)
+──────────────────────
+3️⃣ T3: 1.338 📉 (17.31%)
+──────────────────────
+🛑 SL: 1.1092 (30m) (1.81%)
+──────────────────────
+📅Date: Tuesday - 2026-09-29
+
+🟠 Platform: Binance
+──────────────────────
+☪️ الحكم الشرعي: مباح ✅"""
+HARMONIC = """📈 HARMONIC TRADE DETECTED
+Suhaib AlMashhadani Harmonic Indicator
+──────────────────────
+💎 PAIR: SAGA/USDT
+🔶 ENTRY ZONE:
+✨ENTRY 1 ✅: 0.02542
+✨ENTRY 2 ✅: 0.024803
+──────────────────────
+🎯 TARGETS:
+1️⃣ T1: 0.025907 📉 (1.92%)
+──────────────────────
+2️⃣ T2: 0.026407 📉 (3.88%)
+──────────────────────
+🛑 SL: 0.02446 (15m) (2.59%)
+──────────────────────
+📅Date: Wednesday - 2026-09-30
+⏰IndicatorTime :- 23:44 GMT+3
+──────────────────────
+🟠 Platform: Binance"""
+
+
+@pytest.mark.parametrize("text,symbol,entries,targets,stop,timeframe", [
+    (ABO_YASEEIN, "MOVRUSDT", [1.135, 1.11861], [1.15602, 1.17221, 1.338], 1.1092, "30m"),
+    (HARMONIC, "SAGAUSDT", [.02542, .024803], [.025907, .026407], .02446, "15m"),
+])
+def test_decorative_emoji_between_label_price_and_percentage_are_ignored(text, symbol, entries, targets, stop, timeframe):
+    result = parse_signal(text)
+    assert result.errors == []
+    assert (result.symbol, result.entries, result.targets) == (symbol, entries, targets)
+    assert (result.stop, result.stop_timeframe) == (stop, timeframe)
+
+
+def test_emoji_never_joins_two_numbers_and_does_not_change_the_dedup_hash():
+    assert parse_signal(SIMPLE.replace("90000", "90📉000")).errors
+    assert content_hash(ABO_YASEEIN) != content_hash(ABO_YASEEIN.replace(" 📉", ""))
 
 
 @pytest.mark.parametrize("text,reason", [
@@ -159,6 +268,37 @@ def test_dates_quotes_and_forced_template():
     assert not parse_signal(SIMPLE.replace("USDT", "USDC")).errors
     assert parse_signal(BICO, "abk").errors
     assert parse_signal(BICO, "structured").errors == []
+
+
+def test_missing_embedded_date_warning_is_ignored_only_for_telegram(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    manual = inbox.receive("manual", SIMPLE)
+    telegram = inbox.receive(
+        "telegram", SIMPLE, source="telegram", external_id="99:1",
+        source_timestamp=1_790_763_600,
+    )
+
+    assert any("Date source non vérifiable" in warning for warning in manual["parsed"]["warnings"])
+    assert not any("Date source non vérifiable" in warning for warning in telegram["parsed"]["warnings"])
+
+
+def test_old_stored_telegram_warning_is_hidden_when_decoded(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    row = inbox.receive(
+        "demo", SIMPLE, source="telegram", external_id="99:2",
+        source_timestamp=1_790_763_600,
+    )
+    with inbox.connect() as db, db:
+        parsed = json.loads(db.execute(
+            "SELECT parsed FROM signals WHERE id=?", (row["id"],),
+        ).fetchone()[0])
+        parsed["warnings"].append(
+            "Date source non vérifiable : contrôler manuellement la validité du signal."
+        )
+        db.execute("UPDATE signals SET parsed=? WHERE id=?", (json.dumps(parsed), row["id"]))
+
+    saved = inbox.recent("demo")[0]
+    assert not any("Date source non vérifiable" in warning for warning in saved["parsed"]["warnings"])
 
 
 def test_deduplication_and_immutable_confirmation(tmp_path):
@@ -202,6 +342,45 @@ def test_preparation_preserves_levels_and_converts_remaining_percentages(rules):
     assert position["entries"][0]["signal_id"] == "test"
 
 
+def test_automatic_selection_and_tp_allocations_do_not_mutate_parsed_signal(rules):
+    text = SIMPLE.replace(
+        "ENTRY 1: 84000",
+        "ENTRY 1: 84000\nENTRY 2: 83000",
+    ).replace(
+        "T1: 90000",
+        "T1: 90000\nT2: 95000\nT3: 100000",
+    )
+    parsed = parse_signal(text)
+    selected = automatic_signal_selection(parsed, entry_count=1, tp_count=2)
+    assert selected.entries == [84000]
+    assert selected.targets == [90000, 95000]
+    assert parsed.entries == [84000, 83000]
+    assert parsed.targets == [90000, 95000, 100000]
+    assert automatic_tp_allocations(1) == [100]
+    assert automatic_tp_allocations(2) == [70, 30]
+    assert automatic_tp_allocations(3) == [50, 30, 20]
+    assert automatic_tp_allocations(2, "EQUAL") == [50, 50]
+    assert automatic_entry_allocations(2, "CUSTOM", "30;70") == [30, 70]
+    assert automatic_tp_allocations(3, "CUSTOM", "50/30/20") == [50, 30, 20]
+    assert custom_signal_allocations("33,3;66,7", 2, "entrées") == [33.3, 66.7]
+
+    _, payload = prepare_signal(
+        selected, rules, budget=200, available_quote=1000,
+        reserve_percent=20, current_price=84500, signal_id="policy",
+        validity_confirmed=True, touch_stop=True,
+        tp_allocations=automatic_tp_allocations(2),
+    )
+    assert [tp["sell_percent"] for tp in payload["position"]["take_profits"]] == pytest.approx([70, 100])
+
+
+@pytest.mark.parametrize("raw,count", [
+    ("70;20", 2), ("70;30", 3), ("70;-30;60", 3), ("abc;30", 2),
+])
+def test_custom_allocations_are_strictly_validated(raw, count):
+    with pytest.raises(ValueError):
+        custom_signal_allocations(raw, count, "TP")
+
+
 @pytest.mark.parametrize("overrides", [
     {"validity_confirmed": False}, {"budget": 0}, {"budget": float("nan")},
     {"budget": 1}, {"current_price": 90000}, {"current_price": 79999},
@@ -211,9 +390,52 @@ def test_preparation_blocks_unsafe_inputs(rules, overrides):
         prepare(SIMPLE, rules, **overrides)
 
 
-def test_conditional_stop_requires_explicit_interpretation(rules):
+FIVE_TP = SIMPLE.replace("ENTRY 1: 84000", "ENTRY 1: 84000\nENTRY 2: 83000").replace(
+    "T1: 90000", "T1: 90000\nT2: 95000\nT3: 100000\nT4: 105000\nT5: 110000")
+
+
+def stops_after_each_tp(payload):
+    """SL price the worker sets after each TP, in order (apply_tp_sl_rule, as automation does)."""
+    position = Position.model_validate(payload["position"])
+    stops = []
+    for tp in position.take_profits:
+        position.stop_loss.resolved_price = apply_tp_sl_rule(position, tp)
+        stops.append(position.stop_loss.resolved_price)
+    return stops
+
+
+def test_signal_stop_trails_by_default_entry_1_after_tp1_then_two_targets_behind(rules):
+    _, payload = prepare(FIVE_TP, rules)
+    assert stops_after_each_tp(payload) == [84000, 84000, 90000, 95000, 100000]
+    assert trailing_stop_rules([84000], [90000]) == [(SLRuleAfterTP.FIXED_PRICE, 84000)]
+
+
+def test_signal_stop_stays_where_the_signal_put_it_when_trailing_is_off(rules):
+    _, payload = prepare(FIVE_TP, rules, trail_stop=False)
+    assert all(tp["sl_rule_after_hit"] == "NO_CHANGE" for tp in payload["position"]["take_profits"])
+    assert stops_after_each_tp(payload) == [80000] * 5
+    # Off : un SL de clôture reste un SL de clôture, au même prix, pendant tout le trade.
+    _, payload = prepare(FIVE_TP.replace("SL: 80000", "SL: 80000 (15min)"), rules, touch_stop=False, trail_stop=False)
+    stop = payload["position"]["stop_loss"]
+    assert (stop["trigger"], stop["candle_interval"], stop["resolved_price"]) == ("CANDLE_CLOSE", "15m", 80000)
+    assert all(tp["sl_rule_after_hit"] == "NO_CHANGE" for tp in payload["position"]["take_profits"])
+
+
+@pytest.mark.parametrize("stop_text,trigger,interval", [
+    ("SL: 80000 (1h)", "CANDLE_CLOSE", "1h"), ("SL: 80000 (4H close)", "CANDLE_CLOSE", "4h"),
+    ("SL: 80000 daily close", "CANDLE_CLOSE", "1d"), ("SL: 80000", "TOUCH", ""),
+])
+def test_timed_stop_waits_for_its_candle_close_by_default(rules, stop_text, trigger, interval):
+    _, payload = prepare(SIMPLE.replace("SL: 80000", stop_text), rules, touch_stop=False)
+    stop = payload["position"]["stop_loss"]
+    assert (stop["trigger"], stop["candle_interval"]) == (trigger, interval)
+
+
+def test_conditional_stop_requires_explicit_interpretation_only_for_an_unknown_candle(rules):
     with pytest.raises(ValueError, match="SL conditionnel"):
-        prepare(SIMPLE.replace("SL: 80000", "SL: 80000 (1h)"), rules, touch_stop=False)
+        prepare(SIMPLE.replace("SL: 80000", "SL: 80000 on candle close"), rules, touch_stop=False)
+    _, payload = prepare(SIMPLE.replace("SL: 80000", "SL: 80000 (1h)"), rules, touch_stop=True)
+    assert payload["position"]["stop_loss"]["trigger"] == "TOUCH"
 
 
 def test_telegram_allowlist_offset_and_edits(tmp_path):

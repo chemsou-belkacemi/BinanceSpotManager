@@ -301,6 +301,18 @@ class BinanceSpotClient:
         symbols = info.get("symbols") or []
         return symbols[0] if symbols else None
 
+    def get_klines(
+        self, symbol: str, interval: str, *, start_time: Optional[int] = None, limit: int = 500
+    ) -> list[list[Any]]:
+        """Bougies publiques, la plus ancienne d'abord ; la derniere est souvent encore ouverte."""
+        params = {"symbol": symbol.upper(), "interval": interval, "limit": max(1, min(int(limit), 1000))}
+        if start_time is not None:
+            params["startTime"] = int(start_time)
+        data = self._request("GET", "/api/v3/klines", params=params)
+        if not isinstance(data, list):
+            raise BinanceError("Bougies Binance invalides", endpoint="/api/v3/klines")
+        return data
+
     def get_price(self, symbol: str) -> float:
         data = self._request(
             "GET", "/api/v3/ticker/price", params={"symbol": symbol.upper()}
