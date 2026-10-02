@@ -1,6 +1,6 @@
 """Alertes locales de protection : aucune requete Binance ni mutation."""
 
-from .models import Position, SLStatus, SyncStatus
+from .models import Position, SLStatus, SLTrigger, SyncStatus
 from datetime import datetime, timezone
 
 
@@ -24,6 +24,8 @@ def protection_overview(positions, report=None, *, now=None):
             state = "En attente d'achat"
         elif p.oco_exit is None and p.stop_loss.status is SLStatus.NONE:
             state = "Sans SL volontairement"
+        elif candle_stop(p) and not issues:
+            state = f"SL à la clôture {p.stop_loss.candle_interval} (surveillé par le worker)"
         elif fresh and checks and all(r["Resultat"] == "OK" for r in checks) and any("SL" in r["Sortie"] for r in checks) and not issues:
             state = "Sorties verifiees sur Binance (instantane)"
         elif issues:
@@ -34,6 +36,13 @@ def protection_overview(positions, report=None, *, now=None):
                      "Automatisation": "En pause" if p.automation.paused else "Active",
                      "Detail": " ; ".join(issue["message"] for issue in issues)})
     return rows
+
+
+def candle_stop(position: Position) -> bool:
+    """SL a la cloture de bougie : aucun ordre Binance par conception, le worker le surveille."""
+    sl = position.stop_loss
+    return (sl.trigger is SLTrigger.CANDLE_CLOSE and sl.status is not SLStatus.NONE
+            and not sl.order_id and not sl.client_order_id)
 
 
 def protection_alerts(positions: list[Position]) -> list[dict]:
@@ -56,6 +65,8 @@ def protection_alerts(positions: list[Position]) -> list[dict]:
             if oco.missing_branch_alerted:
                 issues.append("Une branche OCO n'a pas été retrouvée lors du dernier contrôle")
                 critical = True
+        elif candle_stop(position):
+            pass  # protection assuree par le worker (cloture de bougie), pas par un ordre Binance
         elif position.stop_loss.status is not SLStatus.ACTIVE:
             issues.append("Aucun SL actif enregistré — cela peut être volontaire pour un TP seul")
         elif not position.stop_loss.order_id and not position.stop_loss.client_order_id:

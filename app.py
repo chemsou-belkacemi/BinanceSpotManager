@@ -43,17 +43,48 @@ sidebar_status(settings)
 
 st.markdown(
     """
-Ouvre une page dans le menu de gauche.
+### Par où commencer
 
-**New Trade** construit une position complète (Entries, TP, SL) avec simulation
-avant lancement. **Investissement** permet un achat simple sans sortie ou un
-achat avec TP seul / SL seul. **Dashboard** suit le worker, le portefeuille
-multidevise et les ordres réels. **Positions** détaille chaque position,
-**History** conserve les positions terminées, **Settings** regroupe les réglages.
-**Signaux** analyse un texte collé ou importé de Telegram, puis prépare un plan
-Demo à confirmer avant transmission au worker.
+1. **CSI** : colle un signal et clique sur *Vérifier* pour avoir l'avis de CSI en une phrase.
+   Tu y vois aussi les signaux que CSI a trouvés lui-même, avec un bouton *Tester en Demo*.
+2. **Signaux** : pour exécuter un signal sur Binance Demo (budget, simulation, confirmation).
+3. **Dashboard** et **Positions** : suivre ce qui tourne.
+
+Les autres pages : **New Trade** (position construite à la main), **Investissement** (achat simple),
+**History** (positions terminées), **Operations** (demandes envoyées au worker), **Settings** (réglages).
 """
 )
+
+with st.expander("Comment ça marche (2 minutes de lecture)"):
+    st.markdown(
+        """
+**Deux programmes travaillent ensemble.**
+
+- **CSI** (le cerveau) analyse les marchés toutes les 15 minutes et vérifie les signaux qu'on lui donne.
+  Il ne passe **jamais** d'ordre.
+- **Ce bot** (les mains) passe les ordres sur **Binance Demo** uniquement : entrée, stop, objectifs,
+  stop remonté après un objectif.
+
+**Vérifier un signal Telegram** : page **CSI** → coller → *Vérifier*. Réponses possibles :
+*Ne pas prendre* (signal invalide ou dépassé), *Déconseillé* (ce type de trade a perdu en moyenne),
+*Pas d'avis clair* (le passé ne permet pas de conclure, ce n'est pas du 50/50), *Plutôt bon*
+(ce type de trade a gagné en moyenne, sans garantie). Une paire inconnue de CSI est ajoutée :
+redemande l'avis quelques minutes plus tard.
+
+**Signaux reçus automatiquement par Telegram** : si l'exécution automatique est activée
+(Settings → Signaux), CSI donne son avis avant l'ordre. Un avis défavorable **retient** le signal :
+il attend ta confirmation sur la page **Signaux**. CSI ne peut jamais envoyer un ordre tout seul.
+
+**Signaux trouvés par CSI** : affichés sur la page CSI avec le bouton *Tester en Demo*. Les stratégies
+de CSI ne sont **pas validées** (elles perdent en moyenne sur 5 ans) : c'est pour observer et tester.
+
+**Chaque groupe Telegram** est suivi : au bout de 20 signaux résolus, CSI dit s'il fait mieux que le
+hasard (page CSI → Détails).
+
+**Démarrer tout d'un coup** (PowerShell, dossier CryptoSignalIntelligence) :
+`.\\scripts\\demarrer.ps1`. Si le PC se met en veille, tout s'arrête ; tout repart au réveil.
+"""
+    )
 
 col1, col2 = st.columns(2)
 

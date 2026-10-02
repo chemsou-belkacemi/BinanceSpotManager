@@ -10,11 +10,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from binance_spot_manager import csi_client
+from binance_spot_manager.candle_stop import kline_interval
 from binance_spot_manager.command_store import account_scope
 from binance_spot_manager.config import get_settings
 from binance_spot_manager.signal_inbox import SignalInbox
 from binance_spot_manager.signal_parser import ParsedSignal, TEMPLATES, parse_signal
-from binance_spot_manager.signal_plan import prepare_signal, signal_sl_after_tp
+from binance_spot_manager.signal_plan import TRAIL_STOP_KEY, prepare_signal, signal_sl_after_tp
 from binance_spot_manager.signal_sizing import (
     SignalSizingPolicy,
     suggest_signal_budget_from_account,
@@ -91,6 +93,10 @@ if preferences.get("signal_drop_enabled", False):
     if drop_diagnostics.get("last_error"):
         st.error(drop_diagnostics["last_error"])
 
+# Once per session (a new version restarts sessions): signals refused by an older parser are re-read.
+if not st.session_state.get("signals_refreshed"):
+    inbox.refresh_refused(scope)
+    st.session_state["signals_refreshed"] = True
 rows = inbox.recent(scope)
 if not rows:
     st.caption("Aucun signal reçu pour ce compte Demo.")
@@ -113,12 +119,19 @@ if row["payload"] is None and st.button("Réanalyser ce signal", help="Reprendre
     except ValueError as exc:
         st.error(str(exc))
 parsed = ParsedSignal(**row["parsed"])
+source_date_label = "Date source (UTC)"
+source_date = parsed.published_at or "non vérifiée"
+if row.get("source") == "telegram" and float(row.get("source_timestamp") or 0) > 0:
+    source_date_label = "Date Telegram (UTC)"
+    source_date = datetime.fromtimestamp(
+        float(row["source_timestamp"]), tz=timezone.utc,
+    ).isoformat()
 with st.expander("Texte original"):
     st.text(row["raw"])
 st.write(f"Modèle : {TEMPLATES.get(parsed.template, parsed.template)} · Direction : {parsed.direction or 'inconnue'} · Plateforme : {parsed.exchange or 'non précisée'}")
 st.write({"Paire": parsed.symbol, "Entrées": parsed.entries, "TP": parsed.targets,
           "SL": parsed.stop, "Mention SL": parsed.stop_timeframe or "aucune",
-          "Date source (UTC)": parsed.published_at or "non vérifiée"})
+          source_date_label: source_date})
 if parsed.is_csi:
     # Contrat CSI : la fenêtre et l'écart sont recontrôlés par le worker avant l'achat.
     def _utc(stamp):
@@ -138,6 +151,41 @@ for error in parsed.errors:
     st.error(error)
 if parsed.errors:
     st.stop()
+
+with st.container(border=True):
+    st.markdown(
+        "**Avis de CSI** — analyse indépendante (vetos, taux de base historique de la même géométrie, "
+        "bilan du groupe). Un avis ne crée aucun ordre : il peut seulement retenir une exécution automatique."
+    )
+    if row.get("csi_verdict"):
+        st.markdown(
+            f"{csi_client.VERDICT_ICONS.get(row['csi_verdict'], '')} "
+            f"**{csi_client.verdict_label(row['csi_verdict'])}** · {row.get('csi_evaluated_at') or ''}"
+        )
+        st.write(row.get("csi_detail") or "")
+    else:
+        st.caption("Pas encore d'avis CSI pour ce signal.")
+    if st.button(
+        "Actualiser l'avis de CSI" if row.get("csi_verdict") else "Demander l'avis de CSI",
+        key=f"csi_{selected}", icon=":material/psychology:",
+    ):
+        try:
+            # Signal collé à la main = validé par le propriétaire (sa paire peut être ajoutée chez CSI) ;
+            # signal reçu par Telegram = non validé : CSI n'ajoute rien.
+            opinion = csi_client.CsiClient.from_env().evaluate(
+                row["raw"], source=csi_client.source_label(row, preferences),
+                user_validated=row.get("source") != "telegram",
+            )
+            inbox.set_csi_opinion(scope, selected, opinion.verdict, opinion.summary, opinion.evaluated_at)
+            st.rerun()
+        except csi_client.CsiUnavailable as exc:
+            st.warning(f"Avis CSI indisponible : {exc}")
+        except ValueError as exc:
+            st.warning(str(exc))
+    st.caption(
+        "Un taux de base historique n'est pas la probabilité que ce signal réussisse. Détail : page CSI. "
+        "Paire hors univers sur un signal Telegram : le coller sur la page CSI vaut validation de la paire."
+    )
 
 if row["payload"]:
     st.info("Ce signal a déjà été confirmé. Il ne peut pas créer une seconde demande.")
@@ -215,10 +263,25 @@ if sizing_suggestion:
 if sizing_warning:
     st.warning(sizing_warning)
 validity = st.checkbox("J'ai vérifié la date source et ce signal est encore valable maintenant", key=f"valid_{selected}")
-touch = st.checkbox(f"Je choisis un stop au prix {parsed.stop}, sans attendre une clôture {parsed.stop_timeframe}",
-                    key=f"touch_{selected}") if parsed.stop_timeframe else True
-signature = (scope, selected, budget, validity, touch)
-if st.button("Vérifier sur Binance Demo et simuler", disabled=not (budget > 0 and validity and touch)):
+candle = kline_interval(parsed.stop_timeframe) if parsed.stop_timeframe else None
+if not parsed.stop_timeframe:
+    touch, stop_ready = True, True
+elif candle:
+    stop_choice = st.radio(
+        "Déclenchement du SL",
+        [f"À la clôture d'une bougie {candle}, comme le signal (surveillée par le worker)",
+         f"Stop au prix : dès que le prix touche {parsed.stop}"],
+        key=f"stop_mode_{selected}",
+    )
+    touch, stop_ready = stop_choice.startswith("Stop au prix"), True
+else:
+    touch = st.checkbox(f"Je choisis un stop au prix {parsed.stop} (clôture « {parsed.stop_timeframe} » non reconnue)",
+                        key=f"touch_{selected}")
+    stop_ready = touch
+trail_stop = bool(preferences.get(TRAIL_STOP_KEY, True))
+sl_after_tp = signal_sl_after_tp(preferences.get("signal_sl_after_tp"))
+signature = (scope, selected, budget, validity, touch, trail_stop, sl_after_tp)
+if st.button("Vérifier sur Binance Demo et simuler", disabled=not (budget > 0 and validity and stop_ready)):
     st.session_state.pop("signal_preview", None)
     try:
         rules, error = load_rules(parsed.symbol)
@@ -230,8 +293,8 @@ if st.button("Vérifier sur Binance Demo et simuler", disabled=not (budget > 0 a
             available_quote=float(balances.get(rules.quote_asset, {}).get("free", 0)),
             reserve_percent=service.risk_limits().min_reserve_percent,
             current_price=current_price or 0, signal_id=selected, source=row["source"],
-            touch_stop=touch, validity_confirmed=validity,
-            sl_after_tp=signal_sl_after_tp(preferences.get("signal_sl_after_tp")))
+            touch_stop=touch, validity_confirmed=validity, trail_stop=trail_stop,
+            sl_after_tp=sl_after_tp)
         st.session_state["signal_preview"] = (signature, plan, payload)
     except Exception as exc:
         st.error(f"Simulation refusée : {exc}")
@@ -240,8 +303,21 @@ if preview and preview[0] == signature:
     _, plan, payload = preview
     st.dataframe([{"Entrée": entry.sequence, "Prix limite": entry.price, "Quantité": entry.qty,
                    "Montant": entry.notional} for entry in plan.entries], hide_index=True)
-    st.dataframe([{"TP": tp.sequence, "Prix": tp.target_price, "Part initiale (%)": tp.sell_percent}
+    st.dataframe([{"TP": tp.sequence, "Prix": tp.target_price, "Part initiale (%)": tp.sell_percent,
+                   "SL après ce TP": tp.sl_rule_value if tp.sl_rule_value else "inchangé"}
                   for tp in plan.take_profits], hide_index=True)
+    candle_interval = payload["position"]["stop_loss"].get("candle_interval")
+    if parsed.is_csi:
+        st.caption(f"Signal CSI : le SL après chaque TP suit la politique de sortie {parsed.exit_policy_id}.")
+    elif trail_stop:
+        st.caption("Suivi du SL activé (Settings → Signaux) : SL à l'Entry 1 après TP1, puis deux TP en arrière à partir de TP3"
+                   + (" ; le SL déplacé devient un stop au prix." if candle_interval else "."))
+    else:
+        st.caption(f"Suivi du SL désactivé : après un TP, le SL suit la règle « {sl_after_tp.value} » (Settings → Signaux).")
+    if candle_interval:
+        st.info(f"SL à la clôture {candle_interval} : aucun ordre stop sur Binance. Le worker vend au marché si une "
+                f"bougie {candle_interval} clôture à {plan.stop_loss.price} ou dessous ; la vente peut se faire sous le "
+                "SL, et la position n'est pas protégée si le worker est arrêté.")
     st.markdown(f"SL : {plan.stop_loss.price} · Perte théorique au SL hors frais/glissement : "
                 + colored_pnl(-abs(plan.loss_max_estimated), f"{-abs(plan.loss_max_estimated):.4f} {plan.quote_asset}"))
     st.caption("Simulation valable 120 secondes. Le worker recontrôle prix, solde, risque et frais avant tout achat. Une simulation valide peut encore être refusée.")
@@ -254,6 +330,9 @@ if preview and preview[0] == signature:
                 raise ValueError("Redémarrer le worker avant de confirmer un signal (nouveaux garde-fous).")
             if "independent_positions_v1" not in service.runtime().command_capabilities:
                 raise ValueError("Redémarrer le worker pour activer les positions indépendantes.")
+            if (payload["position"]["stop_loss"].get("trigger") == "CANDLE_CLOSE"
+                    and "candle_stop_v1" not in service.runtime().command_capabilities):
+                raise ValueError("Redémarrer le worker pour activer le SL à la clôture de bougie.")
             status = service.worker_status()
             if not status.running or status.heartbeat_age is None or status.heartbeat_age >= 20:
                 raise ValueError("Démarrer le worker avant de confirmer un signal.")

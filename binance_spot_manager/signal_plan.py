@@ -1,9 +1,12 @@
 """Convert a reviewed signal to the existing worker's guarded command protocol."""
+from dataclasses import replace
 from datetime import datetime, timezone
 import math
+import re
 import time
 
-from .models import OrderType, PriceMode, SLMode, SLRuleAfterTP, SignalSource
+from .candle_stop import kline_interval
+from .models import OrderType, PriceMode, SLMode, SLRuleAfterTP, SLTrigger, SignalSource
 from .position_engine import PositionEngine
 from .signal_parser import BSM_EXIT_POLICIES, BSM_EXIT_POLICY_HASHES, ParsedSignal
 from .strategy_engine import EntrySpec, SLSpec, StrategyEngine, StrategySpec, TPSpec
@@ -62,9 +65,105 @@ def tp_sell_percents(weights) -> list[float]:
     return percents
 
 
+def automatic_signal_selection(parsed: ParsedSignal, *, entry_count=1, tp_count=2):
+    """Apply the saved automatic-execution limits without mutating the inbox row."""
+    try:
+        entry_count = min(max(int(entry_count), 1), 20)
+    except (TypeError, ValueError):
+        entry_count = 1
+    try:
+        tp_count = min(max(int(tp_count), 1), 20)
+    except (TypeError, ValueError):
+        tp_count = 2
+    return replace(
+        parsed,
+        entries=list(parsed.entries[:entry_count]),
+        targets=list(parsed.targets[:tp_count]),
+        warnings=list(parsed.warnings),
+        errors=list(parsed.errors),
+    )
+
+
+def custom_signal_allocations(raw, count: int, label="niveaux") -> list[float]:
+    """Parse a user distribution such as ``70;30`` or ``50/30/20``."""
+    text = str(raw or "").strip()
+    if not text:
+        raise ValueError(f"Répartition personnalisée des {label} absente.")
+    decimal_comma = ";" in text or "/" in text
+    parts = re.split(r"[;/]", text) if decimal_comma else text.split(",")
+    try:
+        values = [
+            float(part.strip().rstrip("%").replace(",", ".") if decimal_comma
+                  else part.strip().rstrip("%"))
+            for part in parts
+        ]
+    except ValueError as exc:
+        raise ValueError(f"Répartition personnalisée des {label} invalide.") from exc
+    if len(values) != count:
+        raise ValueError(
+            f"La répartition des {label} doit contenir {count} pourcentage(s)."
+        )
+    if any(not math.isfinite(value) or value <= 0 for value in values):
+        raise ValueError(f"Chaque pourcentage des {label} doit être positif.")
+    if not math.isclose(sum(values), 100.0, abs_tol=0.01):
+        raise ValueError(f"La répartition des {label} doit totaliser 100 %.")
+    return values
+
+
+def automatic_entry_allocations(count: int, mode="EQUAL", custom="") -> list[float]:
+    """Return percentages of the signal budget allocated to selected entries."""
+    if count <= 0:
+        return []
+    if str(mode).upper() == "CUSTOM":
+        return custom_signal_allocations(custom, count, "entrées")
+    return [100.0 / count] * count
+
+
+def automatic_tp_allocations(count: int, mode="EARLY", custom="") -> list[float]:
+    """Return percentages of the initial position allocated to selected TP."""
+    if count <= 0:
+        return []
+    if str(mode).upper() == "CUSTOM":
+        return custom_signal_allocations(custom, count, "TP")
+    if str(mode).upper() == "EQUAL":
+        return [100.0 / count] * count
+    presets = {1: [100.0], 2: [70.0, 30.0], 3: [50.0, 30.0, 20.0]}
+    if count in presets:
+        return presets[count]
+    weights = list(range(count, 0, -1))
+    total = float(sum(weights))
+    return [100.0 * weight / total for weight in weights]
+
+
+TRAIL_STOP_KEY = "signal_trail_stop"
+
+
+def trailing_stop_rules(entries, targets, enabled=True):
+    """SL rule attached to each TP: after TP1 the SL moves to Entry 1, from TP3 it trails two
+    targets behind (TP3 → TP1, TP4 → TP2…); a moved candle-close SL becomes a price stop.
+    Disabled: the signal's stop never moves and keeps its mode (candle close stays candle close).
+
+    The rules are stored in the position when it is created, so a change of the setting only
+    affects new trades; open trades keep the behaviour they started with.
+    """
+    rules = []
+    for index in range(len(targets)):
+        if not enabled or index == 1:
+            rules.append((SLRuleAfterTP.NO_CHANGE, None))
+        elif index == 0:
+            rules.append((SLRuleAfterTP.FIXED_PRICE, entries[0]))
+        else:
+            rules.append((SLRuleAfterTP.FIXED_PRICE, targets[index - 2]))
+    return rules
+
+
 def prepare_signal(parsed: ParsedSignal, rules, *, budget, available_quote, reserve_percent,
-                   current_price, signal_id, source="manual", touch_stop=False, validity_confirmed=False,
-                   sl_after_tp=SLRuleAfterTP.NO_CHANGE):
+                   current_price, signal_id, source="manual", touch_stop=False,
+                   validity_confirmed=False, entry_allocations=None, tp_allocations=None,
+                   trail_stop=True, sl_after_tp=SLRuleAfterTP.NO_CHANGE):
+    """Stop après TP : signal CSI → règle de sa politique de sortie (contrat) ; signal texte → stop suiveur
+    (`trail_stop`, TP1 → entrée, TPk → TP(k−2)) s'il est activé, sinon la règle `sl_after_tp` appliquée à chaque TP
+    sauf le dernier (par défaut NO_CHANGE : le stop ne bouge pas)."""
     sl_after_tp = SLRuleAfterTP(sl_after_tp)
     if sl_after_tp not in SIGNAL_SL_AFTER_TP_RULES:
         raise ValueError("Règle de SL après TP non disponible pour les signaux.")
@@ -84,8 +183,15 @@ def prepare_signal(parsed: ParsedSignal, rules, *, budget, available_quote, rese
             raise ValueError("MAX_ENTRY_DEVIATION_BPS invalide.")
     if not validity_confirmed:
         raise ValueError("La validité et l'âge du signal doivent être vérifiés manuellement.")
+    # A timed SL waits for its candle close (no Binance stop order) unless a price stop is chosen.
+    candle_interval = ""
     if parsed.stop_timeframe and not touch_stop:
-        raise ValueError("SL conditionnel : confirmer explicitement un stop au prix, ou ne pas exécuter.")
+        candle_interval = kline_interval(parsed.stop_timeframe) or ""
+        if not candle_interval:
+            raise ValueError(
+                f"SL conditionnel « {parsed.stop_timeframe} » : bougie inconnue, choisir explicitement "
+                "un stop au prix, ou ne pas exécuter."
+            )
     if rules.symbol != parsed.symbol or not rules.is_trading or rules.quote_asset not in {"USDT", "USDC"}:
         raise ValueError("Paire Binance Demo incompatible")
     if not math.isfinite(budget) or budget <= 0 or not math.isfinite(current_price) or current_price <= 0:
@@ -97,24 +203,46 @@ def prepare_signal(parsed: ParsedSignal, rules, *, budget, available_quote, rese
         raise ValueError("Prix arrondis incohérents, SL ou premier TP déjà atteint.")
     if len(set(targets)) != len(targets):
         raise ValueError("Deux TP se confondent après arrondi Binance.")
-    # Parts initiales de chaque TP : TP_WEIGHTS du contrat CSI, sinon parts égales.
-    weights = [float(w) for w in parsed.tp_weights] if parsed.is_csi else []
-    if weights and (len(weights) != len(targets) or any(w <= 0 for w in weights)
-                    or abs(sum(weights) - 1) > 1e-9):
-        raise ValueError("TP_WEIGHTS incohérents avec les TP du signal.")
-    if not weights:
-        weights = [1 / len(targets)] * len(targets)
+    # Le dernier TP clôture la position : aucune règle de SL après lui.
+    uniform_rules = [(sl_after_tp if index < len(targets) - 1 else SLRuleAfterTP.NO_CHANGE, None)
+                     for index in range(len(targets))]
+    if parsed.is_csi:
+        # Contrat CSI : une seule entrée (vérifié plus haut), parts des TP = TP_WEIGHTS, règle de la politique,
+        # entrée valable jusqu'à ENTRY_EXPIRES_AT (posé plus bas), pas 24 h après la préparation.
+        weights = [float(w) for w in parsed.tp_weights]
+        if weights and (len(weights) != len(targets) or any(w <= 0 for w in weights)
+                        or abs(sum(weights) - 1) > 1e-9):
+            raise ValueError("TP_WEIGHTS incohérents avec les TP du signal.")
+        entry_allocations = [100.0 / len(entries)] * len(entries)
+        allocations = [w * 100 for w in weights] if weights else [100.0 / len(targets)] * len(targets)
+        stop_rules = uniform_rules
+        entry_expires_hours = None
+    else:
+        stop_rules = trailing_stop_rules(entries, targets, True) if trail_stop else uniform_rules
+        entry_expires_hours = 24
+        entry_allocations = list(entry_allocations or [100.0 / len(entries)] * len(entries))
+        allocations = list(tp_allocations or [100.0 / len(targets)] * len(targets))
+    if (len(entry_allocations) != len(entries) or any(
+            not math.isfinite(value) or value <= 0 for value in entry_allocations
+    ) or not math.isclose(sum(entry_allocations), 100.0, abs_tol=0.01)):
+        raise ValueError("La répartition des entrées doit contenir un pourcentage positif par entrée et totaliser 100 %.")
+    if (len(allocations) != len(targets) or any(
+            not math.isfinite(value) or value <= 0 for value in allocations
+    ) or not math.isclose(sum(allocations), 100.0, abs_tol=0.01)):
+        raise ValueError("La répartition des TP doit contenir un pourcentage positif par TP et totaliser 100 %.")
     spec = StrategySpec(
         symbol=parsed.symbol, capital_amount=budget, available_quote=available_quote,
         reserve_percent=reserve_percent, current_price=current_price,
-        # CSI : l'entrée expire à ENTRY_EXPIRES_AT (posé plus bas), pas 24 h après la préparation.
-        entries=[EntrySpec(order_type=OrderType.LIMIT, price_mode=PriceMode.FIXED_PRICE,
-                           price=p, capital_percent=100 / len(entries),
-                           expires_hours=None if parsed.is_csi else 24) for p in entries],
-        # Le dernier TP clôture la position : aucune règle de SL après lui.
-        take_profits=[TPSpec(price_mode=PriceMode.FIXED_PRICE, price=p, sell_percent=weights[index] * 100,
-                             sl_rule_after_hit=sl_after_tp if index < len(targets) - 1 else SLRuleAfterTP.NO_CHANGE)
-                      for index, p in enumerate(targets)],
+        entries=[
+            EntrySpec(order_type=OrderType.LIMIT, price_mode=PriceMode.FIXED_PRICE,
+                      price=price, capital_percent=allocation, expires_hours=entry_expires_hours)
+            for price, allocation in zip(entries, entry_allocations)
+        ],
+        take_profits=[
+            TPSpec(price_mode=PriceMode.FIXED_PRICE, price=price, sell_percent=allocation,
+                   sl_rule_after_hit=rule, sl_rule_value=value)
+            for price, allocation, (rule, value) in zip(targets, allocations, stop_rules)
+        ],
         stop_loss=SLSpec(mode=SLMode.FIXED_PRICE, value=stop),
         source=SignalSource(source), source_name=f"Signal {parsed.template}",
         cancel_remaining_entries_on_first_tp=True, tags=["signal", signal_id],
@@ -124,20 +252,29 @@ def prepare_signal(parsed: ParsedSignal, rules, *, budget, available_quote, rese
         raise ValueError(" ; ".join(plan.errors))
     # Check the smallest complete entry too, since TP1 may hit before other entries fill.
     # A partial fill or actual commissions may still reduce the sellable amount later.
-    # The smallest weight is the smallest slice that must remain sellable.
-    minimum_quantity = min(e.qty for e in plan.entries) * .99 * min(weights)
+    # The smallest TP slice is the smallest quantity that must remain sellable.
+    minimum_quantity = min(e.qty for e in plan.entries) * .99 * min(allocations) / 100.0
     for target in targets:
         errors = rules.validate_order(target, rules.round_qty(minimum_quantity, market=True), market=True)
         if errors:
             raise ValueError("Budget insuffisant pour les tranches TP (marge de quantité 1 %) : " + " ; ".join(errors))
     position = PositionEngine(rules).from_plan(plan, spec)
+    if candle_interval:
+        position.stop_loss.trigger = SLTrigger.CANDLE_CLOSE
+        position.stop_loss.candle_interval = candle_interval
     for group in position.source_groups:
         group.signal_id = signal_id
     for entry in position.entries:
         entry.signal_id = signal_id
-    # Existing engine applies each percentage to the REMAINING position, not the initial one.
-    for tp, percent in zip(position.take_profits, tp_sell_percents(weights)):
-        tp.sell_percent = percent
+    # Existing engine applies each percentage to the remaining position. Convert
+    # the user's initial-position allocation so the last selected TP closes it.
+    remaining_percent = 100.0
+    for index, (tp, allocation) in enumerate(zip(position.take_profits, allocations)):
+        tp.sell_percent = (
+            100.0 if index + 1 == len(allocations)
+            else min(100.0, allocation / remaining_percent * 100.0)
+        )
+        remaining_percent -= allocation
     payload = {"position": position.model_dump(mode="json"),
                "independent_position": True,
                "entry_ids": [e.entry_id for e in position.entries], "reference_price": current_price,

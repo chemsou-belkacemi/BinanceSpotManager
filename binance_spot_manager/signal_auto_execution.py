@@ -5,9 +5,17 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import time
 
+from .csi_client import CsiUnavailable, GatePolicy, source_label
 from .models import EventType
 from .signal_parser import ParsedSignal
-from .signal_plan import prepare_signal, signal_sl_after_tp
+from .signal_plan import (
+    TRAIL_STOP_KEY,
+    automatic_entry_allocations,
+    automatic_signal_selection,
+    automatic_tp_allocations,
+    prepare_signal,
+    signal_sl_after_tp,
+)
 from .signal_sizing import SignalSizingPolicy, suggest_signal_budget_from_account
 
 
@@ -41,7 +49,7 @@ class AutomaticSignalExecutor:
     """
 
     def __init__(self, scope, inbox, commands, client, rules_cache, risk_limits,
-                 preferences_loader, events, *, clock=time.time):
+                 preferences_loader, events, *, clock=time.time, csi_client=None):
         self.scope = scope
         self.inbox = inbox
         self.commands = commands
@@ -51,6 +59,9 @@ class AutomaticSignalExecutor:
         self.preferences_loader = preferences_loader
         self.events = events
         self.clock = clock
+        # Avis de CryptoSignalIntelligence (lecture et évaluation seulement) : il peut retenir
+        # un signal automatique, jamais l'envoyer. Absent = CSI considéré injoignable.
+        self.csi_client = csi_client
         self._diagnostics = {
             "state": "DISABLED",
             "queued_total": 0,
@@ -152,6 +163,7 @@ class AutomaticSignalExecutor:
             if row["parsed"].get("errors"):
                 raise ValueError("Signal non reconnu ou bloqué par le parseur")
             parsed = ParsedSignal(**row["parsed"])
+            csi_detail = ""
             if parsed.signal_version not in {1, 3}:
                 raise ValueError(f"Contrat CSI version {parsed.signal_version} retiré : aucune exécution")
             if parsed.is_csi:
@@ -173,11 +185,21 @@ class AutomaticSignalExecutor:
                 source_timestamp = float(row.get("source_timestamp") or 0)
                 if source_timestamp <= 0 or source_timestamp < now - max_age_minutes * 60:
                     raise ValueError(f"{MESSAGE_LABELS[source]} trop ancien pour une exécution automatique")
+                # Signal texte : entrées et TP retenus selon les réglages automatiques. Jamais pour un signal
+                # CSI, dont le contrat fixe l'entrée, les TP et leurs parts.
+                parsed = automatic_signal_selection(
+                    parsed,
+                    entry_count=preferences.get("signal_auto_entry_count", 1),
+                    tp_count=preferences.get("signal_auto_tp_count", 2),
+                )
             if row.get("payload"):
                 payload = row["payload"]
                 if float(payload.get("signal_confirmation_expires_at") or 0) <= now:
                     raise ValueError("Préparation automatique expirée avant sa mise en file")
             else:
+                allowed, csi_detail = self._csi_gate(row, preferences)
+                if not allowed:
+                    raise ValueError(csi_detail)
                 rules = self.rules_cache.get(parsed.symbol, refresh=True)
                 balances = self.client.get_balances()
                 prices = self.client.get_prices()
@@ -216,7 +238,18 @@ class AutomaticSignalExecutor:
                     source=source,
                     sl_after_tp=signal_sl_after_tp(preferences.get("signal_sl_after_tp")),
                     touch_stop=bool(preferences.get("signal_auto_touch_stop", False)),
+                    trail_stop=bool(preferences.get(TRAIL_STOP_KEY, True)),
                     validity_confirmed=True,
+                    entry_allocations=automatic_entry_allocations(
+                        len(parsed.entries),
+                        preferences.get("signal_auto_entry_distribution", "EQUAL"),
+                        preferences.get("signal_auto_entry_custom_percentages", ""),
+                    ),
+                    tp_allocations=automatic_tp_allocations(
+                        len(parsed.targets),
+                        preferences.get("signal_auto_tp_distribution", "EARLY"),
+                        preferences.get("signal_auto_tp_custom_percentages", ""),
+                    ),
                 )
                 payload = self.inbox.freeze(self.scope, signal_id, payload)
             command = self.commands.enqueue(
@@ -228,7 +261,8 @@ class AutomaticSignalExecutor:
             self.inbox.set_auto_state(self.scope, signal_id, "QUEUED", detail)
             self.events.append(
                 EventType.SIGNAL_AUTO_QUEUED,
-                f"{label} envoyé automatiquement au worker : {parsed.symbol}",
+                f"{label} envoyé automatiquement au worker : {parsed.symbol}"
+                + (f" · {csi_detail}" if csi_detail else ""),
                 position_id=position["position_id"], symbol=parsed.symbol,
                 signal_id=signal_id, command_id=command["id"],
             )
@@ -257,3 +291,24 @@ class AutomaticSignalExecutor:
                 last_processed_at=now,
             )
             return "REJECTED"
+
+    def _csi_gate(self, row, preferences):
+        """(exécution automatique permise, détail) selon l'avis de CSI et le réglage GatePolicy.
+
+        L'avis est conservé dans la boîte de réception pour la page Signaux. Toute panne de CSI
+        est convertie en décision (retenir par défaut) : jamais une exception qui tuerait la boucle.
+        """
+        policy = GatePolicy.from_mapping(preferences)
+        if not policy.enabled:
+            return policy.decide(None)
+        opinion, failure = None, "aucun client CSI configuré"
+        if self.csi_client is not None:
+            try:
+                opinion = self.csi_client.evaluate(row["raw"], source=source_label(row, preferences))
+            except CsiUnavailable as exc:
+                failure = str(exc)
+            except Exception as exc:  # noqa: BLE001 - CSI ne doit jamais arrêter le worker
+                failure = f"erreur inattendue ({exc.__class__.__name__})"
+        if opinion is not None:
+            self.inbox.set_csi_opinion(self.scope, row["id"], opinion.verdict, opinion.summary, opinion.evaluated_at)
+        return policy.decide(opinion, failure=failure)

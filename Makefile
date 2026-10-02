@@ -6,8 +6,9 @@ SERVICE ?= ui
 STAMP := $(shell date +%Y%m%d-%H%M%S)
 
 .DEFAULT_GOAL := help
-.PHONY: help init build up down restart ps logs worker-start worker-stop worker-restart \
-        check open-orders demo-tests integration migrate-oco run test shell backup import-data
+.PHONY: help init build network up down restart ps logs worker-start worker-stop worker-restart \
+        check open-orders demo-tests integration migrate-oco run test shell backup import-data \
+        users user-add user-remove proxy-reload
 
 help: ## Affiche cette aide
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -20,14 +21,17 @@ init: ## Cree .env a partir de .env.example (sans ecraser un .env existant)
 build: ## Construit l'image
 	$(COMPOSE) build
 
-up: ## Demarre l'interface et le worker en arriere-plan
+network: ## Cree le reseau Docker partage avec CryptoSignalIntelligence (csi-bridge) s'il manque
+	@docker network inspect csi-bridge >/dev/null 2>&1 || docker network create csi-bridge
+
+up: network ## Demarre l'interface et le worker en arriere-plan
 	$(COMPOSE) up -d --build
 	@echo "Interface : http://127.0.0.1:$${BSM_UI_PORT:-8501}"
 
 down: ## Arrete et supprime les conteneurs (les volumes de donnees sont conserves)
 	$(COMPOSE) down
 
-restart: ## Redemarre les services (a faire apres une modification de .env)
+restart: network ## Redemarre les services (a faire apres une modification de .env)
 	$(COMPOSE) up -d --force-recreate
 
 ps: ## Etat des services et des healthchecks
@@ -36,34 +40,34 @@ ps: ## Etat des services et des healthchecks
 logs: ## Suit les journaux de tous les services (ou SERVICE=worker|ui)
 	$(COMPOSE) logs -f --tail=200 $(if $(filter command line,$(origin SERVICE)),$(SERVICE),)
 
-worker-start: ## Demarre le conteneur worker
+worker-start: network ## Demarre le conteneur worker
 	$(COMPOSE) start worker
 
 worker-stop: ## Arrete le conteneur worker (SIGTERM, fin de boucle propre)
 	$(COMPOSE) stop worker
 
-worker-restart: ## Redemarre le conteneur worker (remplace l'arret force du Dashboard)
+worker-restart: network ## Redemarre le conteneur worker (remplace l'arret force du Dashboard)
 	$(COMPOSE) restart worker
 
-check: ## Verifie la connexion Binance Demo (aucun ordre cree)
+check: network ## Verifie la connexion Binance Demo (aucun ordre cree)
 	$(COMPOSE) run --rm --no-deps worker python scripts/check_connection.py
 
-open-orders: ## Ordres ouverts Binance et rapprochement local, lecture seule (SYMBOL=BTCUSDT)
+open-orders: network ## Ordres ouverts Binance et rapprochement local, lecture seule (SYMBOL=BTCUSDT)
 	$(COMPOSE) run --rm --no-deps worker python scripts/check_open_orders.py $(if $(SYMBOL),--symbol $(SYMBOL),)
 
-demo-tests: ## Essais Demo en lecture seule (EXECUTE=1 ajoute /order/test, sans execution)
+demo-tests: network ## Essais Demo en lecture seule (EXECUTE=1 ajoute /order/test, sans execution)
 	$(COMPOSE) run --rm --no-deps worker python scripts/demo_tests.py $(if $(EXECUTE),--execute,)
 
 integration: ## Tests d'integration Demo en lecture seule (cles .env, sans les volumes de donnees)
 	$(COMPOSE) run --rm --build integration
 
-migrate-oco: ## Migre une position vers un OCO Demo, ecritures reelles (POSITION=id EXECUTE=1)
+migrate-oco: network ## Migre une position vers un OCO Demo, ecritures reelles (POSITION=id EXECUTE=1)
 	@test -n "$(POSITION)" -a "$(EXECUTE)" = "1" || { \
 		echo "Usage : make migrate-oco POSITION=<position_id> EXECUTE=1"; \
 		echo "Ecrit sur Binance Demo ; l'apercu se consulte dans le Dashboard."; exit 1; }
 	$(COMPOSE) run --rm --no-deps worker python scripts/migrate_oco_demo.py --position-id $(POSITION) --execute
 
-run: ## Commande libre dans un conteneur relie aux donnees (CMD="python scripts/...")
+run: network ## Commande libre dans un conteneur relie aux donnees (CMD="python scripts/...")
 	@test -n "$(CMD)" || { echo 'Usage : make run CMD="python scripts/<script>.py ..."'; exit 1; }
 	$(COMPOSE) run --rm --no-deps worker $(CMD)
 
@@ -82,7 +86,41 @@ backup: ## Archive data/ et logs/ dans ./backups (worker arrete le temps de la c
 	else rm -f backups/bsm-$(STAMP).tar.gz; fi; \
 	exit $$status
 
-import-data: ## Importe ./data (installation locale) dans un volume Docker encore vierge
+USERS_FILE := deploy/users.caddy
+
+users: ## Liste les utilisateurs de l'acces public
+	@if [ -s $(USERS_FILE) ]; then cut -d' ' -f1 $(USERS_FILE); else echo "Aucun utilisateur (make user-add NAME=<nom>)"; fi
+
+user-add: ## Ajoute un utilisateur de l'acces public ou change son mot de passe (NAME=<nom>)
+	@echo "$(NAME)" | grep -Eq '^[A-Za-z0-9_.-]{2,32}$$' || { echo "Usage : make user-add NAME=<nom> (lettres, chiffres, . _ -)"; exit 1; }
+	@umask 077; printf "Mot de passe pour $(NAME) (12 caracteres minimum) : "; \
+	stty -echo; read -r pw; stty echo; echo; \
+	[ $${#pw} -ge 12 ] || { echo "Trop court : 12 caracteres minimum"; exit 1; }; \
+	hash=$$(printf '%s\n' "$$pw" | docker run --rm -i caddy:2-alpine caddy hash-password) || exit 1; \
+	touch $(USERS_FILE); \
+	{ grep -v "^$(NAME) " $(USERS_FILE) || true; printf '%s %s\n' "$(NAME)" "$$hash"; } > $(USERS_FILE).tmp; \
+	mv $(USERS_FILE).tmp $(USERS_FILE); chmod 600 $(USERS_FILE); \
+	echo "Utilisateur $(NAME) enregistre"
+	@$(MAKE) --no-print-directory proxy-reload
+
+user-remove: ## Retire un utilisateur de l'acces public (NAME=<nom>)
+	@test -n "$(NAME)" || { echo "Usage : make user-remove NAME=<nom>"; exit 1; }
+	@grep -q "^$(NAME) " $(USERS_FILE) 2>/dev/null || { echo "Utilisateur $(NAME) inconnu"; exit 1; }
+	@[ "$$(grep -vc "^$(NAME) " $(USERS_FILE))" -gt 0 ] || { \
+		echo "Refuse : $(NAME) est le dernier utilisateur. En ajouter un autre, ou retirer"; \
+		echo "COMPOSE_PROFILES=public de .env puis make down && make up pour fermer l'acces public."; exit 1; }
+	@umask 077; grep -v "^$(NAME) " $(USERS_FILE) > $(USERS_FILE).tmp; mv $(USERS_FILE).tmp $(USERS_FILE); \
+	echo "Utilisateur $(NAME) retire"
+	@$(MAKE) --no-print-directory proxy-reload
+
+proxy-reload: ## Applique la liste des utilisateurs au proxy en cours d'execution
+	@if [ -n "$$($(COMPOSE) ps -q --status running proxy 2>/dev/null)" ]; then \
+		$(COMPOSE) exec -T proxy caddy reload --config /etc/caddy/deploy/Caddyfile --adapter caddyfile \
+		&& echo "Acces public mis a jour" \
+		|| { echo "ECHEC du rechargement : l'ancienne liste d'utilisateurs reste active"; exit 1; }; \
+	else echo "Proxy arrete : la liste sera appliquee au prochain make up"; fi
+
+import-data: network ## Importe ./data (installation locale) dans un volume Docker encore vierge
 	@test -d data || { echo "Aucun dossier ./data a importer"; exit 1; }
 	@echo "Le worker local (hors Docker) doit etre arrete avant l'import."
 	$(COMPOSE) stop worker ui

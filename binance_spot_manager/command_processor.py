@@ -4,11 +4,12 @@ import math
 import time
 from dataclasses import replace
 
+from .candle_stop import INTERVAL_MS
 from .command_store import account_scope
 from .execution_engine import build_client_order_id
 from .fee_token import AccountCommission, FeeTokenPolicy, assess_bnb_fees
 from .investment_plan import InvestmentPreview, investment_risk_context
-from .models import EntryStatus, EventType, Position, SLStatus, SyncStatus, TPStatus, CloseReason
+from .models import EntryStatus, EventType, Position, SLStatus, SLTrigger, SyncStatus, TPStatus, CloseReason
 from .position_engine import PositionEngine, finish_position, recompute_position
 from .risk_engine import RiskEngine
 from .position_store import get_settings_store
@@ -158,6 +159,9 @@ class CommandProcessor:
                 or proposed.stop_loss.order_id or proposed.stop_loss.client_order_id or proposed.stop_loss.executed_qty
                 or any(t.status is not TPStatus.PENDING or t.order_id or t.client_order_id or t.executed_qty for t in proposed.take_profits)):
             raise RejectedCommand("La demande doit contenir un plan neuf, sans ordres ou executions preexistants")
+        if proposed.stop_loss.trigger is SLTrigger.CANDLE_CLOSE and (
+                proposed.stop_loss.candle_interval not in INTERVAL_MS or proposed.stop_loss.candle_checked_until is not None):
+            raise RejectedCommand("SL a la cloture : intervalle de bougie invalide ou plan deja suivi")
         requested_ids = set(payload["entry_ids"])
         entries = [entry.model_copy(deep=True) for entry in proposed.entries if entry.entry_id in requested_ids]
         if not entries or len(entries) != len(requested_ids) or any(
@@ -307,6 +311,9 @@ class CommandProcessor:
         result = self.execution.move_stop_loss(position, new_stop_price=target, quantity=position.metrics.net_qty)
         if result.success and not result.dry_run:
             position.stop_loss.resolved_price = target
+            # Deplacement manuel = stop au prix sur Binance, plus une surveillance de cloture.
+            sl = position.stop_loss
+            sl.trigger, sl.candle_interval, sl.candle_checked_until = SLTrigger.TOUCH, "", None
         recompute_position(position)
         self.positions.save(position)
         self._check_result(result)

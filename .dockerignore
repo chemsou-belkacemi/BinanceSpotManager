@@ -7,6 +7,7 @@
 data/
 logs/
 backups/
+deploy/users.caddy*
 
 # Environnements et caches
 .git/
