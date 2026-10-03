@@ -16,9 +16,7 @@ TEMPLATES = {"auto": "Automatique", "structured": "PAIR / ENTRY / T1 (Suhaib, Cl
              "abk": "Coin / Entry Zone / Target (ABK)",
              "numbered": "#PAIRE / Entry1 / TP1 / Stop (Al-Mahwashi)",
              "simple": "Générique (étiquettes Entry / TP / SL)"}
-# Un entier suivi d'un point sans décimale (« Stop: 223. ») vaut 223 : écriture fréquente des groupes ; jamais
-# « 1.442. » ni « 1.2.3 », toujours refusés.
-NUMBER = r"(?:\d+(?:\.\d+)?|\.\d+|\d+\.(?![\d.]))"
+NUMBER = r"(?:\d+(?:\.\d+)?|\.\d+)"
 UNVERIFIABLE_SOURCE_DATE_WARNING = (
     "Date source non vérifiable : contrôler manuellement la validité du signal."
 )
@@ -94,6 +92,11 @@ def _timeframe(match):
     return (match[1] + match[2]).lower()
 
 
+# Prix lus dans une valeur : comme NUMBER, plus un entier suivi d'un point sans décimale (« Stop: 223. ») qui vaut
+# 223, écriture fréquente des groupes ; « 1.442. », « 223.. » ou « 1.2.3 » restent refusés.
+PRICE_NUMBER = r"(?:\d+(?:\.\d+)?|\.\d+|\d+\.(?![\d.]))"
+
+
 def _read_prices(value, kind):
     """(prices, candle timeframe, error) for one value; any doubt is an error, never a guess."""
     if MEANING_CHANGERS.search(value):
@@ -122,8 +125,8 @@ def _read_prices(value, kind):
         timeframe = ""
     if re.search(r"\d\s*,\d|\d\s*\+|\d[A-Z]|^\s*[-−]\s*\.?\d", text):
         return [], "", "prix ambigu (virgule, +, suffixe ou signe négatif)"
-    numbers = re.findall(rf"(?<![\d.]){NUMBER}(?![\d.])", text)
-    if re.search(r"\d", re.sub(rf"(?<![\d.]){NUMBER}(?![\d.])", " ", text)):
+    numbers = re.findall(rf"(?<![\d.]){PRICE_NUMBER}(?![\d.])", text)
+    if re.search(r"\d", re.sub(rf"(?<![\d.]){PRICE_NUMBER}(?![\d.])", " ", text)):
         return [], "", "prix mal formé"
     return [float(n) for n in numbers], timeframe, ""
 
