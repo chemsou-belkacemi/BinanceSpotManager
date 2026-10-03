@@ -15,3 +15,21 @@ def test_only_new_notifiable_events_are_selected():
 
     assert [record["event"] for record in selected] == ["SL_MOVED"]
     assert again == []
+
+
+
+def test_signal_review_reaches_alerts_but_contract_rejections_do_not(tmp_path):
+    from binance_spot_manager.alert_inbox import AlertInbox
+
+    records = [
+        {"ts": "2026-01-01T00:00:01.000001Z", "event": "SIGNAL_REVIEW_REQUIRED", "level": "WARNING",
+         "message": "Signal Telegram à confirmer"},
+        {"ts": "2026-01-01T00:00:02.000001Z", "event": "SIGNAL_AUTO_REJECTED", "level": "WARNING",
+         "message": "Signal refusé"},
+    ]
+    selected, _ = unseen_alerts(records, "")
+    assert [record["event"] for record in selected] == ["SIGNAL_REVIEW_REQUIRED"]
+    inbox = AlertInbox(tmp_path / "alerts.db")
+    for record in records:
+        inbox.ingest(record)
+    assert [a["record"]["event"] for a in inbox.recent()] == ["SIGNAL_REVIEW_REQUIRED"]

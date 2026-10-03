@@ -3,6 +3,7 @@
 import hashlib
 from pathlib import Path
 import sys
+import time
 import uuid
 
 import streamlit as st
@@ -46,8 +47,18 @@ def command_panel():
         return
     labels = {"PENDING": "En attente", "RUNNING": "En cours", "SUCCEEDED": "Traitee",
               "FAILED": "Refusee", "UNCERTAIN": "A verifier", "EXPIRED": "Expiree", "CANCELED": "Retiree"}
-    pnl_dataframe([{"Demande": c["id"][:12], "Action": c["action"], "Etat": labels[c["state"]],
-                   "Resultat": c["result"].get("message", "")} for c in commands], hide_index=True)
+    modes = {"AUTO": "Automatique", "MANUAL": "Manuelle"}
+
+    def signal_of(command):
+        key = str(command.get("request_key") or "")
+        return key.removeprefix("signal:")[:8] if key.startswith("signal:") else ""
+
+    pnl_dataframe([{"Demande": c["id"][:12],
+                    "Créée (UTC)": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(c["created_at"])),
+                    "Action": c["action"], "Signal": signal_of(c),
+                    "Mode": modes.get((c["payload"] or {}).get("confirmation_mode"), "—"),
+                    "Etat": labels[c["state"]],
+                    "Resultat": c["result"].get("message", "")} for c in commands], hide_index=True)
     selected = st.selectbox("Detail d'une demande", [c["id"] for c in commands],
                             format_func=lambda cid: cid[:12], key="operations_command")
     command = next(c for c in commands if c["id"] == selected)

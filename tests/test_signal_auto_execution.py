@@ -6,12 +6,16 @@ import pytest
 from binance_spot_manager.command_store import CommandStore
 from binance_spot_manager.csi_client import CsiOpinion, CsiUnavailable
 from binance_spot_manager.event_store import EventStore
+from binance_spot_manager.risk_engine import RiskLimits
 from binance_spot_manager.signal_auto_execution import AutomaticSignalExecutor
 from binance_spot_manager.signal_inbox import SignalInbox
 from binance_spot_manager.symbol_rules import SymbolRulesCache, parse_symbol_rules
 
 
 SIMPLE = "PAIR: BTC/USDT\nENTRY 1: 84000\nT1: 90000\nSL: 80000"
+#: Empreinte du bot (sha256 du token) : forme réelle de l'identifiant externe Telegram.
+BOT = "ab" * 32
+TRUSTED_CHAT = -100123
 
 
 class FakeCsi:
@@ -29,8 +33,20 @@ class FakeCsi:
                           evaluated_at="2026-09-30T10:00:00+00:00")
 
 
-def executor(tmp_path, inbox, preferences, *, now=1000, csi_client=None):
-    rules = parse_symbol_rules({
+def telegram_id(message=1, chat=TRUSTED_CHAT):
+    return f"{BOT}:{chat}:{message}"
+
+
+def positions_stub(items=(), read_errors=()):
+    items = list(items)
+    return SimpleNamespace(list_all=lambda: list(items),
+                           list_open=lambda: [p for p in items if p.is_open],
+                           read_errors=list(read_errors))
+
+
+def executor(tmp_path, inbox, preferences, *, now=1000, run_mode="DEMO_AUTO", positions=None,
+             notify=None, client=None, rules=None, csi_client=None):
+    rules = rules or parse_symbol_rules({
         "symbol": "BTCUSDT", "baseAsset": "BTC", "quoteAsset": "USDT",
         "status": "TRADING", "filters": [
             {"filterType": "LOT_SIZE", "stepSize": "0.00001", "minQty": "0.00001", "maxQty": "100"},
@@ -38,7 +54,7 @@ def executor(tmp_path, inbox, preferences, *, now=1000, csi_client=None):
             {"filterType": "NOTIONAL", "minNotional": "5"},
         ],
     })
-    client = SimpleNamespace(
+    client = client or SimpleNamespace(
         get_symbol_info=lambda symbol: rules.raw,
         get_price=lambda symbol: 84500,
         get_prices=lambda: {"BTCUSDT": 84500},
@@ -47,23 +63,28 @@ def executor(tmp_path, inbox, preferences, *, now=1000, csi_client=None):
     commands = CommandStore(tmp_path / "commands.db")
     worker = AutomaticSignalExecutor(
         "demo", inbox, commands, client, SymbolRulesCache(client),
-        lambda: SimpleNamespace(min_reserve_percent=20),
+        lambda: RiskLimits(),
         lambda: preferences, EventStore(tmp_path / "events.jsonl"),
-        clock=lambda: now, csi_client=csi_client,
+        clock=lambda: now, positions=positions if positions is not None else positions_stub(),
+        notify=notify, run_mode=run_mode, csi_client=csi_client,
     )
     return worker, commands
 
 
 def enabled_preferences(**overrides):
+    # Groupe déclaré de confiance, actif validé (liste par défaut) et budget sous 0,5 %
+    # de risque frais compris : le seul profil qui peut partir automatiquement.
     return {
         "signal_telegram_enabled": True,
         "signal_telegram_auto_enabled": True,
+        "signal_telegram_chats": str(TRUSTED_CHAT),
+        "signal_auto_trusted_chats": [TRUSTED_CHAT],
         "signal_auto_execute_enabled": True,
         "signal_auto_execute_enabled_since": 900,
         "signal_auto_max_age_minutes": 5,
         "signal_auto_touch_stop": False,
         "signal_sizing_mode": "FIXED",
-        "signal_fixed_budget": 200,
+        "signal_fixed_budget": 90,
         # Les tests historiques n'ont pas de client CSI : contrôle désactivé, sauf mention contraire.
         "signal_csi_gate_enabled": False,
     } | overrides
@@ -72,7 +93,7 @@ def enabled_preferences(**overrides):
 def test_fresh_authorized_signal_is_frozen_and_queued_once(tmp_path):
     inbox = SignalInbox(tmp_path / "signals.db")
     row = inbox.receive(
-        "demo", SIMPLE, source="telegram", external_id="bot:1",
+        "demo", SIMPLE, source="telegram", external_id=telegram_id(1),
         source_timestamp=995,
     )
     worker, commands = executor(tmp_path, inbox, enabled_preferences())
@@ -81,6 +102,7 @@ def test_fresh_authorized_signal_is_frozen_and_queued_once(tmp_path):
     saved = inbox.recent("demo")[0]
     assert saved["id"] == row["id"]
     assert saved["payload"] is not None
+    assert saved["payload"]["confirmation_mode"] == "AUTO"
     assert saved["auto_state"] == "QUEUED"
     command = commands.get_by_request_key("demo", f"signal:{row['id']}")
     assert command["state"] == "PENDING"
@@ -90,19 +112,29 @@ def test_fresh_authorized_signal_is_frozen_and_queued_once(tmp_path):
 
 def test_old_or_pre_authorization_messages_are_never_queued(tmp_path):
     inbox = SignalInbox(tmp_path / "signals.db")
-    inbox.receive("demo", SIMPLE, source="telegram", external_id="old", source_timestamp=600)
+    old = inbox.receive("demo", SIMPLE, source="telegram", external_id=telegram_id(1), source_timestamp=600)
+    before = inbox.receive("demo", SIMPLE.replace("T1: 90000", "T1: 91000"), source="telegram",
+                           external_id=telegram_id(2), source_timestamp=995)
+    with inbox.connect() as db, db:  # reçu avant l'autorisation datée (900)
+        db.execute("UPDATE signals SET received=800 WHERE id=?", (before["id"],))
     worker, commands = executor(tmp_path, inbox, enabled_preferences())
 
     assert worker.process_pending() == []
     assert commands.list_recent("demo") == []
-    assert inbox.recent("demo")[0]["auto_state"] == ""
+    rows = {row["id"]: row for row in inbox.recent("demo")}
+    # Trop ancien mais reçu après l'autorisation : « À confirmer » avec son motif, plus d'état muet.
+    assert rows[old["id"]]["auto_state"] == "REVIEW"
+    assert "trop ancien" in rows[old["id"]]["auto_detail"]
+    assert '"C_STALE"' in rows[old["id"]]["route"]
+    # Reçu avant l'autorisation : jamais routé.
+    assert rows[before["id"]]["auto_state"] == ""
 
 
 def test_resending_old_unconfirmed_text_refreshes_telegram_age_and_queues_once(tmp_path):
     inbox = SignalInbox(tmp_path / "signals.db")
     old = inbox.receive("demo", SIMPLE)
     resent = inbox.receive(
-        "demo", SIMPLE, source="telegram", external_id="new-message",
+        "demo", SIMPLE, source="telegram", external_id=telegram_id(10),
         source_timestamp=995,
     )
     assert resent["id"] == old["id"]
@@ -116,7 +148,7 @@ def test_resending_old_unconfirmed_text_refreshes_telegram_age_and_queues_once(t
     # A further identical Telegram message cannot refresh or create another order.
     frozen_timestamp = inbox.recent("demo")[0]["source_timestamp"]
     inbox.receive(
-        "demo", SIMPLE, source="telegram", external_id="third-message",
+        "demo", SIMPLE, source="telegram", external_id=telegram_id(11),
         source_timestamp=999,
     )
     assert inbox.recent("demo")[0]["source_timestamp"] == frozen_timestamp
@@ -128,7 +160,7 @@ def test_timed_stop_waits_for_its_candle_close_unless_touch_is_saved(tmp_path, t
     inbox = SignalInbox(tmp_path / "signals.db")
     row = inbox.receive(
         "demo", SIMPLE.replace("SL: 80000", "SL: 80000 (1h)"),
-        source="telegram", external_id="conditional", source_timestamp=995,
+        source="telegram", external_id=telegram_id(3), source_timestamp=995,
     )
     worker, commands = executor(tmp_path, inbox, enabled_preferences(signal_auto_touch_stop=touch))
 
@@ -145,10 +177,13 @@ def test_stop_with_an_unknown_candle_is_never_executed_automatically(tmp_path):
     )
     worker, commands = executor(tmp_path, inbox, enabled_preferences())
 
-    assert worker.process_pending() == ["REJECTED"]
+    assert worker.process_pending() == ["REVIEW"]
     saved = inbox.recent("demo")[0]
     assert saved["id"] == row["id"]
-    assert "SL conditionnel" in saved["auto_detail"]
+    assert saved["auto_state"] == "REVIEW"
+    assert "clôture de bougie" in saved["auto_detail"]
+    assert '"C_SL_CANDLE"' in saved["route"]
+    assert saved["payload"] is None
     assert commands.list_recent("demo") == []
 
 
@@ -159,7 +194,7 @@ def test_saved_policy_limits_entries_and_targets_with_early_sales(tmp_path):
         "T1: 90000\nT2: 95000\nT3: 100000\nSL: 80000 (4h)"
     )
     row = inbox.receive(
-        "demo", text, source="telegram", external_id="policy", source_timestamp=995,
+        "demo", text, source="telegram", external_id=telegram_id(20), source_timestamp=995,
     )
     preferences = enabled_preferences(
         signal_auto_touch_stop=True,
@@ -188,7 +223,7 @@ def test_saved_policy_limits_entries_and_targets_with_early_sales(tmp_path):
 def test_saved_stop_trailing_setting_applies_to_automatic_signals(tmp_path, trail_stop, expected):
     inbox = SignalInbox(tmp_path / "signals.db")
     text = "PAIR: BTC/USDT\nENTRY 1: 84000\nT1: 90000\nT2: 95000\nT3: 100000\nSL: 80000"
-    row = inbox.receive("demo", text, source="telegram", external_id="trail", source_timestamp=995)
+    row = inbox.receive("demo", text, source="telegram", external_id=telegram_id(21), source_timestamp=995)
     preferences = enabled_preferences(signal_auto_tp_count=3, signal_trail_stop=trail_stop)
     worker, commands = executor(tmp_path, inbox, preferences)
 
@@ -204,7 +239,7 @@ def test_saved_custom_policy_applies_to_entries_and_targets(tmp_path):
         "T1: 90000\nT2: 95000\nSL: 80000"
     )
     row = inbox.receive(
-        "demo", text, source="telegram", external_id="custom", source_timestamp=995,
+        "demo", text, source="telegram", external_id=telegram_id(22), source_timestamp=995,
     )
     preferences = enabled_preferences(
         signal_auto_entry_count=2,
@@ -229,7 +264,7 @@ def test_telegram_timestamp_is_authoritative_over_text_timezone(tmp_path):
     now = datetime(2026, 9, 29, 1, 15, tzinfo=timezone.utc).timestamp()
     dated = SIMPLE + "\nDate: Monday - 2026-09-28\nIndicatorTime :- 23:56 GMT+2"
     row = inbox.receive(
-        "demo", dated, source="telegram", external_id="fresh-telegram",
+        "demo", dated, source="telegram", external_id=telegram_id(4),
         source_timestamp=now - 5,
     )
     assert row["parsed"]["published_at"] == "2026-09-28T21:56:00+00:00"
@@ -258,7 +293,7 @@ def test_fresh_resend_can_retry_rejected_signal_without_existing_payload(tmp_pat
 def test_csi_gate_holds_unfavourable_signals_for_manual_confirmation(tmp_path):
     inbox = SignalInbox(tmp_path / "signals.db")
     row = inbox.receive(
-        "demo", SIMPLE, source="telegram", external_id="bothash:-100123:7", source_timestamp=995,
+        "demo", SIMPLE, source="telegram", external_id=telegram_id(7), source_timestamp=995,
     )
     csi = FakeCsi("DEFAVORABLE")
     preferences = enabled_preferences(
@@ -266,10 +301,12 @@ def test_csi_gate_holds_unfavourable_signals_for_manual_confirmation(tmp_path):
     )
     worker, commands = executor(tmp_path, inbox, preferences, csi_client=csi)
 
-    assert worker.process_pending() == ["REJECTED"]
+    # Retenu = « À confirmer » (motif de confiance), jamais un refus définitif.
+    assert worker.process_pending() == ["REVIEW"]
     saved = inbox.recent("demo")[0]
-    assert saved["id"] == row["id"] and saved["auto_state"] == "REJECTED"
+    assert saved["id"] == row["id"] and saved["auto_state"] == "REVIEW"
     assert "Avis CSI Défavorable" in saved["auto_detail"] and "retenue" in saved["auto_detail"]
+    assert '"C_CSI_OPINION"' in saved["route"] and saved["payload"] is None
     assert saved["csi_verdict"] == "DEFAVORABLE" and saved["csi_detail"] == "résumé DEFAVORABLE"
     assert csi.calls == [(SIMPLE, "Suhaib", True)]
     assert commands.list_recent("demo") == []          # aucun ordre : confirmation manuelle possible
@@ -277,7 +314,7 @@ def test_csi_gate_holds_unfavourable_signals_for_manual_confirmation(tmp_path):
 
 def test_csi_gate_lets_favourable_signals_through_and_keeps_the_opinion(tmp_path):
     inbox = SignalInbox(tmp_path / "signals.db")
-    row = inbox.receive("demo", SIMPLE, source="telegram", external_id="bothash:-100123:8", source_timestamp=995)
+    row = inbox.receive("demo", SIMPLE, source="telegram", external_id=telegram_id(8), source_timestamp=995)
     csi = FakeCsi("FAVORABLE")
     worker, commands = executor(tmp_path, inbox, enabled_preferences(signal_csi_gate_enabled=True), csi_client=csi)
 
@@ -285,39 +322,8 @@ def test_csi_gate_lets_favourable_signals_through_and_keeps_the_opinion(tmp_path
     saved = inbox.recent("demo")[0]
     assert saved["csi_verdict"] == "FAVORABLE" and saved["auto_state"] == "QUEUED"
     assert csi.calls == [(SIMPLE, "telegram -100123", True)]
-    assert commands.get_by_request_key("demo", f"signal:{row['id']}") is not None
-
-
-def test_csi_gate_holds_when_csi_is_unreachable_unless_allowed_by_setting(tmp_path):
-    inbox = SignalInbox(tmp_path / "signals.db")
-    inbox.receive("demo", SIMPLE, source="telegram", external_id="bothash:-1:1", source_timestamp=995)
-    worker, commands = executor(
-        tmp_path, inbox, enabled_preferences(signal_csi_gate_enabled=True), csi_client=FakeCsi(fail=True),
-    )
-    assert worker.process_pending() == ["REJECTED"]
-    saved = inbox.recent("demo")[0]
-    assert "Avis CSI indisponible" in saved["auto_detail"] and saved["csi_verdict"] == ""
-    assert commands.list_recent("demo") == []
-
-    lenient = SignalInbox(tmp_path / "lenient.db")
-    lenient.receive("demo", SIMPLE, source="telegram", external_id="bothash:-1:2", source_timestamp=995)
-    worker, commands = executor(
-        tmp_path / "lenient", lenient,
-        enabled_preferences(signal_csi_gate_enabled=True, signal_csi_when_unavailable="ALLOW"),
-        csi_client=FakeCsi(fail=True),
-    )
-    assert worker.process_pending() == ["QUEUED"]
-    assert len(commands.list_recent("demo")) == 1
-
-
-def test_csi_gate_disabled_never_calls_csi(tmp_path):
-    inbox = SignalInbox(tmp_path / "signals.db")
-    inbox.receive("demo", SIMPLE, source="telegram", external_id="bothash:-1:3", source_timestamp=995)
-    csi = FakeCsi("REFUSE")
-    worker, commands = executor(tmp_path, inbox, enabled_preferences(), csi_client=csi)
-
-    assert worker.process_pending() == ["QUEUED"]
-    assert csi.calls == [] and len(commands.list_recent("demo")) == 1
+    command = commands.get_by_request_key("demo", f"signal:{row['id']}")
+    assert command is not None and command["payload"]["confirmation_mode"] == "AUTO"
 
 
 def test_csi_gate_is_never_asked_about_csi_own_signals(tmp_path):
@@ -331,3 +337,35 @@ def test_csi_gate_is_never_asked_about_csi_own_signals(tmp_path):
 
     assert worker.process_pending() == ["QUEUED"]   # un signal V3 vient déjà de CSI
     assert csi.calls == []
+
+
+def test_csi_gate_holds_when_csi_is_unreachable_unless_allowed_by_setting(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    inbox.receive("demo", SIMPLE, source="telegram", external_id=telegram_id(31), source_timestamp=995)
+    worker, commands = executor(
+        tmp_path, inbox, enabled_preferences(signal_csi_gate_enabled=True), csi_client=FakeCsi(fail=True),
+    )
+    assert worker.process_pending() == ["REVIEW"]
+    saved = inbox.recent("demo")[0]
+    assert "Avis CSI indisponible" in saved["auto_detail"] and saved["csi_verdict"] == ""
+    assert commands.list_recent("demo") == []
+
+    lenient = SignalInbox(tmp_path / "lenient.db")
+    lenient.receive("demo", SIMPLE, source="telegram", external_id=telegram_id(32), source_timestamp=995)
+    worker, commands = executor(
+        tmp_path / "lenient", lenient,
+        enabled_preferences(signal_csi_gate_enabled=True, signal_csi_when_unavailable="ALLOW"),
+        csi_client=FakeCsi(fail=True),
+    )
+    assert worker.process_pending() == ["QUEUED"]
+    assert len(commands.list_recent("demo")) == 1
+
+
+def test_csi_gate_disabled_never_calls_csi(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    inbox.receive("demo", SIMPLE, source="telegram", external_id=telegram_id(33), source_timestamp=995)
+    csi = FakeCsi("REFUSE")
+    worker, commands = executor(tmp_path, inbox, enabled_preferences(), csi_client=csi)
+
+    assert worker.process_pending() == ["QUEUED"]
+    assert csi.calls == [] and len(commands.list_recent("demo")) == 1

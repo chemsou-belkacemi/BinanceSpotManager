@@ -118,9 +118,11 @@ La date Telegram (ou la date d'origine Telegram d'un transfert) est la référen
 fraîcheur et doit rester dans la fenêtre réglée, 5 minutes par défaut. Elle est exprimée
 en temps Unix et ne dépend pas du fuseau du conteneur. La date écrite dans le texte reste
 informative car les fournisseurs n'utilisent pas tous correctement les fuseaux horaires.
-Les messages reçus avant l'activation, édités, anciens,
-ambigus, hors Binance Spot ou incompatibles avec les règles sont conservés avec un
-motif de refus et ne créent aucune commande.
+Chaque message éligible est ensuite **routé** (voir [Routage](#routage--confirmation-manuelle-ou-exécution-automatique)) :
+seul un signal sans motif de revue part sans confirmation. Les messages anciens reçus
+après l'activation, ambigus, d'un groupe non déclaré ou à risque élevé passent « À
+confirmer » avec leurs motifs ; les messages reçus avant l'activation ne sont jamais
+routés ; les contrats violés sont refusés. Aucun ne crée de commande sans décision.
 
 Un SL portant une mention `1h` ou `15min` attend la clôture de sa bougie (voir plus haut), sauf
 si l'option **Interpréter les SL temporisés comme des stops au toucher** est activée. Une
@@ -292,9 +294,9 @@ Deux expirations distinctes :
 
 Exécution automatique (mêmes interrupteurs que le contrat v1) :
 
-- `VALIDATION_STATUS` autre que `DEMO_ELIGIBLE` → refus motivé (double sécurité : le
-  producteur ne publie hors shadow que du `DEMO_ELIGIBLE`) ; une confirmation
-  manuelle dans **Signaux** reste possible, avec un avertissement ;
+- `VALIDATION_STATUS` autre que `DEMO_ELIGIBLE` → « À confirmer » (double sécurité : le
+  producteur ne publie hors shadow que du `DEMO_ELIGIBLE`) ; la confirmation manuelle
+  dans **Signaux** exige une case d'acquittement dédiée ; jamais automatique ;
 - la fenêtre `VALID_FROM ≤ maintenant < EXPIRES_AT` remplace l'âge maximal de
   5 minutes : un signal pas encore valide attend sans être réclamé ;
 - l'écart `|prix / ENTRY_1 − 1| × 10⁴` doit rester ≤ `MAX_ENTRY_DEVIATION_BPS`,
@@ -328,7 +330,7 @@ chaînes décimales, `null` pour les champs absents, `fee` et `fee_asset` ensemb
 | Événement | Origine |
 |---|---|
 | `RECEIVED` (`exit_policy_hash`) | message accepté : commande `signal:<ligne>` mise en file ; porte l'empreinte de politique vérifiée par BSM |
-| `REJECTED` (`reason`) | refus à la réception (expiré, non conforme, version 2, politique, doublon d'une autre clé), refus de l'exécution automatique (statut, expiration, écart…), commande échouée/expirée/annulée, ou signal jamais traité 60 s après `EXPIRES_AT` |
+| `REJECTED` (`reason`) | refus à la réception (expiré, non conforme, version 2, politique, doublon d'une autre clé), commande échouée/expirée/annulée, ou — sans commande (à confirmer non confirmé, refusé, jamais traité, confirmation gelée non transmise) — à `EXPIRES_AT` + 60 s |
 | `ORDER_PLACED` | ordre d'entrée accepté par Binance : `order_id`, `quantity` commandée, `price` limite |
 | `ENTRY_PARTIAL` / `ENTRY_FILLED` | achats réellement remplis, par **incrément** depuis le dernier cumul rapporté |
 | `TP_FILLED` (`target_index`) / `STOP_FILLED` | ventes réelles par TP ou par le stop Binance |
@@ -392,6 +394,88 @@ Le worker revalide ensuite prix, soldes, réserve, frais et risque avant toute
 écriture, uniquement sur Binance Demo. Sans exécution automatique, un signal
 déposé se revoit et se confirme dans la page **Signaux** comme un message Telegram.
 
+## Routage : confirmation manuelle ou exécution automatique
+
+Règle du propriétaire : la confirmation manuelle est **obligatoire** si le risque est
+élevé **ou** si la confiance est faible ou inconnue. Un signal part automatiquement sur
+Binance Demo seulement si l'exécution automatique est autorisée (Settings → Signaux) et
+qu'il n'a **aucun** motif de revue. La confirmation manuelle n'est jamais retirée.
+
+Le routage a lieu dans le worker (`signal_routing`, appelé par l'exécution automatique)
+après la préparation du plan et avant tout gel de commande. Trois issues :
+
+| Issue | Sens | Effet |
+|---|---|---|
+| **AUTO** | aucun motif | commande `SUBMIT_POSITION` avec `confirmation_mode=AUTO` et la décision gelée |
+| **À confirmer** (`REVIEW`) | au moins un motif de confiance, de risque ou de données | aucun ordre ; motifs enregistrés et affichés ; alerte dans l'application ; push optionnel |
+| **Refusé** (`REJECTED`) | contrat violé : personne ne peut l'exécuter | erreur d'analyse, version retirée, CSI hors dépôt TXT, `EXPIRES_AT` dépassé, écart CSI > `MAX_ENTRY_DEVIATION_BPS`, préparation gelée expirée |
+
+**Confiance** (déclarée, jamais mesurée) :
+
+- CSI : `VALIDATION_STATUS=DEMO_ELIGIBLE` (étiquette de la stratégie, posée à la main
+  chez le producteur). Autre statut : « À confirmer » avec une case d'acquittement
+  dédiée ; jamais bloqué, jamais automatique.
+- Telegram : conversation déclarée « de confiance » (liste vide par défaut, sous-ensemble
+  des conversations autorisées) **et** actif de base dans la liste validée. Liste
+  pré-remplie avec les 16 actifs de base de CryptoSignalIntelligence (BTC ETH SOL XRP
+  NEAR AVAX HBAR LINK XLM ADA TRX FIL ALGO DOT ATOM ETC), à valider (univers halal) ;
+  **une liste vide n'autorise aucun actif**. Un actif hors liste passe « À confirmer ».
+  Le CSI n'est pas contrôlé contre cette liste : son univers est filtré en amont.
+- JSON v1 : toujours « À confirmer ». Collage manuel : jamais routé, confirmé à la main.
+- Avis CSI demandé (réglage) et défavorable, refusé, injoignable ou indéterminé (option) :
+  « À confirmer » (voir [Avis CSI](#avis-csi-cryptosignalintelligence)).
+- Message trop ancien ou non daté, SL sur clôture d'une bougie inconnue sans autorisation
+  « au toucher » (une bougie connue, 15m, 1h, 4h…, est surveillée par le worker), mode `DEMO_MANUAL` (honoré par défaut : tout signal est manuel) : « À
+  confirmer ». Les messages trop anciens reçus après l'autorisation ne restent plus
+  muets : ils passent « À confirmer » avec leur motif.
+
+**Risque** (données déjà lues, aucune requête supplémentaire) :
+
+| Critère | Seuil par défaut |
+|---|---|
+| Perte au stop frais compris (achat, décalage du stop-limit 0,3 %, vente ; hors gap), % du portefeuille | > 0,5 % (plafonné à la limite dure de 1 %) |
+| Limites dures du worker (miroir exact : 1 % / 5 % / 5 positions / 25 % / réserve) | tout refus : « le worker refusera à ce budget » |
+| Avertissements du moteur de risque (dernière place, exposition > 50 %) | tout avertissement |
+| Risque total projeté, entrées au repos et commandes en file comprises | > 80 % de 5 % (4 %) |
+| Même actif déjà ouvert ou en file | ≥ 1 |
+| Distance du stop | hors [1 % ; 10 %] |
+| Entrée déjà dépassée (Telegram, JSON) | > 1 % sous l'entrée la plus basse |
+| `VOLATILITY_REGIME=HIGH` (CSI) | revue |
+| Coupe-circuits | ≥ 4 ordres automatiques sur 24 h ; résultat réalisé des signaux depuis 00:00 UTC ≤ −2 % ; 3 pertes automatiques consécutives (jusqu'à « Réarmer l'automatique ») |
+
+Données non mesurables (Binance indisponible, actif sans cours, budget nul, plan refusé,
+positions illisibles, erreur interne) : « À confirmer », jamais un refus définitif ni un
+envoi automatique. Tous les seuils se règlent dans Settings → Signaux ; un changement qui
+élargit l'automatique exige une autorisation explicite et chaque changement est
+journalisé (`SIGNAL_ROUTING_CHANGED`). Ces seuils décident **qui confirme** ; ils ne sont
+pas calibrés et ne disent rien du résultat attendu.
+
+Une ligne « À confirmer » reste dans cet état : un nouveau réglage ou un renvoi du même
+texte ne la re-route jamais. Une seule nouvelle commande automatique par cycle.
+
+**Worker** : en plus de tous les contrôles existants (inchangés), une commande `AUTO`
+est refusée si sa décision gelée n'est pas `AUTO`, si c'est un signal CSI non
+`DEMO_ELIGIBLE`, ou en `DEMO_MANUAL` (tant que ce mode est honoré). Les confirmations
+manuelles et les anciennes commandes sont traitées comme avant.
+
+**Page Signaux** : filtre « Seulement à confirmer » avec compteur, état de chaque ligne,
+motifs groupés (confiance, risque, données) avec valeurs et seuils, échéance
+`EXPIRES_AT` pour un signal CSI (au-delà, plus confirmable). Après la simulation, un
+panneau de risque identique au routage ; une case d'acquittement par catégorie de motif
+(et une dédiée au CSI non `DEMO_ELIGIBLE`) ; « Transmettre » est désactivé si une limite
+dure refuserait. La commande porte `confirmation_mode=MANUAL`,
+`acknowledged_reason_codes` et le budget proposé ; l'événement
+`SIGNAL_MANUAL_CONFIRMED` est journalisé. La barre latérale affiche « N signal(aux) à
+confirmer » ; Opérations montre la date, le signal et le mode de chaque commande.
+
+**Notification** : `SIGNAL_REVIEW_REQUIRED` entre dans les alertes de l'application.
+L'envoi Telegram/e-mail « Signal à confirmer » est **désactivé par défaut** (réglage dans
+Settings) ; son texte ne contient aucune ligne de prix (ni entrée, ni TP, ni SL).
+
+**Retour CSI** : pour un signal CSI sans commande (à confirmer, refusé ou jamais traité),
+le `REJECTED` n'est écrit qu'à `EXPIRES_AT + 60 s`, afin qu'une confirmation manuelle
+dans la fenêtre soit rapportée correctement (`RECEIVED`, `ORDER_PLACED`…).
+
 ## Avis CSI (CryptoSignalIntelligence)
 
 CryptoSignalIntelligence (projet voisin, « le cerveau ») évalue un signal sans jamais passer
@@ -413,9 +497,10 @@ signal réussisse ; INDETERMINE signifie « pas assez d'éléments », pas « 50
   arrive au clic suivant. Un signal **reçu par Telegram** n'ajoute jamais de paire (`REFUSE`, retenu) :
   le coller sur la page CSI pour valider la paire.
 - **Settings → Signaux → Avis CSI avant exécution automatique** : le worker demande l'avis de CSI
-  avant de mettre en file un signal Telegram automatique. REFUSE et DEFAVORABLE sont **retenus**
-  (état `REJECTED`, motif « Avis CSI … exécution automatique retenue ») : la confirmation manuelle
-  reste possible sur la page Signaux. INDETERMINE peut aussi être retenu (option). CSI injoignable :
+  avant de mettre en file un signal texte automatique (jamais pour un signal CSI V3, déjà produit
+  par CSI). REFUSE et DEFAVORABLE sont **retenus** : « À confirmer » (`REVIEW`, motif de confiance
+  `C_CSI_OPINION`), demandé avant tout appel Binance ; la confirmation manuelle reste possible sur
+  la page Signaux. INDETERMINE peut aussi être retenu (option). CSI injoignable :
   retenu par défaut, ou exécuté sans avis si le réglage le permet. L'avis ne rend **jamais** un
   signal automatique : il ne peut que retenir. Les noms des groupes (`identifiant=nom`) servent au
   bilan par source chez CSI ; sans nom, la source est « telegram <identifiant> ».
@@ -432,4 +517,4 @@ Stop de secours sur Binance pendant un SL à la clôture, remappage Bitget/forex
 libre de formats. Le mode automatique actuel reste limité aux conversations Telegram
 autorisées, au dépôt direct local et à Binance Demo Spot.
 
-Tests hors réseau : `make test TESTS="tests/test_signal_sizing.py tests/test_signals.py tests/test_signals_ui.py tests/test_signal_drop.py tests/test_signal_csi.py tests/test_commands.py tests/test_automation.py tests/test_candle_stop.py"`.
+Tests hors réseau : `make test TESTS="tests/test_signal_sizing.py tests/test_signals.py tests/test_signals_ui.py tests/test_signal_drop.py tests/test_signal_csi.py tests/test_signal_routing.py tests/test_commands.py tests/test_automation.py tests/test_candle_stop.py"`.

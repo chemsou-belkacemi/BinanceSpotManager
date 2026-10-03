@@ -146,11 +146,36 @@ class CommandProcessor:
                     f"Écart de prix {deviation:.1f} bps > {max_bps:g} bps autorisés par le signal ; aucun ordre envoyé"
                 )
 
+    def _check_signal_route(self, payload):
+        """Refus additionnels pour une commande AUTO (aucun garde-fou existant n'est modifié).
+
+        Une commande sans confirmation_mode (confirmation manuelle ou ancien plan) est
+        traitée exactement comme avant ; une commande AUTO doit porter une décision de
+        routage AUTO, un statut CSI DEMO_ELIGIBLE, et le mode DEMO_MANUAL l'interdit.
+        """
+        mode = payload.get("confirmation_mode")
+        if mode is None or mode == "MANUAL":
+            return
+        if mode != "AUTO":
+            raise RejectedCommand("Mode de confirmation inconnu ; aucun ordre envoyé")
+        route = payload.get("route") if isinstance(payload.get("route"), dict) else {}
+        if route.get("decision") != "AUTO":
+            raise RejectedCommand("Commande automatique sans décision de routage AUTO ; aucun ordre envoyé")
+        csi = any(key in payload for key in ("signal_expires_at", "exit_policy_hash"))
+        if csi and payload.get("signal_validation_status") != "DEMO_ELIGIBLE":
+            raise RejectedCommand("Signal CSI non DEMO_ELIGIBLE : jamais exécuté automatiquement ; aucun ordre envoyé")
+        preferences = self.settings_supplier()
+        preferences = preferences if isinstance(preferences, dict) else {}
+        honor = preferences.get("signal_route_honor_demo_manual", True)
+        if (honor is not False) and self.settings.run_mode.value == "DEMO_MANUAL":
+            raise RejectedCommand("Mode DEMO_MANUAL : exécution automatique interdite ; aucun ordre envoyé")
+
     def _submit_position(self, payload):
         if "signal_confirmation_expires_at" in payload:
             deadline = positive(payload["signal_confirmation_expires_at"], "Expiration du signal")
             if deadline <= time.time() or deadline > time.time() + 125:
                 raise RejectedCommand("Confirmation du signal expirée ou invalide ; aucun ordre envoyé")
+        self._check_signal_route(payload)
         self._check_signal_window(payload)
         proposed = Position.model_validate(payload["position"])
         if proposed.environment != "DEMO" or proposed.quote_asset not in {"USDT", "USDC"}:

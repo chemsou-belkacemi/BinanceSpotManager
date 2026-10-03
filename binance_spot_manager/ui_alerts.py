@@ -9,6 +9,9 @@ ALERT_EVENTS = frozenset({
     "TP_EXECUTED", "SL_MOVED", "SL_EXECUTED", "POSITION_FINISHED",
     "DESYNC_DETECTED", "ERROR", "WORKER_STOPPED",
     "FEE_TOKEN_LOW",
+    # Signal « À confirmer » : le propriétaire doit agir (SIGNAL_AUTO_REJECTED reste hors
+    # des alertes pour ne pas noyer la boîte sous les refus de contrat).
+    "SIGNAL_REVIEW_REQUIRED",
 })
 
 

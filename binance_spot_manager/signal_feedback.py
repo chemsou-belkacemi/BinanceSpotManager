@@ -499,15 +499,12 @@ class SignalFeedbackWriter:
         written = 0
         final = False
         if command is None:
-            if row["auto_state"] == "REJECTED":
-                written += self._emit(signal_id, "REJECTED", "auto", symbol=symbol, occurred_at=now,
-                                      reason=row["auto_detail"] or "Signal automatique refusé")
-                final = True
-            elif (row["payload"] is None and row["auto_state"] in {"", "PROCESSING"}
-                  and expires_at > 0 and now >= expires_at + EXPIRY_GRACE_SECONDS):
-                written += self._emit(signal_id, "REJECTED", "unprocessed", symbol=symbol, occurred_at=now,
-                                      reason="Signal expiré avant tout traitement "
-                                             "(exécution automatique inactive ou non autorisée)")
+            # Aucune commande : le signal peut encore être confirmé à la main jusqu'à
+            # EXPIRES_AT. Le refus n'est donc écrit (et définitif) qu'après EXPIRES_AT + délai,
+            # quel que soit l'état automatique (refusé, à confirmer, jamais traité).
+            if expires_at > 0 and now >= expires_at + EXPIRY_GRACE_SECONDS:
+                written += self._emit(signal_id, "REJECTED", "no_command", symbol=symbol, occurred_at=now,
+                                      reason=self._no_command_reason(row))
                 final = True
         else:
             policy_hash = (command["payload"].get("exit_policy_hash") or parsed.get("exit_policy_hash") or None)
@@ -537,6 +534,23 @@ class SignalFeedbackWriter:
         if final:
             self.registry.mark_final(signal_id)
         return written
+
+    @staticmethod
+    def _no_command_reason(row) -> str:
+        if row["payload"] is not None:
+            return "Confirmation gelée sans transmission au worker avant EXPIRES_AT"
+        state = row["auto_state"] or ""
+        if state == "REVIEW":
+            try:
+                route = json.loads(row.get("route") or "{}")
+                codes = ", ".join(str(item.get("code", "")) for item in route.get("reasons") or [])
+            except (ValueError, TypeError, AttributeError):
+                codes = ""
+            return ("Confirmation manuelle requise, non donnée avant EXPIRES_AT : "
+                    + (codes or row["auto_detail"] or "motifs non enregistrés"))
+        if state == "REJECTED":
+            return row["auto_detail"] or "Signal automatique refusé"
+        return "Signal expiré avant tout traitement (exécution automatique inactive ou non autorisée)"
 
     def _report_position(self, signal_id, position, symbol, now):
         written = 0

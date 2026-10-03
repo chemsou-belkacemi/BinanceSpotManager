@@ -1,7 +1,8 @@
 """Safe, user-configurable budget suggestions for reviewed signals.
 
-The policy only proposes a budget. Signal execution still requires the
-existing simulation and explicit Demo confirmation.
+The policy proposes the budget of a manual confirmation and sets the budget of
+an automatic one. A signal with any review reason (high risk, low or unknown
+confidence) always requires the explicit Demo confirmation on the Signals page.
 """
 
 from __future__ import annotations

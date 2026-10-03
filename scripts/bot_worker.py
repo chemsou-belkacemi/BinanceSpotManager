@@ -131,10 +131,14 @@ class Worker:
             lambda: get_settings_store().load(),
             feedback=self.signal_feedback,
         )
+        # Routage : seuls les signaux sans motif de revue partent automatiquement ;
+        # les autres passent « À confirmer » (push optionnel, sans ligne de prix).
         self.auto_signal_executor = AutomaticSignalExecutor(
             account_scope(self.settings), self.signal_inbox, self.commands,
             self.client, self.rules_cache, risk_service.risk_limits,
             lambda: get_settings_store().load(), self.events,
+            positions=self.positions, notify=self.notifications.notify,
+            run_mode=self.settings.run_mode.value,
             csi_client=CsiClient.from_env(),
         )
 
@@ -213,6 +217,7 @@ class Worker:
             "signal_v1", "independent_positions_v1", "market_close_v1",
             "telegram_getupdates_v1", "telegram_auto_execution_v1", "candle_stop_v1",
             "signal_drop_v1", "signal_drop_csi_v3", "signal_feedback_v2",
+            "signal_routing_v1",
         ]
         runtime.last_message = message or runtime.last_message
         runtime.heartbeat_at = utcnow()
@@ -321,7 +326,11 @@ class Worker:
         if hasattr(self, "signal_drop"):
             self.signal_drop.import_pending()
         if hasattr(self, "auto_signal_executor"):
-            self.auto_signal_executor.process_pending()
+            try:
+                self.auto_signal_executor.process_pending()
+            except Exception as exc:  # noqa: BLE001 - le routage ne bloque jamais les TP/SL
+                logging.getLogger("bsm.worker").exception("Routage des signaux interrompu")
+                self.events.append(EventType.ERROR, f"Routage des signaux interrompu : {exc}", level="ERROR")
         if hasattr(self, "command_processor"):
             self.command_processor.run_one()
         positions = self.positions.list_open()

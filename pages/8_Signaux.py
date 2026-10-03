@@ -10,10 +10,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from binance_spot_manager import signal_routing
 from binance_spot_manager import csi_client
 from binance_spot_manager.candle_stop import kline_interval
 from binance_spot_manager.command_store import account_scope
 from binance_spot_manager.config import get_settings
+from binance_spot_manager.models import EventType
+from binance_spot_manager.risk_engine import RiskLimits
 from binance_spot_manager.signal_inbox import SignalInbox
 from binance_spot_manager.signal_parser import ParsedSignal, TEMPLATES, parse_signal
 from binance_spot_manager.signal_plan import TRAIL_STOP_KEY, prepare_signal, signal_sl_after_tp
@@ -40,8 +43,8 @@ preferences = get_settings_store().load()
 
 if preferences.get("signal_auto_execute_enabled", False):
     st.warning(
-        "Exécution Telegram automatique active : les nouveaux signaux valides peuvent "
-        "être envoyés au worker sans confirmation sur cette page."
+        "Exécution automatique active : seuls les signaux sans motif de revue partent sans "
+        "confirmation. Risque élevé, confiance faible ou inconnue : « À confirmer » sur cette page."
     )
 else:
     st.info("Aucun message n'est exécuté dès sa réception. Le budget et la validité du signal doivent être confirmés. Un seul signal par texte.")
@@ -101,13 +104,33 @@ rows = inbox.recent(scope)
 if not rows:
     st.caption("Aucun signal reçu pour ce compte Demo.")
     st.stop()
-by_id = {row["id"]: row for row in rows}
+now = time.time()
+review_count = sum(1 for item in rows if signal_routing.is_pending_review(item, now=now))
+only_review = st.toggle(f"Seulement à confirmer ({review_count})", key="signal_review_filter")
+visible = [item for item in rows if not only_review or signal_routing.is_pending_review(item, now=now)]
+if not visible:
+    st.caption("Aucun signal à confirmer.")
+    st.stop()
+by_id = {item["id"]: item for item in visible}
 selected = st.session_state.get("selected_signal")
 ids = list(by_id)
 selected = st.selectbox("Signal à examiner", ids, index=ids.index(selected) if selected in ids else 0,
-    format_func=lambda key: f"{by_id[key]['parsed']['symbol'] or 'Non reconnu'} · {by_id[key]['source']} · {key[:8]}")
+    format_func=lambda key: (f"{signal_routing.row_state_label(by_id[key], now=now)} · "
+                             f"{by_id[key]['parsed']['symbol'] or 'Non reconnu'} · {by_id[key]['source']} · {key[:8]}"))
 row = by_id[selected]
-if row.get("auto_state") == "REJECTED":
+stored_route = signal_routing.decision_from_json(row.get("route") or "")
+if row.get("auto_state") == "REVIEW" and row["payload"] is None:
+    st.warning(f"À confirmer : {row.get('auto_detail') or 'motifs indisponibles'}")
+    if stored_route:
+        for category, reasons in signal_routing.grouped_reasons(stored_route.reasons).items():
+            st.markdown(f"**{signal_routing.CATEGORY_LABELS.get(category, category)}**")
+            for reason in reasons:
+                bound = (f" (valeur {reason.value:.2f} · seuil {reason.threshold:.2f})"
+                         if isinstance(reason.value, (int, float)) and isinstance(reason.threshold, (int, float)) else "")
+                st.markdown(f"- {reason.message}{bound}")
+    st.caption("Confiance = déclaration (statut CSI, groupe de confiance, liste d'actifs validés), pas une mesure. "
+               "Les seuils de risque décident qui confirme ; ils ne disent rien du résultat.")
+elif row.get("auto_state") == "REJECTED":
     st.warning(f"Exécution automatique refusée : {row.get('auto_detail') or 'raison indisponible'}")
 elif row.get("auto_state") == "PROCESSING":
     st.info("Exécution automatique en cours de préparation par le worker.")
@@ -144,7 +167,10 @@ if parsed.is_csi:
               "Politique de sortie": f"{parsed.exit_policy_id} ({parsed.exit_policy_hash})",
               "Statut de validation": parsed.validation_status, "Actualités": parsed.news_status})
     if parsed.validation_status != "DEMO_ELIGIBLE":
-        st.warning("Statut de validation autre que DEMO_ELIGIBLE : jamais exécuté automatiquement.")
+        st.warning("Statut de validation autre que DEMO_ELIGIBLE : jamais exécuté automatiquement, "
+                   "confirmation manuelle avec acquittement explicite.")
+    if row["payload"] is None and time.time() < parsed.expires_at:
+        st.info(f"À confirmer avant {_utc(parsed.expires_at)} (EXPIRES_AT).")
 for warning in parsed.warnings:
     st.warning(warning)
 for error in parsed.errors:
@@ -183,14 +209,13 @@ with st.container(border=True):
         except ValueError as exc:
             st.warning(str(exc))
     st.caption(
-        "Un taux de base historique n'est pas la probabilité que ce signal réussisse. Détail : page CSI. "
+        "Un taux de base historique ne dit pas si ce signal réussira. Détail : page CSI. "
         "Paire hors univers sur un signal Telegram : le coller sur la page CSI vaut validation de la paire."
     )
 
 if row["payload"]:
     st.info("Ce signal a déjà été confirmé. Il ne peut pas créer une seconde demande.")
-    commands = service.commands.list_recent(scope)
-    command = next((c for c in commands if c["request_key"] == f"signal:{selected}"), None)
+    command = service.commands.get_by_request_key(scope, f"signal:{selected}")
     if command:
         st.write(f"Commande {command['id']} : {command['state']}")
         st.write(command["result"])
@@ -205,8 +230,16 @@ if row["payload"]:
         st.warning("Confirmation expirée sans transmission. Vérifier Opérations ; aucun rejeu automatique.")
     st.stop()
 
+if parsed.is_csi and time.time() >= parsed.expires_at:
+    st.error("EXPIRES_AT dépassé : ce signal CSI n'est plus confirmable (le worker le refuserait).")
+    st.stop()
+
 st.subheader("Préparer l'exécution")
-st.caption("Entrées LIMIT : budget réparti également, expiration après 24 h. TP répartis également sur la position, dernier TP à 100 % du restant. Les entrées encore ouvertes sont annulées après TP1. Les TP sont surveillés par le worker : cette page ne crée pas un OCO par tranche.")
+if parsed.is_csi:
+    st.caption("Entrée LIMIT unique valable jusqu'à ENTRY_EXPIRES_AT. Parts des TP selon TP_WEIGHTS, dernier TP à 100 % du restant. "
+               "La politique de sortie (EXIT_POLICY_ID) fixe le déplacement du SL. Les TP sont surveillés par le worker.")
+else:
+    st.caption("Entrées LIMIT : budget réparti également, expiration après 24 h. TP répartis également sur la position, dernier TP à 100 % du restant. Les entrées encore ouvertes sont annulées après TP1. Les TP sont surveillés par le worker : cette page ne crée pas un OCO par tranche.")
 st.warning("Une limite d'achat au-dessus du marché peut être exécutée immédiatement. Les fills partiels et les frais peuvent réduire les quantités réellement vendables. Le worker doit rester actif pour la stratégie.")
 quote_asset = "USDC" if parsed.symbol.endswith("USDC") else "USDT"
 sizing_policy = SignalSizingPolicy.from_mapping(preferences)
@@ -295,12 +328,31 @@ if st.button("Vérifier sur Binance Demo et simuler", disabled=not (budget > 0 a
             current_price=current_price or 0, signal_id=selected, source=row["source"],
             touch_stop=touch, validity_confirmed=validity, trail_stop=trail_stop,
             sl_after_tp=sl_after_tp)
-        st.session_state["signal_preview"] = (signature, plan, payload)
+        # Même lecture du risque que le routage automatique (et que le worker pour les limites dures).
+        try:
+            limits = service.risk_limits()
+            limits = limits if isinstance(limits, RiskLimits) else RiskLimits(
+                min_reserve_percent=float(getattr(limits, "min_reserve_percent", 20.0)))
+            positions_now = service.positions.list_all()
+            if getattr(service.positions, "read_errors", None):
+                raise ValueError("stockage des positions illisible")
+            live_reasons, live_metrics = signal_routing.assess_risk(
+                kind=signal_routing.signal_kind(row), payload=payload,
+                plan_average_price=plan.estimated_average_price, current_price=current_price or 0,
+                balances=balances, prices=service.client.get_prices(), positions=positions_now,
+                active_commands=service.commands.active(scope, "SUBMIT_POSITION"), limits=limits,
+                policy=signal_routing.RoutingPolicy.from_mapping(preferences, limits), raw=row.get("raw") or "",
+            )
+        except Exception as exc:  # noqa: BLE001 - risque non mesurable : acquittement exigé
+            live_reasons = [signal_routing.Reason("D_RISK", signal_routing.DONNEES, f"Risque non évaluable : {exc}")]
+            live_metrics = {}
+        st.session_state["signal_preview"] = (signature, plan, payload, live_reasons, live_metrics,
+                                              sizing_suggestion.budget if sizing_suggestion else None)
     except Exception as exc:
         st.error(f"Simulation refusée : {exc}")
 preview = st.session_state.get("signal_preview")
 if preview and preview[0] == signature:
-    _, plan, payload = preview
+    _, plan, payload, live_reasons, live_metrics, budget_proposed = preview
     st.dataframe([{"Entrée": entry.sequence, "Prix limite": entry.price, "Quantité": entry.qty,
                    "Montant": entry.notional} for entry in plan.entries], hide_index=True)
     st.dataframe([{"TP": tp.sequence, "Prix": tp.target_price, "Part initiale (%)": tp.sell_percent,
@@ -321,8 +373,41 @@ if preview and preview[0] == signature:
     st.markdown(f"SL : {plan.stop_loss.price} · Perte théorique au SL hors frais/glissement : "
                 + colored_pnl(-abs(plan.loss_max_estimated), f"{-abs(plan.loss_max_estimated):.4f} {plan.quote_asset}"))
     st.caption("Simulation valable 120 secondes. Le worker recontrôle prix, solde, risque et frais avant tout achat. Une simulation valide peut encore être refusée.")
+    st.markdown("**Risque (même calcul que le routage automatique)**")
+    if live_metrics:
+        st.dataframe([{
+            "Risque au stop frais compris (%)": round(live_metrics["risk_pct_with_costs"], 3),
+            "Risque total projeté, entrées au repos comprises (%)": round(live_metrics["projected_total_risk_pct"], 3),
+            "Exposition de ce trade (%)": round(live_metrics["exposure_pct"], 2),
+            "Distance du stop (%)": round(live_metrics["stop_distance_pct"], 2),
+            "Entrée déjà dépassée (%)": round(live_metrics["entry_gap_pct"], 2),
+        }], hide_index=True)
+    hard_refusals = [reason for reason in live_reasons if reason.code == "R2_HARD_LIMIT"]
+    for reason in hard_refusals:
+        st.error(reason.message)
+    # Motifs à acquitter : ceux du routage enregistré et ceux de la simulation, un par catégorie.
+    to_acknowledge = {reason.code: reason for reason in (stored_route.reasons if stored_route else [])}
+    to_acknowledge |= {reason.code: reason for reason in live_reasons}
+    csi_status = to_acknowledge.pop("C_CSI_STATUS", None)
+    if parsed.is_csi and parsed.validation_status != "DEMO_ELIGIBLE" and csi_status is None:
+        csi_status = signal_routing.Reason("C_CSI_STATUS", signal_routing.CONFIANCE,
+                                           f"Statut CSI {parsed.validation_status}")
+    acknowledged = []
+    all_acknowledged = True
+    if csi_status is not None:
+        ticked = st.checkbox(f"Je confirme ce signal CSI non DEMO_ELIGIBLE (statut {parsed.validation_status}) : "
+                             "jamais exécuté automatiquement, décision manuelle", key=f"ack_csi_{selected}")
+        all_acknowledged &= ticked
+        acknowledged += ["C_CSI_STATUS"] if ticked else []
+    labels = {signal_routing.CONFIANCE: "une confiance faible ou inconnue", signal_routing.RISQUE: "un risque élevé",
+              signal_routing.DONNEES: "des données incomplètes", signal_routing.CONTRAT: "un motif de contrat"}
+    for category, reasons in signal_routing.grouped_reasons(to_acknowledge.values()).items():
+        ticked = st.checkbox(f"Je confirme malgré {labels.get(category, category)} : "
+                             + " · ".join(reason.message for reason in reasons), key=f"ack_{category}_{selected}")
+        all_acknowledged &= ticked
+        acknowledged += [reason.code for reason in reasons] if ticked else []
     confirm = st.checkbox("Je confirme ces achats LIMIT et cette stratégie sur Binance Demo", key=f"confirm_{payload['position']['position_id']}")
-    if st.button("Transmettre au worker Demo", disabled=not confirm):
+    if st.button("Transmettre au worker Demo", disabled=not (confirm and all_acknowledged) or bool(hard_refusals)):
         try:
             if time.time() >= payload["signal_confirmation_expires_at"]:
                 raise ValueError("Simulation expirée : relancer la vérification.")
@@ -336,8 +421,19 @@ if preview and preview[0] == signature:
             status = service.worker_status()
             if not status.running or status.heartbeat_age is None or status.heartbeat_age >= 20:
                 raise ValueError("Démarrer le worker avant de confirmer un signal.")
-            frozen = inbox.freeze(scope, selected, payload)
-            service.submit_command("SUBMIT_POSITION", frozen, request_key=f"signal:{selected}")
+            confirmed = dict(payload) | {"confirmation_mode": "MANUAL",
+                                         "acknowledged_reason_codes": sorted(acknowledged),
+                                         "budget_proposed": budget_proposed}
+            if parsed.is_csi:
+                confirmed["signal_validation_status"] = parsed.validation_status
+            frozen = inbox.freeze(scope, selected, confirmed)
+            command = service.submit_command("SUBMIT_POSITION", frozen, request_key=f"signal:{selected}")
+            service.events.append(
+                EventType.SIGNAL_MANUAL_CONFIRMED,
+                f"Signal confirmé à la main : {parsed.symbol}",
+                symbol=parsed.symbol, signal_id=selected, command_id=command["id"],
+                acknowledged_reason_codes=sorted(acknowledged), budget=budget, budget_proposed=budget_proposed,
+            )
             st.rerun()
         except Exception as exc:
             st.error(f"Commande non confirmée : {exc}. Consulter Opérations avant toute autre action.")

@@ -13,7 +13,7 @@ from binance_spot_manager.signal_inbox import SignalInbox
 from binance_spot_manager.signal_parser import parse_signal
 from binance_spot_manager.signal_plan import TRAIL_STOP_KEY, prepare_signal, signal_sl_after_tp
 from binance_spot_manager.symbol_rules import parse_symbol_rules
-from test_signal_auto_execution import SIMPLE, enabled_preferences, executor
+from test_signal_auto_execution import SIMPLE, enabled_preferences, executor, telegram_id
 
 
 TEXT = "PAIR: BTC/USDT\nPLATFORM: BINANCE\nENTRY 1: 84000\nT1: 86000\nT2: 88000\nSL: 82000"
@@ -152,32 +152,37 @@ def queue_rows(tmp_path, preferences):
     api = inbox.receive("demo", SIMPLE, source="api", external_id="drop:ml-1", source_timestamp=995)
     telegram = inbox.receive(
         "demo", SIMPLE.replace("T1: 90000", "T1: 91000"),
-        source="telegram", external_id="bot:1", source_timestamp=995,
+        source="telegram", external_id=telegram_id(1), source_timestamp=995,
     )
     worker, commands = executor(tmp_path, inbox, preferences)
     result = worker.process_pending()
-    queued = {row["id"] for row in inbox.recent("demo") if row["auto_state"] == "QUEUED"}
-    return api, telegram, queued, result, worker
+    states = {row["id"]: row["auto_state"] for row in inbox.recent("demo")}
+    processed = {row_id for row_id, state in states.items() if state}
+    return api, telegram, processed, result, worker, states
 
 
 def test_api_rows_need_drop_auto_even_when_telegram_auto_is_on(tmp_path):
-    api, telegram, queued, _, _ = queue_rows(tmp_path, enabled_preferences(signal_drop_enabled=True))
+    api, telegram, processed, _, _, states = queue_rows(tmp_path, enabled_preferences(signal_drop_enabled=True))
 
-    assert queued == {telegram["id"]}
+    assert processed == {telegram["id"]}
+    assert states[telegram["id"]] == "QUEUED" and states[api["id"]] == ""
 
 
-def test_api_rows_queue_when_drop_auto_is_authorized(tmp_path):
+def test_api_rows_are_routed_to_review_when_drop_auto_is_authorized(tmp_path):
     preferences = enabled_preferences(
         signal_telegram_enabled=False, signal_telegram_auto_enabled=False,
         signal_drop_enabled=True, signal_drop_auto_enabled=True,
         signal_drop_auto_enabled_since=900,
     )
-    api, telegram, queued, result, worker = queue_rows(tmp_path, preferences)
+    api, telegram, processed, result, worker, states = queue_rows(tmp_path, preferences)
 
-    assert result == ["QUEUED"]
-    assert queued == {api["id"]}
+    # JSON v1 : aucune source déclarée, toujours « À confirmer », jamais automatique.
+    assert result == ["REVIEW"]
+    assert processed == {api["id"]} and states[api["id"]] == "REVIEW"
+    assert "JSON v1" in next(r for r in worker.inbox.recent("demo") if r["id"] == api["id"])["auto_detail"]
     events = worker.events.tail(10)
-    assert any("Signal ML/dépôt envoyé automatiquement" in event["message"] for event in events)
+    assert any("Signal ML/dépôt à confirmer" in event["message"] for event in events)
+    assert worker.commands.list_recent("demo") == []
 
 
 def test_api_rows_wait_for_drop_authorization_timestamp(tmp_path):
@@ -185,15 +190,15 @@ def test_api_rows_wait_for_drop_authorization_timestamp(tmp_path):
         signal_drop_enabled=True, signal_drop_auto_enabled=True,
         signal_drop_auto_enabled_since=0,
     )
-    api, telegram, queued, _, _ = queue_rows(tmp_path, preferences)
-    assert queued == {telegram["id"]}
+    api, telegram, processed, _, _, _ = queue_rows(tmp_path, preferences)
+    assert processed == {telegram["id"]}
 
     later = enabled_preferences(
         signal_drop_enabled=True, signal_drop_auto_enabled=True,
         signal_drop_auto_enabled_since=2000,
     )
-    api, telegram, queued, _, _ = queue_rows(tmp_path / "later", later)
-    assert queued == {telegram["id"]}
+    api, telegram, processed, _, _, _ = queue_rows(tmp_path / "later", later)
+    assert processed == {telegram["id"]}
 
 
 def test_drop_auto_does_not_require_or_change_telegram_gating(tmp_path):
@@ -201,15 +206,17 @@ def test_drop_auto_does_not_require_or_change_telegram_gating(tmp_path):
         signal_drop_enabled=True, signal_drop_auto_enabled=True,
         signal_drop_auto_enabled_since=900,
     )
-    api, telegram, queued, _, _ = queue_rows(tmp_path, both)
-    assert queued == {api["id"], telegram["id"]}
+    api, telegram, processed, result, _, states = queue_rows(tmp_path, both)
+    assert processed == {api["id"], telegram["id"]}
+    assert result == ["REVIEW", "QUEUED"]
+    assert states[api["id"]] == "REVIEW" and states[telegram["id"]] == "QUEUED"
 
     master_off = both | {"signal_auto_execute_enabled": False}
-    _, _, queued, result, _ = queue_rows(tmp_path / "off", master_off)
-    assert queued == set() and result == []
+    _, _, processed, result, _, _ = queue_rows(tmp_path / "off", master_off)
+    assert processed == set() and result == []
 
 
-def test_old_api_signal_is_rejected_with_drop_label(tmp_path):
+def test_old_api_signal_goes_to_review_with_drop_label(tmp_path):
     inbox = SignalInbox(tmp_path / "signals.db")
     row = inbox.receive("demo", SIMPLE, source="api", external_id="drop:old", source_timestamp=995)
     preferences = enabled_preferences(
@@ -219,7 +226,7 @@ def test_old_api_signal_is_rejected_with_drop_label(tmp_path):
     inbox.claim_auto("demo", row["id"])  # reprise après arrêt : ligne PROCESSING, âge dépassé
     worker, commands = executor(tmp_path, inbox, preferences, now=5000)
 
-    assert worker.process_pending() == ["REJECTED"]
+    assert worker.process_pending() == ["REVIEW"]
     assert "Signal ML/dépôt trop ancien" in inbox.recent("demo")[0]["auto_detail"]
     assert commands.list_recent("demo") == []
 
@@ -277,7 +284,7 @@ def test_sl_after_tp_rejects_rules_requiring_a_value(rules):
 def test_auto_executor_passes_saved_sl_rule(tmp_path):
     inbox = SignalInbox(tmp_path / "signals.db")
     text = SIMPLE.replace("T1: 90000", "T1: 90000\nT2: 92000")
-    row = inbox.receive("demo", text, source="telegram", external_id="bot:2", source_timestamp=995)
+    row = inbox.receive("demo", text, source="telegram", external_id=telegram_id(2), source_timestamp=995)
     worker, commands = executor(
         tmp_path, inbox,
         enabled_preferences(signal_sl_after_tp="BREAK_EVEN", **{TRAIL_STOP_KEY: False}),
