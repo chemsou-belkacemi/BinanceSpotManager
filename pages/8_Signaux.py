@@ -28,6 +28,11 @@ from binance_spot_manager.telegram_signals import chat_allowlist, import_telegra
 from binance_spot_manager.position_store import get_settings_store
 from ui_common import banner, get_service, load_rules, page_header, sidebar_status, colored_pnl
 
+from ui_common import require_login  # noqa: E402
+
+# Connexion exigee avant tout affichage (comptes : scripts/creer_compte.py).
+require_login()
+
 st.set_page_config(page_title="Signaux — Binance Demo", page_icon=":material/description:", layout="wide")
 page_header("Signaux", "Texte → vérification → confirmation → worker Binance Demo")
 settings = get_settings()

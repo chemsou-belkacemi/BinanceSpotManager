@@ -71,7 +71,7 @@ class AutomaticSignalExecutor:
 
     def __init__(self, scope, inbox, commands, client, rules_cache, risk_limits,
                  preferences_loader, events, *, clock=time.time, positions=None,
-                 notify=None, run_mode=None, csi_client=None):
+                 notify=None, run_mode=None, csi_client=None, entry_gate=None):
         self.scope = scope
         self.inbox = inbox
         self.commands = commands
@@ -91,6 +91,8 @@ class AutomaticSignalExecutor:
         # Avis de CryptoSignalIntelligence (lecture et évaluation seulement) : il peut retenir
         # un signal automatique, jamais l'envoyer. Absent = CSI considéré injoignable.
         self.csi_client = csi_client
+        #: Licence de location : "" si les nouvelles entrées sont autorisées, sinon la raison.
+        self.entry_gate = entry_gate
         #: Raison d'une suspension (échec sûr), vide sinon : posée par le worker tant que des ordres
         #: BSM orphelins existent chez Binance ou que leur contrôle est impossible.
         self.suspended_reason = ""
@@ -129,6 +131,11 @@ class AutomaticSignalExecutor:
         preferences = preferences if isinstance(preferences, dict) else {}
         if not preferences.get("signal_auto_execute_enabled", False):
             self._update(state="DISABLED", last_detail="")
+            return []
+        refusal = self.entry_gate() if self.entry_gate else ""
+        if refusal:
+            # Aucune mise en file : les signaux restent dans la boîte, comme pendant une suspension.
+            self._update(state="LICENCE", last_detail=refusal)
             return []
         if self.suspended_reason:
             # Les signaux reçus pendant la suspension restent dans la boîte ; à la reprise, seuls

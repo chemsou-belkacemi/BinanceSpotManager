@@ -27,6 +27,11 @@ from ui_common import (  # noqa: E402
 
 from ui_common import colored_pnl, pnl_metric, pnl_dataframe
 
+from ui_common import require_login  # noqa: E402
+
+# Connexion exigee avant tout affichage (comptes : scripts/creer_compte.py).
+require_login()
+
 settings = get_settings()
 service = get_service()
 

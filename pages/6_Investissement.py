@@ -28,6 +28,11 @@ from ui_common import (  # noqa: E402
     submit_to_worker, new_command_confirmation,
 )
 
+from ui_common import require_login  # noqa: E402
+
+# Connexion exigee avant tout affichage (comptes : scripts/creer_compte.py).
+require_login()
+
 settings = get_settings()
 service = get_service()
 st.set_page_config(page_title="Investissement — BinanceSpotManager", page_icon="📈", layout="wide")

@@ -8,6 +8,11 @@ data/
 logs/
 backups/
 
+# Cles : cle maitresse du coffre, cle privee de licence (jamais dans Git)
+*.key
+*.pem
+master.key
+
 # Identifiants de l'acces public (make user-add)
 deploy/users.caddy*
 

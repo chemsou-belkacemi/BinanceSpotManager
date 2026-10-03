@@ -138,7 +138,8 @@ dans le dossier du projet. `make down` les conserve ; **ne jamais lancer
 
 ### Accès public (serveur, VPS)
 
-L'interface n'a **aucune authentification** : ne jamais publier le port 8501
+Sans compte créé, l'interface n'a **aucune authentification** (voir « Location » ci-dessous
+pour l'activer) : ne jamais publier le port 8501
 (par exemple `0.0.0.0:8501`), d'autant que Docker contourne les règles `ufw`
 pour les ports publiés. L'accès public passe par un proxy Caddy : HTTPS
 automatique (Let's Encrypt) et un identifiant par personne pour toutes les pages.
@@ -177,6 +178,23 @@ un accès qu'à des personnes de confiance. L'adresse `sslip.io` apparaît dans 
 journaux publics des certificats et sera rapidement sondée : utiliser des mots de
 passe longs et aléatoires. L'interface reste aussi joignable par tunnel SSH
 (`ssh -L 8501:127.0.0.1:8501 <serveur>`).
+
+### Location : clés du client, connexion, licence
+
+Pour louer le bot sans jamais recevoir les clés des clients : **[docs/LOCATION.md](docs/LOCATION.md)**
+(modèles possibles, sécurité, points juridiques à faire vérifier, choix à trancher).
+
+- **Clés API** : le client les saisit dans *Settings → Sécurité*, dans sa propre instance ;
+  elles sont chiffrées sur place (AES-256-GCM, `data/key_vault.json`) avec une clé maîtresse
+  rangée hors des données (`BSM_MASTER_KEY_FILE` ; Docker : volume `bsm-keys`, `make master-key`).
+  Les clés de `.env`, si elles existent, restent prioritaires.
+- **Connexion** : `make compte NAME=<nom>` (ou `python scripts/creer_compte.py <nom>`) crée un
+  compte mot de passe + code TOTP. Dès qu'un compte existe, chaque page exige la connexion
+  (`BSM_AUTH_REQUIRED=true|false` pour forcer). 5 échecs bloquent 15 minutes ; la session expire
+  après `BSM_SESSION_IDLE_MINUTES` (30 par défaut) d'inactivité.
+- **Licence** : `BSM_LICENCE_REQUIRED=true` + `BSM_LICENCE_PUBLIC_KEY` ; sans licence valide,
+  aucune nouvelle entrée, mais les positions ouvertes restent suivies. Émission chez le
+  propriétaire : `scripts/emettre_licence.py`.
 
 ## 6. Créer un trade
 

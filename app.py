@@ -22,6 +22,11 @@ from binance_spot_manager.config import get_settings  # noqa: E402
 from binance_spot_manager.event_store import configure_logging  # noqa: E402
 from ui_common import banner, page_header, sidebar_status  # noqa: E402
 
+from ui_common import require_login  # noqa: E402
+
+# Connexion exigee avant tout affichage (comptes : scripts/creer_compte.py).
+require_login()
+
 configure_logging()
 
 settings = get_settings()
@@ -92,7 +97,8 @@ with col1:
     st.subheader("Avant de commencer")
     st.markdown(
         """
-1. `make init`, puis renseigner les clés Demo dans `.env`.
+1. `make init`, puis saisir les clés Demo dans **Settings → Sécurité** (chiffrées sur place)
+   ou dans `.env`.
 2. Vérifier la connexion : `make check`
 3. Lancer l'interface et le worker : `make up`
 4. Suivre le worker depuis **Dashboard** (`make logs` pour les journaux).

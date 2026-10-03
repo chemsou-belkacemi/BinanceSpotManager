@@ -8,7 +8,7 @@ STAMP := $(shell date +%Y%m%d-%H%M%S)
 .DEFAULT_GOAL := help
 .PHONY: help init build network up down restart ps logs worker-start worker-stop worker-restart \
         check open-orders demo-tests integration migrate-oco run test shell backup import-data \
-        users user-add user-remove proxy-reload
+        users user-add user-remove proxy-reload master-key compte
 
 help: ## Affiche cette aide
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -77,7 +77,7 @@ test: ## Tests hors ligne dans un conteneur jetable, sans volume ni secret (TEST
 shell: ## Shell dans un service en cours d'execution (SERVICE=ui|worker)
 	$(COMPOSE) exec $(SERVICE) sh
 
-backup: ## Archive data/ et logs/ dans ./backups (worker arrete le temps de la copie)
+backup: ## Archive data/ et logs/ dans ./backups (worker arrete ; jamais la cle maitresse)
 	@mkdir -p backups
 	$(COMPOSE) stop worker
 	@$(COMPOSE) run --rm --no-deps -T worker tar czf - -C /app data logs > backups/bsm-$(STAMP).tar.gz; \
@@ -85,6 +85,13 @@ backup: ## Archive data/ et logs/ dans ./backups (worker arrete le temps de la c
 	if [ $$status -eq 0 ]; then echo "Sauvegarde : backups/bsm-$(STAMP).tar.gz (non chiffree)"; \
 	else rm -f backups/bsm-$(STAMP).tar.gz; fi; \
 	exit $$status
+
+master-key: ## Cree la cle maitresse du coffre (volume bsm-keys, hors sauvegardes) si elle manque
+	$(COMPOSE) run --rm --no-deps keytool
+
+compte: master-key ## Cree un compte de connexion a l'interface, mot de passe + TOTP (NAME=<identifiant>)
+	@echo "$(NAME)" | grep -Eq '^[A-Za-z0-9_.-]{2,32}$$' || { echo "Usage : make compte NAME=<identifiant> [REMPLACER=1]"; exit 1; }
+	$(COMPOSE) run --rm --no-deps keytool python scripts/creer_compte.py $(NAME) $(if $(REMPLACER),--remplacer,)
 
 USERS_FILE := deploy/users.caddy
 
@@ -124,7 +131,8 @@ import-data: network ## Importe ./data (installation locale) dans un volume Dock
 	@test -d data || { echo "Aucun dossier ./data a importer"; exit 1; }
 	@echo "Le worker local (hors Docker) doit etre arrete avant l'import."
 	$(COMPOSE) stop worker ui
-	@$(COMPOSE) run --rm --no-deps --user root -v "$(CURDIR)/data:/import:ro" worker sh -c '\
+	@$(COMPOSE) run --rm --no-deps --user root --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
+		-v "$(CURDIR)/data:/import:ro" worker sh -c '\
 		if [ -n "$$(ls -A /app/data/positions 2>/dev/null)" ] || [ -e /app/data/order_intents.sqlite3 ]; then \
 			echo "Volume Docker deja utilise : import refuse (rien n a ete modifie)"; exit 1; fi; \
 		cp -a /import/. /app/data/ \

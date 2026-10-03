@@ -7,7 +7,26 @@
 
 name: binance-spot-manager
 
+# Durcissement commun aux services longs (ui, worker) et a l'outil de cles :
+# aucun privilege supplementaire, aucune capacite Linux, systeme de fichiers en lecture seule
+# (verifie hors Docker : Streamlit n'ecrit que dans data/ et logs/), /tmp en memoire,
+# nombre de processus borne, journaux Docker tournants.
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop: [ALL]
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  pids_limit: 256
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
 x-app: &app
+  <<: *hardening
   build: .
   image: binance-spot-manager:latest
   init: true
@@ -20,9 +39,14 @@ x-app: &app
     # jointe par le reseau partage csi-bridge. Le jeton facultatif vient de .env.
     BSM_CSI_API_URL: ${BSM_CSI_API_URL:-http://csi-api:8503}
     CSI_API_TOKEN: ${CSI_API_TOKEN:-}
+    # Cle maitresse du coffre (cles API saisies dans Settings, secrets TOTP) : volume separe
+    # des donnees, donc absent des sauvegardes (make backup) ; monte en LECTURE SEULE ici.
+    # Seul l'outil ponctuel keytool (make master-key) peut l'ecrire.
+    BSM_MASTER_KEY_FILE: /var/lib/bsm-keys/master.key
   volumes:
     - bsm-data:/app/data
     - bsm-logs:/app/logs
+    - bsm-keys:/var/lib/bsm-keys:ro
   networks:
     - default
     - csi-bridge
@@ -34,6 +58,8 @@ services:
     command: ["python", "scripts/bot_worker.py"]
     # Laisse le worker terminer sa boucle en cours apres SIGTERM.
     stop_grace_period: 30s
+    mem_limit: 768m
+    cpus: 1.0
     healthcheck:
       test: ["CMD", "python", "scripts/worker_healthcheck.py"]
       interval: 30s
@@ -43,6 +69,9 @@ services:
 
   ui:
     <<: *app
+    # scrypt (connexion) utilise 128 Mio par tentative : marge pour quelques connexions simultanees.
+    mem_limit: 1g
+    cpus: 1.0
     ports:
       # Interface privee : jamais exposee au reseau local.
       - "127.0.0.1:${BSM_UI_PORT:-8501}:8501"
@@ -59,6 +88,17 @@ services:
     image: caddy:2-alpine
     profiles: ["public"]
     init: true
+    # Caddy tourne en root pour ouvrir 80/443 : pas de cap_drop tant que ce n'est pas teste.
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     depends_on: [ui]
     entrypoint: ["sh", "/etc/caddy/deploy/proxy-entrypoint.sh"]
     environment:
@@ -73,6 +113,22 @@ services:
       - caddy-data:/data
       - caddy-config:/config
     restart: unless-stopped
+
+  # Outil ponctuel des cles (make master-key, make compte) : seul service qui peut ECRIRE la
+  # cle maitresse. Aucun reseau, aucune variable de .env.
+  keytool:
+    <<: *hardening
+    build: .
+    image: binance-spot-manager:latest
+    profiles: ["tools"]
+    init: true
+    network_mode: none
+    environment:
+      BSM_MASTER_KEY_FILE: /var/lib/bsm-keys/master.key
+    volumes:
+      - bsm-data:/app/data
+      - bsm-keys:/var/lib/bsm-keys
+    command: ["python", "scripts/cle_maitresse.py"]
 
   # Outils ponctuels (make test) : aucun volume, aucun secret.
   test:
@@ -98,6 +154,8 @@ volumes:
   # n'ecrit que dans signal_drop/incoming/ ; le worker cree l'arborescence.
   bsm-data:
   bsm-logs:
+  # Cle maitresse du coffre : jamais dans bsm-data, donc jamais dans make backup.
+  bsm-keys:
   # Certificats HTTPS : a conserver, sinon Let's Encrypt en reemet (limites de frequence).
   caddy-data:
   caddy-config:

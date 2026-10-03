@@ -33,6 +33,11 @@ from ui_common import (  # noqa: E402
     sidebar_status,
 )
 
+from ui_common import require_login  # noqa: E402
+
+# Connexion exigee avant tout affichage (comptes : scripts/creer_compte.py).
+require_login()
+
 settings = st.session_state.setdefault("settings_obj", None) or reload_settings()
 service = get_service()
 
@@ -685,6 +690,116 @@ with tabs[5]:
 # ==========================================================================
 
 with tabs[0]:
+    from binance_spot_manager import licence
+    from binance_spot_manager.key_vault import KeyVault, VaultError
+
+    st.subheader("Mes clés API Binance Demo")
+    st.caption(
+        "Saisies ici, dans TON instance : chiffrées sur place (AES-256-GCM) avec une clé maîtresse "
+        "rangée hors des données. Personne d'autre ne les reçoit, et elles ne sont jamais réaffichées."
+    )
+    vault = KeyVault()
+    key_status = vault.binance_status()
+    if "bsm_keys_message" in st.session_state:
+        st.success(st.session_state.pop("bsm_keys_message"))
+    open_positions = service.summary()["open"]
+    if settings.credentials_source == "env":
+        st.info(
+            "Les clés actuelles viennent des variables d'environnement (`.env`), prioritaires : "
+            "le coffre n'est utilisé que si elles sont vides."
+        )
+    if settings.credentials_error:
+        st.error(f"Coffre : {settings.credentials_error}")
+    if key_status.defined:
+        st.success(
+            f"Clés enregistrées dans le coffre : clé API se terminant par `{key_status.hint.lstrip('…')}`, "
+            f"mises à jour le {key_status.updated_at[:16].replace('T', ' ')} UTC."
+        )
+    else:
+        st.caption("Aucune clé dans le coffre.")
+    with st.expander("Avant de coller une clé : bonnes pratiques Binance", expanded=not key_status.defined):
+        st.markdown(
+            """
+- Crée une clé **dédiée à ce bot**, jamais celle d'un autre outil.
+- **Retraits désactivés**, toujours : le bot n'en fait aucun.
+- **Restriction par adresse IP** : limite la clé à l'IP du serveur qui fait tourner le bot.
+- Seul le trading Spot est utile : pas de marge, de contrats à terme ni de transferts.
+- Cette version ne fonctionne que sur **Binance Demo** : une clé du compte réel serait refusée.
+- En cas de doute (fuite, ancien serveur), **supprime la clé chez Binance** : c'est la seule
+  révocation immédiate. Puis enregistre une nouvelle clé ici.
+"""
+        )
+    with st.form("bsm_api_keys", clear_on_submit=True):
+        new_api_key = st.text_input("Clé API", type="password", autocomplete="off", key="bsm_new_api_key")
+        new_api_secret = st.text_input("Secret API", type="password", autocomplete="off", key="bsm_new_api_secret")
+        save_keys = st.form_submit_button("Chiffrer et enregistrer mes clés", type="primary")
+    if save_keys:
+        # Le secret ne reste pas dans l'état de session du serveur, quel que soit le résultat.
+        st.session_state.pop("bsm_new_api_key", None)
+        st.session_state.pop("bsm_new_api_secret", None)
+        if open_positions:
+            st.error(
+                f"{open_positions} position(s) ouverte(s) : changer de clé maintenant couperait leur suivi "
+                "(stops, objectifs). Clôturer d'abord, ou révoquer la clé chez Binance en cas d'urgence."
+            )
+        else:
+            try:
+                vault.save_binance_keys(new_api_key, new_api_secret)
+            except (ValueError, VaultError) as exc:
+                st.error(str(exc))
+            else:
+                st.session_state.pop("settings_obj", None)
+                reload_settings()
+                st.cache_resource.clear()
+                st.session_state["bsm_keys_message"] = (
+                    "Clés chiffrées et enregistrées. Redémarre le worker pour qu'il les utilise "
+                    "(Docker : `make worker-restart`)."
+                )
+                del new_api_key, new_api_secret
+                st.rerun()
+    if key_status.defined:
+        confirm_delete = st.checkbox("Je veux supprimer mes clés de ce serveur", key="confirm_delete_keys")
+        if st.button("Supprimer mes clés", disabled=not confirm_delete):
+            if open_positions:
+                st.error(
+                    f"{open_positions} position(s) ouverte(s) : sans clé, le worker ne pourrait plus les "
+                    "protéger. Clôturer d'abord, ou révoquer la clé chez Binance en cas d'urgence."
+                )
+            else:
+                vault.delete_binance_keys()
+                st.session_state.pop("settings_obj", None)
+                st.session_state.pop("confirm_delete_keys", None)
+                reload_settings()
+                st.cache_resource.clear()
+                st.session_state["bsm_keys_message"] = (
+                    "Clés supprimées du coffre. Pense aussi à supprimer la clé chez Binance."
+                )
+                st.rerun()
+
+    st.subheader("Licence")
+    licence_status = licence.current_status()
+    if not licence.licence_required():
+        st.caption("Licence non exigée sur cette installation (`BSM_LICENCE_REQUIRED`).")
+    if licence_status.valid:
+        st.success(
+            f"Licence {licence_status.offre} — {licence_status.client} — valable jusqu'au "
+            f"{licence_status.fin} inclus ({licence_status.days_left} jour(s) restants)."
+        )
+    elif licence.licence_required():
+        st.error(
+            f"{licence_status.reason}. Aucune nouvelle entrée n'est acceptée ; les positions ouvertes "
+            "restent suivies (stops, objectifs, clôtures)."
+        )
+    else:
+        st.caption(licence_status.reason)
+    licence_upload = st.file_uploader("Installer un fichier de licence (.json)", type=["json"], key="licence_upload")
+    if licence_upload is not None and st.button("Vérifier et installer la licence"):
+        installed = licence.install_licence(licence_upload.getvalue())
+        if installed.valid:
+            st.success(f"Licence installée : valable jusqu'au {installed.fin}.")
+        else:
+            st.error(f"Licence refusée : {installed.reason}")
+
     st.subheader("Périmètre d'exécution")
 
     st.markdown(
@@ -697,7 +812,7 @@ with tabs[0]:
 
 **URL autorisée** : {"✅ oui" if settings.base_url in ALLOWED_DEMO_BASE_URLS else "❌ NON"}
 
-**Clés API** : {"configurées" if settings.has_credentials else "absentes"}
+**Clés API** : {"configurées" if settings.has_credentials else "absentes"}{" (coffre chiffré)" if settings.credentials_source == "vault" else " (environnement)" if settings.credentials_source == "env" else ""}
 """
     )
 
