@@ -16,7 +16,9 @@ TEMPLATES = {"auto": "Automatique", "structured": "PAIR / ENTRY / T1 (Suhaib, Cl
              "abk": "Coin / Entry Zone / Target (ABK)",
              "numbered": "#PAIRE / Entry1 / TP1 / Stop (Al-Mahwashi)",
              "simple": "Générique (étiquettes Entry / TP / SL)"}
-NUMBER = r"(?:\d+(?:\.\d+)?|\.\d+)"
+# Un entier suivi d'un point sans décimale (« Stop: 223. ») vaut 223 : écriture fréquente des groupes ; jamais
+# « 1.442. » ni « 1.2.3 », toujours refusés.
+NUMBER = r"(?:\d+(?:\.\d+)?|\.\d+|\d+\.(?![\d.]))"
 UNVERIFIABLE_SOURCE_DATE_WARNING = (
     "Date source non vérifiable : contrôler manuellement la validité du signal."
 )

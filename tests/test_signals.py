@@ -533,3 +533,58 @@ def test_edited_message_invalidates_both_versions_even_if_new_text_already_impor
     edited = inbox.receive("demo", edited_text, source="telegram", external_id="chat:1", edited=True)
     assert edited["id"] == manual["id"]
     assert all(row["parsed"]["errors"] for row in inbox.recent("demo"))
+
+
+# --- Prix entier suivi d'un point, répartition « au plus N » (correctifs du 2026-10-03) -----------------------------
+
+QNT_TRAILING_DOT = """👑AL-MAHWASHI VIP👑
+#QNT/USDT
+📍 Entry1: 234.04
+🎯 TARGETS
+🎯 TP1: 240.30 (2.67%)
+🎯 TP2: 246.90 (5.50%)
+🎯 TP3: 253.87 (8.47%)
+🎯 TP4: 263.18 (12.45%)
+🎯 TP5: 273.36 (16.80%)
+🛑 Stop: 223.
+📅 Date: Saturday - 2026-10-03
+"""
+
+
+def test_integer_price_with_trailing_dot_is_read():
+    parsed = parse_signal(QNT_TRAILING_DOT)
+    assert parsed.errors == []
+    assert parsed.symbol == "QNTUSDT" and parsed.stop == 223.0
+    assert parsed.entries == [234.04] and parsed.targets[-1] == 273.36
+    assert parse_signal(QNT_TRAILING_DOT.replace("Entry1: 234.04", "Entry1: 234.")).entries == [234.0]
+
+
+@pytest.mark.parametrize("stop", ["223.5.", "1.442.", "2.2.3", "223.."])
+def test_malformed_prices_stay_refused(stop):
+    parsed = parse_signal(QNT_TRAILING_DOT.replace("Stop: 223.", f"Stop: {stop}"))
+    assert parsed.stop is None and parsed.errors
+
+
+def test_custom_split_is_a_maximum_not_an_exact_count():
+    """Réglé pour 5 TP : un signal à 4 TP garde les 4 premières parts, remises à l'échelle (même profil)."""
+    assert automatic_tp_allocations(4, "CUSTOM", "40;25;15;10;10") == pytest.approx([400 / 9, 250 / 9, 150 / 9, 100 / 9])
+    assert sum(automatic_tp_allocations(2, "CUSTOM", "40;25;15;10;10")) == pytest.approx(100)
+    assert automatic_tp_allocations(5, "CUSTOM", "40;25;15;10;10") == pytest.approx([40, 25, 15, 10, 10])
+    assert automatic_entry_allocations(1, "CUSTOM", "30;70") == pytest.approx([100])
+    with pytest.raises(ValueError):                       # plus de TP que la répartition : toujours refusé
+        automatic_tp_allocations(6, "CUSTOM", "40;25;15;10;10")
+    with pytest.raises(ValueError):                       # répartition invalide : toujours refusée
+        automatic_tp_allocations(2, "CUSTOM", "70;20")
+
+
+def test_four_tp_signal_with_five_tp_custom_setting_is_prepared(rules):
+    """Le cas réel : 5 TP réglés, signal à 4 TP → position préparée avec 4 TP, rien n'est refusé."""
+    text = SIMPLE.replace("T1: 90000", "T1: 90000\nT2: 95000\nT3: 100000\nT4: 105000")
+    selected = automatic_signal_selection(parse_signal(text), entry_count=1, tp_count=5)
+    assert len(selected.targets) == 4
+    _, payload = prepare_signal(
+        selected, rules, budget=200, available_quote=1000, reserve_percent=20, current_price=84500,
+        signal_id="max5", validity_confirmed=True, touch_stop=True,
+        tp_allocations=automatic_tp_allocations(len(selected.targets), "CUSTOM", "40;25;15;10;10"),
+    )
+    assert len(payload["position"]["take_profits"]) == 4

@@ -32,6 +32,29 @@ def automatic_signal_selection(parsed: ParsedSignal, *, entry_count=1, tp_count=
 
 def custom_signal_allocations(raw, count: int, label="niveaux") -> list[float]:
     """Parse a user distribution such as ``70;30`` or ``50/30/20``."""
+    values = _parse_custom(raw, label)
+    if len(values) != count:
+        raise ValueError(
+            f"La répartition des {label} doit contenir {count} pourcentage(s)."
+        )
+    return values
+
+
+def _custom_prefix(raw, count: int, label: str) -> list[float]:
+    """Répartition réglée pour N niveaux (« au plus N ») appliquée à un signal qui en a moins : les ``count``
+    premières parts, remises à l'échelle pour totaliser 100 % (même profil). Exemple : 40;25;15;10;10 sur un
+    signal à 4 TP donne 44,4 / 27,8 / 16,7 / 11,1. Un signal qui en a PLUS que la répartition reste refusé."""
+    values = _parse_custom(raw, label)
+    if count > len(values):
+        raise ValueError(
+            f"La répartition des {label} contient {len(values)} pourcentage(s) pour {count} {label}."
+        )
+    kept = values[:count]
+    total = sum(kept)
+    return [value * 100.0 / total for value in kept]
+
+
+def _parse_custom(raw, label: str) -> list[float]:
     text = str(raw or "").strip()
     if not text:
         raise ValueError(f"Répartition personnalisée des {label} absente.")
@@ -45,10 +68,6 @@ def custom_signal_allocations(raw, count: int, label="niveaux") -> list[float]:
         ]
     except ValueError as exc:
         raise ValueError(f"Répartition personnalisée des {label} invalide.") from exc
-    if len(values) != count:
-        raise ValueError(
-            f"La répartition des {label} doit contenir {count} pourcentage(s)."
-        )
     if any(not math.isfinite(value) or value <= 0 for value in values):
         raise ValueError(f"Chaque pourcentage des {label} doit être positif.")
     if not math.isclose(sum(values), 100.0, abs_tol=0.01):
@@ -61,7 +80,7 @@ def automatic_entry_allocations(count: int, mode="EQUAL", custom="") -> list[flo
     if count <= 0:
         return []
     if str(mode).upper() == "CUSTOM":
-        return custom_signal_allocations(custom, count, "entrées")
+        return _custom_prefix(custom, count, "entrées")
     return [100.0 / count] * count
 
 
@@ -70,7 +89,7 @@ def automatic_tp_allocations(count: int, mode="EARLY", custom="") -> list[float]
     if count <= 0:
         return []
     if str(mode).upper() == "CUSTOM":
-        return custom_signal_allocations(custom, count, "TP")
+        return _custom_prefix(custom, count, "TP")
     if str(mode).upper() == "EQUAL":
         return [100.0 / count] * count
     presets = {1: [100.0], 2: [70.0, 30.0], 3: [50.0, 30.0, 20.0]}
