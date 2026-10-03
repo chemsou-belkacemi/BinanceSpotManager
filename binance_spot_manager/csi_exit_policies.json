@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "hash_algorithm": "sha256(json canonique, clés triées, sans espaces)[:16]",
+  "policies": {
+    "BREAK_EVEN_AFTER_TP1_V1": {
+      "hash": "ccef0ea813931f59",
+      "description": "stop remonté au prix d'entrée après TP1, TP partiels limite",
+      "rules": {
+        "policy_id": "BREAK_EVEN_AFTER_TP1_V1",
+        "stop_rule": "BREAK_EVEN_AFTER_TP1",
+        "time_exit": true,
+        "tp_execution": "LIMIT",
+        "stop_order": "STOP_MARKET",
+        "stop_limit_offset_bps": 0,
+        "stop_move_applies": "AFTER_TP_FILL_CONFIRMED",
+        "tp_weight_basis": "FILLED_BASE_QUANTITY",
+        "remainder_rule": "LAST_TP_SELLS_REMAINDER",
+        "below_minimum_rule": "MERGE_INTO_NEXT_TP",
+        "unfilled_entries_rule": "CANCEL_AT_ENTRY_EXPIRY_OR_FIRST_TP",
+        "max_entries": 1,
+        "schema_version": 1
+      }
+    },
+    "BSM_MARKET_TP_BREAK_EVEN_V1": {
+      "hash": "54baf617eccc613d",
+      "description": "BinanceSpotManager (V1, remplacée par V2) : TP au marché, stop à l'entrée",
+      "rules": {
+        "policy_id": "BSM_MARKET_TP_BREAK_EVEN_V1",
+        "stop_rule": "BREAK_EVEN_AFTER_TP1",
+        "time_exit": false,
+        "tp_execution": "MARKET_ON_TRIGGER",
+        "stop_order": "STOP_LIMIT",
+        "stop_limit_offset_bps": 30,
+        "stop_move_applies": "AFTER_TP_FILL_CONFIRMED",
+        "tp_weight_basis": "FILLED_BASE_QUANTITY",
+        "remainder_rule": "LAST_TP_SELLS_REMAINDER",
+        "below_minimum_rule": "MERGE_INTO_NEXT_TP",
+        "unfilled_entries_rule": "CANCEL_AT_ENTRY_EXPIRY_OR_FIRST_TP",
+        "max_entries": 1,
+        "schema_version": 1
+      }
+    },
+    "BSM_MARKET_TP_BREAK_EVEN_V2": {
+      "hash": "b34dee623d3b61ed",
+      "description": "BinanceSpotManager : TP au marché, stop au prix moyen réel après le 1er TP",
+      "rules": {
+        "policy_id": "BSM_MARKET_TP_BREAK_EVEN_V2",
+        "stop_rule": "BREAK_EVEN_AVG_FILL_AFTER_FIRST_TP",
+        "time_exit": false,
+        "tp_execution": "MARKET_ON_TRIGGER",
+        "stop_order": "STOP_LIMIT_MARKET_IF_CROSSED",
+        "stop_limit_offset_bps": 30,
+        "stop_move_applies": "AFTER_TP_FILL_CONFIRMED",
+        "tp_weight_basis": "NET_FILLED_BASE_QUANTITY",
+        "remainder_rule": "LAST_TP_SELLS_REMAINDER",
+        "below_minimum_rule": "MERGE_INTO_NEXT_TP",
+        "unfilled_entries_rule": "CANCEL_AT_ENTRY_EXPIRY_OR_FIRST_TP",
+        "max_entries": 1,
+        "schema_version": 1
+      }
+    },
+    "BSM_MARKET_TP_FIXED_SL_V1": {
+      "hash": "26367cfb1c063bb4",
+      "description": "BinanceSpotManager (V1, remplacée par V2) : TP au marché, stop fixe",
+      "rules": {
+        "policy_id": "BSM_MARKET_TP_FIXED_SL_V1",
+        "stop_rule": "FIXED",
+        "time_exit": false,
+        "tp_execution": "MARKET_ON_TRIGGER",
+        "stop_order": "STOP_LIMIT",
+        "stop_limit_offset_bps": 30,
+        "stop_move_applies": "AFTER_TP_FILL_CONFIRMED",
+        "tp_weight_basis": "FILLED_BASE_QUANTITY",
+        "remainder_rule": "LAST_TP_SELLS_REMAINDER",
+        "below_minimum_rule": "MERGE_INTO_NEXT_TP",
+        "unfilled_entries_rule": "CANCEL_AT_ENTRY_EXPIRY_OR_FIRST_TP",
+        "max_entries": 1,
+        "schema_version": 1
+      }
+    },
+    "BSM_MARKET_TP_FIXED_SL_V2": {
+      "hash": "0c49448ca40d2a8f",
+      "description": "BinanceSpotManager : TP au marché, stop fixe, sans sortie temporelle",
+      "rules": {
+        "policy_id": "BSM_MARKET_TP_FIXED_SL_V2",
+        "stop_rule": "FIXED",
+        "time_exit": false,
+        "tp_execution": "MARKET_ON_TRIGGER",
+        "stop_order": "STOP_LIMIT_MARKET_IF_CROSSED",
+        "stop_limit_offset_bps": 30,
+        "stop_move_applies": "AFTER_TP_FILL_CONFIRMED",
+        "tp_weight_basis": "NET_FILLED_BASE_QUANTITY",
+        "remainder_rule": "LAST_TP_SELLS_REMAINDER",
+        "below_minimum_rule": "MERGE_INTO_NEXT_TP",
+        "unfilled_entries_rule": "CANCEL_AT_ENTRY_EXPIRY_OR_FIRST_TP",
+        "max_entries": 1,
+        "schema_version": 1
+      }
+    },
+    "FIXED_SL_FOUR_TP_V1": {
+      "hash": "3734d9fcba294de1",
+      "description": "stop fixe, TP partiels limite, sortie temporelle",
+      "rules": {
+        "policy_id": "FIXED_SL_FOUR_TP_V1",
+        "stop_rule": "FIXED",
+        "time_exit": true,
+        "tp_execution": "LIMIT",
+        "stop_order": "STOP_MARKET",
+        "stop_limit_offset_bps": 0,
+        "stop_move_applies": "AFTER_TP_FILL_CONFIRMED",
+        "tp_weight_basis": "FILLED_BASE_QUANTITY",
+        "remainder_rule": "LAST_TP_SELLS_REMAINDER",
+        "below_minimum_rule": "MERGE_INTO_NEXT_TP",
+        "unfilled_entries_rule": "CANCEL_AT_ENTRY_EXPIRY_OR_FIRST_TP",
+        "max_entries": 1,
+        "schema_version": 1
+      }
+    },
+    "FIXED_SL_ONE_TP_V1": {
+      "hash": "dc1c41c29a6f40a1",
+      "description": "stop fixe, un TP limite, sortie temporelle",
+      "rules": {
+        "policy_id": "FIXED_SL_ONE_TP_V1",
+        "stop_rule": "FIXED",
+        "time_exit": true,
+        "tp_execution": "LIMIT",
+        "stop_order": "STOP_MARKET",
+        "stop_limit_offset_bps": 0,
+        "stop_move_applies": "AFTER_TP_FILL_CONFIRMED",
+        "tp_weight_basis": "FILLED_BASE_QUANTITY",
+        "remainder_rule": "LAST_TP_SELLS_REMAINDER",
+        "below_minimum_rule": "MERGE_INTO_NEXT_TP",
+        "unfilled_entries_rule": "CANCEL_AT_ENTRY_EXPIRY_OR_FIRST_TP",
+        "max_entries": 1,
+        "schema_version": 1
+      }
+    },
+    "TRAIL_PREVIOUS_TP_V1": {
+      "hash": "1dd770639b53d4f9",
+      "description": "stop remonté au TP précédent après chaque TP",
+      "rules": {
+        "policy_id": "TRAIL_PREVIOUS_TP_V1",
+        "stop_rule": "TRAIL_PREVIOUS_TP",
+        "time_exit": true,
+        "tp_execution": "LIMIT",
+        "stop_order": "STOP_MARKET",
+        "stop_limit_offset_bps": 0,
+        "stop_move_applies": "AFTER_TP_FILL_CONFIRMED",
+        "tp_weight_basis": "FILLED_BASE_QUANTITY",
+        "remainder_rule": "LAST_TP_SELLS_REMAINDER",
+        "below_minimum_rule": "MERGE_INTO_NEXT_TP",
+        "unfilled_entries_rule": "CANCEL_AT_ENTRY_EXPIRY_OR_FIRST_TP",
+        "max_entries": 1,
+        "schema_version": 1
+      }
+    }
+  }
+}

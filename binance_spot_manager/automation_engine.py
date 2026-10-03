@@ -140,9 +140,10 @@ class AutomationEngine:
 
         try:
             self._check_expired_entries(position, result)
-            self._check_stop_loss(position, current_price, result)
-            if not result.position_finished and not result.exits_blocked:
-                self._check_take_profits(position, current_price, result)
+            if not self._finish_if_never_filled(position, result):
+                self._check_stop_loss(position, current_price, result)
+                if not result.position_finished and not result.exits_blocked:
+                    self._check_take_profits(position, current_price, result)
         except Exception as exc:  # noqa: BLE001 — une position ne doit pas tuer le worker
             logger.exception("Cycle automation en echec (%s)", position.symbol)
             result.errors.append(str(exc))
@@ -180,6 +181,38 @@ class AutomationEngine:
                 result.errors.append(
                     f"Entry {entry.sequence_number} : expiration impossible ({cancel.error})"
                 )
+
+    def _finish_if_never_filled(self, position: Position, result: CycleResult) -> bool:
+        """Toutes les Entries terminees (expirees, annulees, refusees) sans aucun achat.
+
+        Sans cette cloture, une position dont l'unique ordre a expire restait
+        PENDING_ENTRIES indefiniment et comptait comme ouverte dans les limites
+        de risque. Rien n'est vendu : il n'y a rien a vendre.
+        """
+        entries = position.entries
+        if not entries or not all(entry.is_terminal for entry in entries):
+            return False
+        if any(entry.executed_qty > QTY_EPSILON for entry in entries):
+            return False
+        if (position.metrics.net_qty > QTY_EPSILON
+                or position.stop_loss.executed_qty > QTY_EPSILON
+                or any(tp.executed_qty > QTY_EPSILON for tp in position.take_profits)
+                or position.manual_exits):
+            return False
+        if position.stop_loss.status is SLStatus.ACTIVE and position.stop_loss.order_id:
+            # Une protection vivante sans achat est une incoherence : ne rien fermer en aveugle.
+            result.errors.append("SL actif sans aucun achat : verification Binance requise")
+            return False
+        finish_position(position, CloseReason.CANCELED_BEFORE_FILL)
+        result.position_finished = True
+        result.actions.append("position terminee (aucune entree remplie)")
+        self.events.append(
+            EventType.POSITION_FINISHED,
+            f"Position {position.symbol} terminee sans achat (entrees expirees ou annulees)",
+            position_id=position.position_id,
+            symbol=position.symbol,
+        )
+        return True
 
     # ------------------------------------------------------------------
     # Stop Loss
@@ -538,6 +571,8 @@ class AutomationEngine:
             )
 
         quantity = self._sell_quantity(position, next_tp)
+        if self._merge_below_minimum(position, next_tp, quantity, current_price, result):
+            return
         if quantity <= 0:
             next_tp.status = TPStatus.FAILED
             next_tp.last_error = "Quantite a vendre nulle ou sous minQty"
@@ -630,6 +665,75 @@ class AutomationEngine:
             return
 
         self._apply_confirmed_tp(position, next_tp, confirmed, result)
+
+    def _merge_below_minimum(
+        self, position: Position, tp: TakeProfit, quantity: float, current_price: float,
+        result: CycleResult,
+    ) -> bool:
+        """Politique MERGE_INTO_NEXT_TP : une tranche invendable est reportée sur le TP suivant.
+
+        Active seulement si la position le prévoit (signaux CSI). Vendre p puis q du
+        restant équivaut à vendre 1 − (1 − p)(1 − q) du restant en une fois : le TP
+        suivant reprend ainsi exactement la part du TP reporté. Le dernier TP n'est
+        jamais reporté (il vend le restant). Aucun ordre n'est envoyé ici.
+        """
+        if not position.automation.merge_below_minimum_tp:
+            return False
+        if position.metrics.net_qty <= QTY_EPSILON:
+            return self._tp_reached_before_fill(position, tp, result)
+        later = [t for t in position.sorted_tps
+                 if t.sequence_number > tp.sequence_number and t.is_pending]
+        if not later:
+            return False
+        rules = self._rules(position)
+        min_qty = float(rules.market_min_qty or rules.min_qty)
+        min_notional = float(rules.min_notional)
+        if quantity > 0 and quantity >= min_qty and (min_notional <= 0 or quantity * current_price >= min_notional):
+            return False
+        target = later[0]
+        kept, carried = tp.sell_percent / 100.0, target.sell_percent / 100.0
+        target.sell_percent = min(100.0, (1.0 - (1.0 - kept) * (1.0 - carried)) * 100.0)
+        tp.status = TPStatus.CANCELED
+        tp.last_error = (f"Tranche {quantity} sous les minimums Binance : reportee sur le TP "
+                         f"{target.sequence_number}")
+        result.actions.append(f"TP {tp.sequence_number} reporte sur le TP {target.sequence_number} (sous minimums)")
+        position.log(EventType.POSITION_UPDATED, tp.last_error, tp_id=tp.tp_id, merged_into=target.tp_id)
+        self.events.append(
+            EventType.POSITION_UPDATED,
+            f"TP {tp.sequence_number} {position.symbol} sous les minimums : reporte sur le TP {target.sequence_number}",
+            position_id=position.position_id, symbol=position.symbol,
+        )
+        if tp.sequence_number == 1 and (
+            self.config.cancel_entries_on_first_tp
+            or position.automation.cancel_remaining_entries_on_first_tp
+        ):
+            # Premier TP atteint : les entrees restantes sont annulees comme apres un fill.
+            cancels = self.execution.cancel_open_entries(position)
+            if cancels:
+                result.actions.append(f"{len(cancels)} entry(ies) restantes annulees")
+        self.position_engine.refresh_tp_estimates(position)
+        return True
+
+    def _tp_reached_before_fill(self, position: Position, tp: TakeProfit, result: CycleResult) -> bool:
+        """TP atteint alors qu'aucune quantite n'a ete achetee : rien a vendre ni a reporter.
+
+        Politique CANCEL_AT_ENTRY_EXPIRY_OR_FIRST_TP : le premier TP atteint annule
+        les entrees encore ouvertes ; la position, sans achat, est ensuite terminee
+        (CANCELED_BEFORE_FILL). Le TP reste en attente (declenche), sans echec ni report.
+        """
+        message = (f"TP {tp.sequence_number} atteint avant tout achat : aucune vente, aucun report")
+        if (tp.sequence_number == min(t.sequence_number for t in position.take_profits)
+                and position.automation.cancel_remaining_entries_on_first_tp and position.open_entries):
+            cancels = self.execution.cancel_open_entries(position)
+            failed = [c.error or c.status for c in cancels if not c.success]
+            if failed:
+                result.errors.append(f"{message} ; annulation des entrees non confirmee ({', '.join(failed)})")
+                return True
+            message += f" ; {len(cancels)} entree(s) annulee(s) (premier TP atteint)"
+        if message not in {e.message for e in position.history[-5:]}:
+            position.log(EventType.POSITION_UPDATED, message, tp_id=tp.tp_id)
+        result.actions.append(message)
+        return True
 
     def _apply_confirmed_tp(
         self, position: Position, tp: TakeProfit, confirmed, result: CycleResult

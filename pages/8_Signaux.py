@@ -16,7 +16,7 @@ from binance_spot_manager.command_store import account_scope
 from binance_spot_manager.config import get_settings
 from binance_spot_manager.signal_inbox import SignalInbox
 from binance_spot_manager.signal_parser import ParsedSignal, TEMPLATES, parse_signal
-from binance_spot_manager.signal_plan import TRAIL_STOP_KEY, prepare_signal
+from binance_spot_manager.signal_plan import TRAIL_STOP_KEY, prepare_signal, signal_sl_after_tp
 from binance_spot_manager.signal_sizing import (
     SignalSizingPolicy,
     suggest_signal_budget_from_account,
@@ -55,9 +55,13 @@ if analyze:
     elif template != "auto" and parse_signal(raw).template != template:
         st.error("Le texte ne correspond pas au modèle sélectionné. Choisir Automatique ou le bon modèle.")
     else:
-        item = inbox.receive(scope, raw, template=template)
-        st.session_state["selected_signal"] = item["id"]
-        st.success("Analyse enregistrée. Les doublons retrouvent le même signal.")
+        try:
+            item = inbox.receive(scope, raw, template=template)
+        except ValueError as exc:  # signal CSI hors dépôt TXT, notamment
+            st.error(str(exc))
+        else:
+            st.session_state["selected_signal"] = item["id"]
+            st.success("Analyse enregistrée. Les doublons retrouvent le même signal.")
 
 with st.expander("Recevoir depuis Telegram"):
     automatic = bool(preferences.get("signal_telegram_auto_enabled", False))
@@ -79,6 +83,15 @@ with st.expander("Recevoir depuis Telegram"):
             st.success(f"{len(items)} message(s) autorisé(s) traité(s). Aucun ordre envoyé.")
         except ValueError as exc:
             st.error(str(exc))
+
+if preferences.get("signal_drop_enabled", False):
+    drop_diagnostics = getattr(service.runtime(), "telegram_diagnostics", {}).get("drop", {})
+    st.caption(
+        f"Dépôt direct (générateur ML) actif · état : {drop_diagnostics.get('state', 'EN ATTENTE')} · "
+        f"importés : {drop_diagnostics.get('imported_total', 0)} · rejetés : {drop_diagnostics.get('rejected_total', 0)}"
+    )
+    if drop_diagnostics.get("last_error"):
+        st.error(drop_diagnostics["last_error"])
 
 # Once per session (a new version restarts sessions): signals refused by an older parser are re-read.
 if not st.session_state.get("signals_refreshed"):
@@ -119,6 +132,19 @@ st.write(f"Modèle : {TEMPLATES.get(parsed.template, parsed.template)} · Direct
 st.write({"Paire": parsed.symbol, "Entrées": parsed.entries, "TP": parsed.targets,
           "SL": parsed.stop, "Mention SL": parsed.stop_timeframe or "aucune",
           source_date_label: source_date})
+if parsed.is_csi:
+    # Contrat CSI : la fenêtre et l'écart sont recontrôlés par le worker avant l'achat.
+    def _utc(stamp):
+        return datetime.fromtimestamp(stamp, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    st.write({"SIGNAL_ID": parsed.signal_id, "Valide de (UTC)": _utc(parsed.valid_from),
+              "Acceptation jusqu'à (UTC)": _utc(parsed.expires_at),
+              "Entrée valable jusqu'à (UTC)": _utc(parsed.entry_expires_at),
+              "Écart max à ENTRY_1 (bps)": parsed.max_entry_deviation_bps,
+              "Poids des TP": parsed.tp_weights,
+              "Politique de sortie": f"{parsed.exit_policy_id} ({parsed.exit_policy_hash})",
+              "Statut de validation": parsed.validation_status, "Actualités": parsed.news_status})
+    if parsed.validation_status != "DEMO_ELIGIBLE":
+        st.warning("Statut de validation autre que DEMO_ELIGIBLE : jamais exécuté automatiquement.")
 for warning in parsed.warnings:
     st.warning(warning)
 for error in parsed.errors:
@@ -253,7 +279,8 @@ else:
                         key=f"touch_{selected}")
     stop_ready = touch
 trail_stop = bool(preferences.get(TRAIL_STOP_KEY, True))
-signature = (scope, selected, budget, validity, touch, trail_stop)
+sl_after_tp = signal_sl_after_tp(preferences.get("signal_sl_after_tp"))
+signature = (scope, selected, budget, validity, touch, trail_stop, sl_after_tp)
 if st.button("Vérifier sur Binance Demo et simuler", disabled=not (budget > 0 and validity and stop_ready)):
     st.session_state.pop("signal_preview", None)
     try:
@@ -266,7 +293,8 @@ if st.button("Vérifier sur Binance Demo et simuler", disabled=not (budget > 0 a
             available_quote=float(balances.get(rules.quote_asset, {}).get("free", 0)),
             reserve_percent=service.risk_limits().min_reserve_percent,
             current_price=current_price or 0, signal_id=selected, source=row["source"],
-            touch_stop=touch, validity_confirmed=validity, trail_stop=trail_stop)
+            touch_stop=touch, validity_confirmed=validity, trail_stop=trail_stop,
+            sl_after_tp=sl_after_tp)
         st.session_state["signal_preview"] = (signature, plan, payload)
     except Exception as exc:
         st.error(f"Simulation refusée : {exc}")
@@ -279,9 +307,13 @@ if preview and preview[0] == signature:
                    "SL après ce TP": tp.sl_rule_value if tp.sl_rule_value else "inchangé"}
                   for tp in plan.take_profits], hide_index=True)
     candle_interval = payload["position"]["stop_loss"].get("candle_interval")
-    st.caption("Suivi du SL activé (Settings → Signaux) : SL à l'Entry 1 après TP1, puis deux TP en arrière à partir de TP3"
-               + (" ; le SL déplacé devient un stop au prix." if candle_interval else ".")
-               if trail_stop else "Suivi du SL désactivé : le SL du signal reste à son prix et dans son mode pendant tout le trade.")
+    if parsed.is_csi:
+        st.caption(f"Signal CSI : le SL après chaque TP suit la politique de sortie {parsed.exit_policy_id}.")
+    elif trail_stop:
+        st.caption("Suivi du SL activé (Settings → Signaux) : SL à l'Entry 1 après TP1, puis deux TP en arrière à partir de TP3"
+                   + (" ; le SL déplacé devient un stop au prix." if candle_interval else "."))
+    else:
+        st.caption(f"Suivi du SL désactivé : après un TP, le SL suit la règle « {sl_after_tp.value} » (Settings → Signaux).")
     if candle_interval:
         st.info(f"SL à la clôture {candle_interval} : aucun ordre stop sur Binance. Le worker vend au marché si une "
                 f"bougie {candle_interval} clôture à {plan.stop_loss.price} ou dessous ; la vente peut se faire sous le "

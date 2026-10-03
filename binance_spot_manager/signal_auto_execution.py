@@ -1,7 +1,8 @@
-"""Prepare fresh Telegram signals and enqueue them for the guarded worker."""
+"""Prepare fresh Telegram or drop (ML) signals and enqueue them for the guarded worker."""
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import time
 
 from .csi_client import CsiUnavailable, GatePolicy, source_label
@@ -13,8 +14,14 @@ from .signal_plan import (
     automatic_signal_selection,
     automatic_tp_allocations,
     prepare_signal,
+    signal_sl_after_tp,
 )
 from .signal_sizing import SignalSizingPolicy, suggest_signal_budget_from_account
+
+
+#: Libellés des événements et diagnostics selon l'origine du signal.
+SOURCE_LABELS = {"telegram": "Signal Telegram", "api": "Signal ML/dépôt"}
+MESSAGE_LABELS = {"telegram": "Message Telegram", "api": "Signal ML/dépôt"}
 
 
 def _bounded_number(values, key, default, minimum, maximum):
@@ -23,6 +30,15 @@ def _bounded_number(values, key, default, minimum, maximum):
     except (TypeError, ValueError):
         return default
     return value if minimum <= value <= maximum else default
+
+
+def _iso_utc(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def entry_deviation_bps(price: float, entry_price: float) -> float:
+    """Écart absolu du prix courant à ENTRY_1, en points de base."""
+    return abs(price / entry_price - 1.0) * 10_000.0
 
 
 class AutomaticSignalExecutor:
@@ -67,8 +83,11 @@ class AutomaticSignalExecutor:
         if not preferences.get("signal_auto_execute_enabled", False):
             self._update(state="DISABLED", last_detail="")
             return []
-        if not (preferences.get("signal_telegram_enabled", False)
-                and preferences.get("signal_telegram_auto_enabled", False)):
+        telegram_ready = bool(preferences.get("signal_telegram_enabled", False)
+                              and preferences.get("signal_telegram_auto_enabled", False))
+        drop_ready = bool(preferences.get("signal_drop_enabled", False)
+                          and preferences.get("signal_drop_auto_enabled", False))
+        if not (telegram_ready or drop_ready):
             self._update(
                 state="MISCONFIGURED",
                 last_detail="La réception Telegram automatique doit être active.",
@@ -83,6 +102,22 @@ class AutomaticSignalExecutor:
                 last_detail="Réenregistrer l'autorisation d'exécution automatique.",
             )
             return []
+        sources = {}
+        if telegram_ready:
+            sources["telegram"] = enabled_since
+        if drop_ready:
+            # Autorisation séparée : seuls les dépôts reçus après elle sont éligibles.
+            drop_since = _bounded_number(
+                preferences, "signal_drop_auto_enabled_since", 0, 0, self.clock() + 60,
+            )
+            if drop_since > 0:
+                sources["api"] = drop_since
+            elif not telegram_ready:
+                self._update(
+                    state="WAITING_AUTHORIZATION",
+                    last_detail="Réenregistrer l'autorisation d'exécution des signaux ML/dépôt.",
+                )
+                return []
         max_age_minutes = _bounded_number(
             preferences, "signal_auto_max_age_minutes", 5, 1, 60,
         )
@@ -93,6 +128,7 @@ class AutomaticSignalExecutor:
             oldest_source_timestamp=now - max_age_minutes * 60,
             now=now,
             limit=limit,
+            sources=sources,
         )
         processed = []
         for row in rows:
@@ -103,6 +139,8 @@ class AutomaticSignalExecutor:
 
     def _process(self, row, preferences, now, max_age_minutes):
         signal_id = row["id"]
+        source = "api" if row.get("source") == "api" else "telegram"
+        label = SOURCE_LABELS[source]
         request_key = f"signal:{signal_id}"
         existing = self.commands.get_by_request_key(self.scope, request_key)
         if existing:
@@ -112,28 +150,58 @@ class AutomaticSignalExecutor:
             self._update(state="QUEUED", last_signal_id=signal_id,
                          last_detail=f"Commande {existing['id']}", last_processed_at=now)
             return "QUEUED"
+        valid_from = float(row["parsed"].get("valid_from") or 0)
+        if (row["parsed"].get("signal_version") == 3 and not row["parsed"].get("errors")
+                and now < valid_from):
+            # Pas encore valide : la ligne reste disponible, sans être réclamée.
+            self._update(state="ARMED", last_signal_id=signal_id,
+                         last_detail=f"Signal CSI en attente de VALID_FROM ({_iso_utc(valid_from)})")
+            return "WAITING"
         if not self.inbox.claim_auto(self.scope, signal_id):
             return "SKIPPED"
         try:
             if row["parsed"].get("errors"):
                 raise ValueError("Signal non reconnu ou bloqué par le parseur")
-            source_timestamp = float(row.get("source_timestamp") or 0)
-            if source_timestamp <= 0 or source_timestamp < now - max_age_minutes * 60:
-                raise ValueError("Message Telegram trop ancien pour une exécution automatique")
-            parsed = automatic_signal_selection(
-                ParsedSignal(**row["parsed"]),
-                entry_count=preferences.get("signal_auto_entry_count", 1),
-                tp_count=preferences.get("signal_auto_tp_count", 2),
-            )
+            parsed = ParsedSignal(**row["parsed"])
             csi_detail = ""
+            if parsed.signal_version not in {1, 3}:
+                raise ValueError(f"Contrat CSI version {parsed.signal_version} retiré : aucune exécution")
+            if parsed.is_csi:
+                # Double sécurité : seul le dépôt TXT garantit l'idempotence d'un signal CSI.
+                if not str(row.get("external_id") or "").startswith("csi:"):
+                    raise ValueError("Signal CSI hors dépôt TXT (identifiant externe csi: absent) : aucune exécution")
+                # Double sécurité : CSI ne publie hors shadow que du DEMO_ELIGIBLE.
+                if parsed.validation_status != "DEMO_ELIGIBLE":
+                    raise ValueError(
+                        f"VALIDATION_STATUS={parsed.validation_status or 'absent'} : seul DEMO_ELIGIBLE "
+                        "est exécuté automatiquement"
+                    )
+                # Contrat CSI : VALID_FROM <= maintenant < EXPIRES_AT remplace la fenêtre d'âge.
+                if now >= parsed.expires_at:
+                    raise ValueError(
+                        f"Signal CSI expiré (EXPIRES_AT {_iso_utc(parsed.expires_at)}) : aucune exécution"
+                    )
+            else:
+                source_timestamp = float(row.get("source_timestamp") or 0)
+                if source_timestamp <= 0 or source_timestamp < now - max_age_minutes * 60:
+                    raise ValueError(f"{MESSAGE_LABELS[source]} trop ancien pour une exécution automatique")
+                # Signal texte : entrées et TP retenus selon les réglages automatiques. Jamais pour un signal
+                # CSI, dont le contrat fixe l'entrée, les TP et leurs parts.
+                parsed = automatic_signal_selection(
+                    parsed,
+                    entry_count=preferences.get("signal_auto_entry_count", 1),
+                    tp_count=preferences.get("signal_auto_tp_count", 2),
+                )
             if row.get("payload"):
                 payload = row["payload"]
                 if float(payload.get("signal_confirmation_expires_at") or 0) <= now:
                     raise ValueError("Préparation automatique expirée avant sa mise en file")
             else:
-                allowed, csi_detail = self._csi_gate(row, preferences)
-                if not allowed:
-                    raise ValueError(csi_detail)
+                if not parsed.is_csi:
+                    # Avis de CSI sur un signal texte ; un signal V3 vient déjà de CSI.
+                    allowed, csi_detail = self._csi_gate(row, preferences)
+                    if not allowed:
+                        raise ValueError(csi_detail)
                 rules = self.rules_cache.get(parsed.symbol, refresh=True)
                 balances = self.client.get_balances()
                 prices = self.client.get_prices()
@@ -151,6 +219,14 @@ class AutomaticSignalExecutor:
                 if suggestion.budget <= 0:
                     raise ValueError("Budget automatique nul après application de la réserve")
                 current_price = self.client.get_price(parsed.symbol)
+                if parsed.is_csi:
+                    deviation = entry_deviation_bps(current_price, parsed.entries[0])
+                    if deviation > parsed.max_entry_deviation_bps:
+                        raise ValueError(
+                            f"Écart de prix {deviation:.1f} bps > MAX_ENTRY_DEVIATION_BPS "
+                            f"{parsed.max_entry_deviation_bps:g} (prix {current_price}, ENTRY_1 {parsed.entries[0]})"
+                        )
+                # CSI : prepare_signal remplace la règle enregistrée par EXIT_POLICY_ID.
                 _, payload = prepare_signal(
                     parsed,
                     rules,
@@ -161,7 +237,8 @@ class AutomaticSignalExecutor:
                     reserve_percent=self.risk_limits().min_reserve_percent,
                     current_price=current_price,
                     signal_id=signal_id,
-                    source="telegram",
+                    source=source,
+                    sl_after_tp=signal_sl_after_tp(preferences.get("signal_sl_after_tp")),
                     touch_stop=bool(preferences.get("signal_auto_touch_stop", False)),
                     trail_stop=bool(preferences.get(TRAIL_STOP_KEY, True)),
                     validity_confirmed=True,
@@ -186,7 +263,7 @@ class AutomaticSignalExecutor:
             self.inbox.set_auto_state(self.scope, signal_id, "QUEUED", detail)
             self.events.append(
                 EventType.SIGNAL_AUTO_QUEUED,
-                f"Signal Telegram envoyé automatiquement au worker : {parsed.symbol}"
+                f"{label} envoyé automatiquement au worker : {parsed.symbol}"
                 + (f" · {csi_detail}" if csi_detail else ""),
                 position_id=position["position_id"], symbol=parsed.symbol,
                 signal_id=signal_id, command_id=command["id"],
@@ -205,7 +282,7 @@ class AutomaticSignalExecutor:
             symbol = row["parsed"].get("symbol", "")
             self.events.append(
                 EventType.SIGNAL_AUTO_REJECTED,
-                f"Signal Telegram automatique refusé : {symbol or 'non reconnu'} · {detail}",
+                f"{label} automatique refusé : {symbol or 'non reconnu'} · {detail}",
                 symbol=symbol, level="WARNING", signal_id=signal_id,
             )
             self._update(

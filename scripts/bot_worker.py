@@ -60,6 +60,8 @@ from binance_spot_manager.position_store import PositionStore, RuntimeStore, get
 from binance_spot_manager.reconciliation_engine import ReconciliationEngine  # noqa: E402
 from binance_spot_manager.csi_client import CsiClient  # noqa: E402
 from binance_spot_manager.signal_auto_execution import AutomaticSignalExecutor  # noqa: E402
+from binance_spot_manager.signal_drop import SignalDropImporter  # noqa: E402
+from binance_spot_manager.signal_feedback import SignalFeedbackWriter  # noqa: E402
 from binance_spot_manager.signal_inbox import SignalInbox  # noqa: E402
 from binance_spot_manager.symbol_rules import SymbolRulesCache  # noqa: E402
 from binance_spot_manager.telegram_signals import TelegramSignalPoller  # noqa: E402
@@ -116,6 +118,18 @@ class Worker:
             lambda: get_settings_store().load(),
             inbox=self.signal_inbox,
             pause_requested=self._stop_requested,
+        )
+        # Retour d'execution des signaux V2 (data/signal_drop/outgoing/), hors DRY_RUN :
+        # sans ordre reel, aucun evenement ne doit pretendre a une execution.
+        self.signal_feedback = SignalFeedbackWriter(
+            account_scope(self.settings), self.signal_inbox, self.commands,
+            positions=self.positions, client=self.client, enabled=not self.settings.dry_run,
+        )
+        # Depot direct (generateur ML v1 ou CSI V3) : lecture de data/signal_drop/incoming/.
+        self.signal_drop = SignalDropImporter(
+            self.signal_inbox, account_scope(self.settings),
+            lambda: get_settings_store().load(),
+            feedback=self.signal_feedback,
         )
         self.auto_signal_executor = AutomaticSignalExecutor(
             account_scope(self.settings), self.signal_inbox, self.commands,
@@ -198,6 +212,7 @@ class Worker:
         runtime.command_capabilities = [
             "signal_v1", "independent_positions_v1", "market_close_v1",
             "telegram_getupdates_v1", "telegram_auto_execution_v1", "candle_stop_v1",
+            "signal_drop_v1", "signal_drop_csi_v3", "signal_feedback_v2",
         ]
         runtime.last_message = message or runtime.last_message
         runtime.heartbeat_at = utcnow()
@@ -210,6 +225,10 @@ class Worker:
                 runtime.telegram_diagnostics["auto_execution"] = (
                     self.auto_signal_executor.snapshot()
                 )
+            if hasattr(self, "signal_drop"):
+                runtime.telegram_diagnostics["drop"] = self.signal_drop.snapshot()
+            if hasattr(self, "signal_feedback"):
+                runtime.telegram_diagnostics["feedback"] = self.signal_feedback.snapshot()
         if runtime.started_at is None or state is WorkerState.STARTING:
             runtime.started_at = utcnow()
         for key, value in fields.items():
@@ -299,6 +318,8 @@ class Worker:
     def _tick(self) -> int:
         if hasattr(self, "fee_token_monitor"):
             self.fee_token_monitor.check()
+        if hasattr(self, "signal_drop"):
+            self.signal_drop.import_pending()
         if hasattr(self, "auto_signal_executor"):
             self.auto_signal_executor.process_pending()
         if hasattr(self, "command_processor"):
@@ -326,6 +347,10 @@ class Worker:
             # Ne pas reconcilier un objet potentiellement modifie par un cycle echoue.
             self._reconcile(processed)
             self._sync_quote_balance()
+
+        # Retour d'execution des signaux V2 : d'apres l'etat sauvegarde de ce cycle.
+        if hasattr(self, "signal_feedback"):
+            self.signal_feedback.sync(processed)
 
         if errors:
             raise RuntimeError("Erreur de suivi : " + " ; ".join(errors))

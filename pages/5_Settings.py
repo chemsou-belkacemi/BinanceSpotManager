@@ -108,6 +108,64 @@ with tabs[5]:
                 st.error(telegram_diagnostics["last_error"])
 
     st.divider()
+    st.subheader("Dépôt direct (générateur ML)")
+    st.caption(
+        "Le worker relit `data/signal_drop/incoming/` à chaque cycle. Un fichier JSON (v1) "
+        "passe par le même parseur strict que Telegram ; un fichier TXT `SIGNAL_VERSION=3` "
+        "(CryptoSignalIntelligence) est contrôlé par le contrat CSI V3 (expirations, écart "
+        "d'entrée, politique de sortie, idempotence). La réception seule ne crée aucun ordre."
+    )
+    with st.form("signal_drop_preferences"):
+        drop_enabled = st.toggle(
+            "Importer les signaux déposés",
+            value=bool(signal_preferences.get("signal_drop_enabled", False)),
+            key="signal_drop_enabled_toggle",
+        )
+        if st.form_submit_button("Enregistrer le dépôt direct"):
+            update = {"signal_drop_enabled": bool(drop_enabled)}
+            if not drop_enabled:
+                # Fail closed : désactiver l'import retire aussi l'exécution automatique.
+                update |= {"signal_drop_auto_enabled": False, "signal_drop_auto_enabled_since": 0.0}
+            get_settings_store().update(update)
+            signal_preferences = get_settings_store().load()
+            st.success("Réglage enregistré. Le worker le relit automatiquement.")
+    drop_diagnostics = telegram_diagnostics.get("drop", {}) if telegram_diagnostics else {}
+    if drop_diagnostics:
+        with st.container(border=True):
+            st.write(f"**État du dépôt** : `{drop_diagnostics.get('state', 'INCONNU')}`")
+            st.caption(
+                f"Signaux importés depuis le démarrage : {drop_diagnostics.get('imported_total', 0)} · "
+                f"Fichiers rejetés : {drop_diagnostics.get('rejected_total', 0)}"
+            )
+            if drop_diagnostics.get("last_error"):
+                st.error(drop_diagnostics["last_error"])
+
+    st.divider()
+    st.subheader("SL après TP (signaux)")
+    from binance_spot_manager.signal_plan import SIGNAL_SL_AFTER_TP_RULES, signal_sl_after_tp
+
+    sl_rule_labels = {
+        "NO_CHANGE": "Aucun changement",
+        "BREAK_EVEN": "Prix moyen d'entrée (break-even)",
+        "BREAK_EVEN_WITH_FEES": "Break-even frais inclus",
+        "PREVIOUS_TP": "TP précédent",
+    }
+    with st.form("signal_sl_after_tp_preferences"):
+        sl_rule_choice = st.selectbox(
+            "Déplacer le SL après chaque TP (sauf le dernier)",
+            [rule.value for rule in SIGNAL_SL_AFTER_TP_RULES],
+            index=[rule.value for rule in SIGNAL_SL_AFTER_TP_RULES].index(
+                signal_sl_after_tp(signal_preferences.get("signal_sl_after_tp")).value
+            ),
+            format_func=sl_rule_labels.get,
+            key="signal_sl_after_tp_select",
+            help="S'applique aux prochains signaux, manuels ou automatiques. Les positions existantes ne changent pas.",
+        )
+        if st.form_submit_button("Enregistrer la règle SL des signaux"):
+            get_settings_store().update({"signal_sl_after_tp": sl_rule_choice})
+            st.success("Règle enregistrée pour les prochains signaux.")
+
+    st.divider()
     st.subheader("Budget des signaux")
     st.caption(
         "Ce réglage propose le budget lors de la simulation. Il ne supprime jamais "
@@ -322,11 +380,30 @@ with tabs[5]:
             "J'autorise l'envoi automatique d'ordres sur Binance Demo",
             key="signal_auto_execute_authorization",
         )
+    drop_auto_was_enabled = bool(signal_preferences.get("signal_drop_auto_enabled", False))
+    drop_auto = st.toggle(
+        "Exécuter aussi les signaux ML/dépôt direct",
+        value=drop_auto_was_enabled,
+        disabled=not auto_execute,
+        key="signal_drop_auto_toggle",
+        help="Autorisation séparée : sans elle, les fichiers déposés restent en revue manuelle.",
+    )
+    drop_authorization = True
+    if auto_execute and drop_auto and not drop_auto_was_enabled:
+        drop_authorization = st.checkbox(
+            "J'autorise les signaux ML/dépôt à envoyer des ordres sur Binance Demo",
+            key="signal_drop_auto_authorization",
+        )
     if st.button("Enregistrer l'exécution automatique", type="primary"):
         try:
+            drop_auto = bool(drop_auto and auto_execute)
             if auto_execute and not authorization:
                 raise ValueError("Cocher l'autorisation explicite avant l'activation.")
-            if auto_execute and not (
+            if drop_auto and not drop_authorization:
+                raise ValueError("Cocher l'autorisation explicite des signaux ML/dépôt.")
+            if drop_auto and not signal_preferences.get("signal_drop_enabled", False):
+                raise ValueError("Activer et enregistrer d'abord le dépôt direct plus haut.")
+            if auto_execute and not drop_auto and not (
                 signal_preferences.get("signal_telegram_enabled", False)
                 and signal_preferences.get("signal_telegram_auto_enabled", False)
             ):
@@ -336,6 +413,10 @@ with tabs[5]:
             enabled_since = (
                 float(signal_preferences.get("signal_auto_execute_enabled_since") or time.time())
                 if auto_execute and auto_was_enabled else time.time() if auto_execute else 0.0
+            )
+            drop_since = (
+                float(signal_preferences.get("signal_drop_auto_enabled_since") or time.time())
+                if drop_auto and drop_auto_was_enabled else time.time() if drop_auto else 0.0
             )
             entry_allocations = automatic_entry_allocations(
                 int(auto_entry_count), auto_entry_distribution, auto_entry_custom,
@@ -348,6 +429,8 @@ with tabs[5]:
                 "signal_auto_execute_enabled_since": enabled_since,
                 "signal_auto_touch_stop": bool(auto_touch_stop),
                 "signal_auto_max_age_minutes": int(auto_max_age),
+                "signal_drop_auto_enabled": drop_auto,
+                "signal_drop_auto_enabled_since": drop_since,
                 "signal_auto_entry_count": int(auto_entry_count),
                 "signal_auto_entry_distribution": auto_entry_distribution,
                 "signal_auto_entry_custom_percentages": ";".join(
@@ -360,7 +443,8 @@ with tabs[5]:
                 ),
             })
             st.success(
-                "Exécution automatique activée pour les nouveaux messages Telegram."
+                ("Exécution automatique activée pour les nouveaux messages Telegram"
+                 + (" et signaux ML/dépôt." if drop_auto else "."))
                 if auto_execute else "Exécution automatique désactivée."
             )
         except ValueError as exc:
