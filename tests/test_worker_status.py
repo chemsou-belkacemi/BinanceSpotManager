@@ -576,6 +576,7 @@ def test_routing_failure_never_skips_commands_or_position_monitoring():
     worker._price_provider = lambda symbols: lambda symbol: None
     worker._process_position = lambda p, price: monitored.append(p)
     worker._loop = 1
+    worker._next_orphan_audit = 10**9  # audit des ordres orphelins hors sujet ici (tests/test_orphan_orders.py)
 
     assert worker._tick() == 1
     assert ran == [1] and monitored == [position]

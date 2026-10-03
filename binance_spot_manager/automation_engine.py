@@ -48,6 +48,11 @@ from .symbol_rules import SymbolRules, SymbolRulesCache
 
 logger = logging.getLogger("bsm.automation")
 
+#: Marge au-dela de recvWindow avant de tenir pour definitif un « ordre inconnu » sur un SL dont
+#: l'intention est inscrite au journal : ecart d'horloge avec Binance (resynchronisee toutes les
+#: 5 min) et delai entre la reception de la requete et son traitement par Binance.
+INTENT_SETTLE_MARGIN_SECONDS = 60.0
+
 
 @dataclass
 class CycleResult:
@@ -254,9 +259,24 @@ class AutomationEngine:
         # Une creation de SL a pu etre acceptee malgre un timeout. Tant que
         # Binance ne tranche pas, ne jamais envoyer un second ordre de vente.
         if sl.status is SLStatus.REPLACING and sl.client_order_id:
-            status = self._fetch_status_safe(
-                position, order_id=sl.order_id, client_order_id=sl.client_order_id
-            )
+            status, unknown = self._fetch_uncertain_sl(position)
+            if status is None and unknown and self._sl_intent_expired(position):
+                # Binance ne connait pas l'identifiant et ne peut plus l'accepter : la requete,
+                # signee avant l'inscription de l'intention, a depasse recvWindow. Le SL n'existe
+                # pas : nouvelle protection au prochain cycle, sous un nouvel identifiant.
+                sl.status = SLStatus.FAILED
+                sl.replace_count += 1
+                sl.last_error = "SL jamais arrive chez Binance : nouvel identifiant"
+                result.actions.append("SL jamais arrive chez Binance : nouvelle protection au prochain cycle")
+                self.events.append(
+                    EventType.ERROR,
+                    f"SL {position.symbol} jamais arrive chez Binance ({sl.client_order_id} inconnu "
+                    "apres recvWindow) : nouvelle protection sous un nouvel identifiant",
+                    position_id=position.position_id,
+                    symbol=position.symbol,
+                    level="WARNING",
+                )
+                return
             if status is None:
                 position.sync_status = SyncStatus.DESYNC_DETECTED
                 result.exits_blocked = True
@@ -444,6 +464,36 @@ class AutomationEngine:
     def _note_crossed_stop(result: CycleResult, order, stop_price: Optional[float]) -> None:
         if order.stop_would_trigger and stop_price:
             result.stop_crossed_at = stop_price
+
+    def _fetch_uncertain_sl(self, position: Position):
+        """(statut, inconnu) du SL incertain ; `inconnu` est vrai seulement si Binance a repondu
+        « ordre inconnu ». Une lecture impossible (reseau, limite, DRY_RUN) ne prouve rien."""
+        sl = position.stop_loss
+        if self.execution.settings.dry_run:
+            return None, False
+        try:
+            status = self.execution.fetch_order_status(
+                position.symbol, order_id=sl.order_id, client_order_id=sl.client_order_id
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.info("Statut du SL incertain indisponible (%s) : %s", position.symbol, exc)
+            return None, False
+        return status, status is None
+
+    def _sl_intent_expired(self, position: Position) -> bool:
+        """Vrai si l'intention du SL incertain ne peut plus etre acceptee par Binance.
+
+        Binance refuse toute requete signee qui lui parvient plus de recvWindow apres son
+        horodatage, pris avant l'inscription de l'intention au journal : passe recvWindow + marge
+        depuis cette inscription, un « ordre inconnu » est definitif. Sans trace de l'intention,
+        rien n'est tranche et les sorties restent bloquees.
+        """
+        lookup = getattr(self.execution, "order_intent_created_at", None)
+        created = lookup(position.symbol, position.stop_loss.client_order_id) if lookup else None
+        if created is None:
+            return False
+        delay = self.execution.settings.recv_window / 1000.0 + INTENT_SETTLE_MARGIN_SECONDS
+        return self.clock() >= created.timestamp() + delay
 
     def _fetch_status_safe(
         self,

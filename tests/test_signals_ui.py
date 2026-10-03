@@ -84,6 +84,54 @@ def test_manual_signal_preview_confirmation_and_deduplication(monkeypatch, tmp_p
     assert not any(b.label == "Transmettre au worker Demo" for b in app.button)
 
 
+def test_manual_confirmation_sends_the_signal_position_and_never_reuses_a_confirmation(monkeypatch, tmp_path):
+    """Lacune L3 : la page prepare la meme position que l'execution automatique (meme compte, meme
+    signal) ; chaque simulation a sa propre case de confirmation, jamais heritee de la precedente."""
+    from binance_spot_manager.signal_plan import signal_identity, signal_position_id
+
+    settings = Settings(run_mode=RunMode.DEMO_MANUAL, demo_api_key="test", demo_api_secret="test")
+    scope = account_scope(settings)
+    inbox = SignalInbox(tmp_path / "inbox.db")
+    commands = CommandStore(tmp_path / "commands.db")
+    rules = parse_symbol_rules({"symbol": "BTCUSDT", "baseAsset": "BTC", "quoteAsset": "USDT", "status": "TRADING",
+        "filters": [{"filterType": "LOT_SIZE", "stepSize": "0.00001", "minQty": "0.00001"},
+                    {"filterType": "PRICE_FILTER", "tickSize": "0.01"}, {"filterType": "NOTIONAL", "minNotional": "5"}]})
+    service = SimpleNamespace(
+        find_by_symbol=lambda symbol: None, commands=commands,
+        client=SimpleNamespace(get_balances=lambda: {"USDT": {"free": 1000}}, get_prices=lambda: {"BTCUSDT": 84500}),
+        # Risque du routage (feat/signal-routing) : aucune position ouverte, stockage lisible.
+        positions=SimpleNamespace(list_all=lambda: [], read_errors=[]),
+        current_price=lambda symbol: 84500, risk_limits=lambda: SimpleNamespace(min_reserve_percent=20),
+        runtime=lambda: SimpleNamespace(command_capabilities=["signal_v1", "independent_positions_v1"]),
+        worker_status=lambda: SimpleNamespace(running=True, heartbeat_age=0),
+        submit_command=lambda action, payload, request_key: commands.enqueue(scope, action, payload, request_key=request_key),
+    )
+    monkeypatch.setattr(config, "get_settings", lambda: settings)
+    monkeypatch.setattr(signal_inbox, "SignalInbox", lambda: inbox)
+    monkeypatch.setattr(ui_common, "get_service", lambda: service)
+    monkeypatch.setattr(ui_common, "load_rules", lambda symbol: (rules, ""))
+    monkeypatch.setattr(ui_common, "sidebar_status", lambda settings: None)
+    app = AppTest.from_file(str(PAGE)).run()
+    app.text_area[0].set_value(SIGNAL)
+    next(b for b in app.button if b.label == "Analyser et enregistrer").click().run()
+    app.number_input[0].set_value(200)
+    next(c for c in app.checkbox if "date source" in c.label).check().run()
+    next(b for b in app.button if "simuler" in b.label).click().run()
+    next(c for c in app.checkbox if c.label.startswith("Je confirme ces achats")).check().run()
+
+    next(b for b in app.button if "simuler" in b.label).click().run()  # nouvelle simulation
+    assert not next(c for c in app.checkbox if c.label.startswith("Je confirme ces achats")).value
+    next(c for c in app.checkbox if c.label.startswith("Je confirme ces achats")).check().run()
+    for ack in [c for c in app.checkbox if c.label.startswith("Je confirme malgré")]:   # motifs du routage (risque)
+        ack.check().run()
+    next(b for b in app.button if b.label == "Transmettre au worker Demo").click().run()
+
+    assert not app.exception
+    row = inbox.recent(scope)[0]
+    payload = commands.list_recent(scope)[0]["payload"]
+    assert payload["position"]["position_id"] == signal_position_id(scope, signal_identity(row))
+
+
 def test_signal_refused_by_an_older_parser_is_re_read_when_the_page_opens(monkeypatch, tmp_path):
     import json
     settings = Settings(run_mode=RunMode.DEMO_MANUAL, demo_api_key="test", demo_api_secret="test")

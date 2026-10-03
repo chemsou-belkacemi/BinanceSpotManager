@@ -19,7 +19,7 @@ from binance_spot_manager.models import EventType
 from binance_spot_manager.risk_engine import RiskLimits
 from binance_spot_manager.signal_inbox import SignalInbox
 from binance_spot_manager.signal_parser import ParsedSignal, TEMPLATES, parse_signal
-from binance_spot_manager.signal_plan import TRAIL_STOP_KEY, prepare_signal, signal_sl_after_tp
+from binance_spot_manager.signal_plan import TRAIL_STOP_KEY, prepare_signal, signal_identity, signal_sl_after_tp
 from binance_spot_manager.signal_sizing import (
     SignalSizingPolicy,
     suggest_signal_budget_from_account,
@@ -327,7 +327,7 @@ if st.button("Vérifier sur Binance Demo et simuler", disabled=not (budget > 0 a
             reserve_percent=service.risk_limits().min_reserve_percent,
             current_price=current_price or 0, signal_id=selected, source=row["source"],
             touch_stop=touch, validity_confirmed=validity, trail_stop=trail_stop,
-            sl_after_tp=sl_after_tp)
+            sl_after_tp=sl_after_tp, account_scope=scope, signal_key=signal_identity(row))
         # Même lecture du risque que le routage automatique (et que le worker pour les limites dures).
         try:
             limits = service.risk_limits()
@@ -406,7 +406,10 @@ if preview and preview[0] == signature:
                              + " · ".join(reason.message for reason in reasons), key=f"ack_{category}_{selected}")
         all_acknowledged &= ticked
         acknowledged += [reason.code for reason in reasons] if ticked else []
-    confirm = st.checkbox("Je confirme ces achats LIMIT et cette stratégie sur Binance Demo", key=f"confirm_{payload['position']['position_id']}")
+    # Une case par simulation : le position_id d'un signal est désormais stable, une nouvelle
+    # simulation ne doit jamais hériter de la confirmation de la précédente.
+    confirm = st.checkbox("Je confirme ces achats LIMIT et cette stratégie sur Binance Demo",
+                          key=f"confirm_{payload['position']['position_id']}_{payload['signal_confirmation_expires_at']}")
     if st.button("Transmettre au worker Demo", disabled=not (confirm and all_acknowledged) or bool(hard_refusals)):
         try:
             if time.time() >= payload["signal_confirmation_expires_at"]:

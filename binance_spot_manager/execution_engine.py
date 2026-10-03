@@ -921,6 +921,17 @@ class ExecutionEngine:
             raise
         return normalize_order_response(raw)
 
+    def order_intent_created_at(self, symbol: str, client_order_id: str):
+        """Date d'inscription de l'intention d'ordre au journal, ou None si inconnue."""
+        lookup = getattr(self.client, "intent_created_at", None)
+        if lookup is None or not client_order_id:
+            return None
+        try:
+            return lookup(symbol, client_order_id)
+        except Exception as exc:  # noqa: BLE001 - sans date certaine, rien n'est tranche
+            logger.warning("Journal d'intentions illisible pour %s : %s", client_order_id, exc)
+            return None
+
     def fetch_my_trades(
         self, symbol: str, *, order_id: Optional[int] = None
     ) -> list[dict[str, Any]]:

@@ -30,6 +30,20 @@ class OrderJournal:
             )
             return cursor.rowcount == 1
 
+    def created_at(self, namespace: str, symbol: str, client_id: str):
+        """Date d'inscription d'une intention (datetime UTC), ou None si elle est inconnue."""
+        if not self.path.exists():
+            return None
+        try:
+            with closing(sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+                row = db.execute(
+                    "SELECT created_at FROM order_intents WHERE namespace=? AND symbol=? AND client_id=?",
+                    (namespace, symbol, client_id),
+                ).fetchone()
+        except sqlite3.OperationalError:
+            return None  # journal sans table : aucune intention inscrite
+        return datetime.fromisoformat(row[0]) if row else None
+
     def recent(self, namespace, limit=100):
         if not self.path.exists():
             return []

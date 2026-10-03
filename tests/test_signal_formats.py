@@ -67,3 +67,33 @@ def test_unknown_layouts_are_read_through_their_labels(text, symbol, entries, ta
 ])
 def test_ambiguous_values_are_refused_never_guessed(text, reason):
     assert any(reason in error for error in parse_signal(text).errors)
+
+
+@pytest.mark.parametrize("mention", [
+    "(au marché)", "(au marche)", "(AU MARCHÉ)", "(marché)", "au prix du marché", "(market)", "MARKET",
+])
+def test_entry_at_market_is_refused_never_read_as_a_limit(mention):
+    """Audit du 2026-10-01 : « ENTRY: 2500 (au marché) » devenait une limite à 2500, mention ignorée."""
+    result = parse_signal(f"PAIR: ETH/USDT\nENTRY: 2500 {mention}\nT1: 2700\nSL: 2400")
+    assert result.entries == []
+    assert any("condition ou alternative" in error for error in result.errors)
+
+
+@pytest.mark.parametrize("line", ["ENTRY: au marché", "Entrée : AU MARCHE", "ENTRY: market"])
+def test_market_entry_without_price_is_refused(line):
+    result = parse_signal(f"PAIR: ETH/USDT\n{line}\nT1: 2700\nSL: 2400")
+    assert any("non prise en charge" in error for error in result.errors)
+
+
+@pytest.mark.parametrize("text", [
+    "PAIR: ETH/USDT\nENTRY: 2500\nT1: 2700 (vente au marché)\nSL: 2400",
+    "PAIR: ETH/USDT\nENTRY: 2500\nT1: 2700\nSL: 2400 (au marché)",
+])
+def test_market_mention_on_a_target_or_stop_is_refused_too(text):
+    assert any("condition ou alternative" in error for error in parse_signal(text).errors)
+
+
+def test_plain_limit_entry_still_reads_after_the_market_rule():
+    result = parse_signal("PAIR: ETH/USDT\nENTRY: 2500\nT1: 2700\nSL: 2400\nPLATFORM: Binance (marché spot)")
+    assert result.errors == []
+    assert (result.entries, result.targets, result.stop) == ([2500], [2700], 2400)

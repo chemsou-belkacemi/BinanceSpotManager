@@ -51,8 +51,11 @@ QUOTES = r"USDT|USDC|FDUSD|BUSD|USD|BTC|ETH|BNB|EUR|TRY"
 SLASH_PAIR = re.compile(rf"(?<![A-Z0-9])([A-Z0-9]{{2,20}})(?:\s*/\s*|[-_])({QUOTES})(?![A-Z0-9])")
 JOINED_PAIR = re.compile(r"(?<![A-Z0-9])((?=[A-Z0-9]*[A-Z])[A-Z0-9]{2,20}?)(USDT|USDC)(?![A-Z0-9])")
 TIMEFRAME = re.compile(r"(?<![\d.])(\d{1,3})\s*(MINUTES?|MINS?|M|HOURS?|HRS?|H|DAYS?|D|WEEKS?|W)(?![A-Z])")
-# Words that change the meaning of a price: never ignored, always refused.
-MEANING_CHANGERS = re.compile(r"\b(?:OR|OU|MARKET|CMP|NOW|CURRENT|ABOVE|BREAKOUT|BREAK|RETEST|DCA|UNTIL)\b")
+# Words that change the meaning of a price: never ignored, always refused. "Au marché" (with or
+# without accent) is the French "market": "ENTRY: 2500 (au marché)" must never become a limit at 2500.
+MEANING_CHANGERS = re.compile(
+    r"\b(?:OR|OU|MARKET|MARCH[EÉ]S?|CMP|NOW|CURRENT|ABOVE|BREAKOUT|BREAK|RETEST|DCA|UNTIL)\b"
+)
 CANDLE_CLOSE = re.compile(r"\b(?:CLOSES?|CLOSED|CLOSING|CANDLE|DAILY|WEEKLY|CL[OÔ]TURE)\b")
 SHORT_SIGNAL = re.compile(
     r"\b(?:SHORT|LEVERAGE|FUTURES|PERP|PERPETUAL|MARGIN)\b"
@@ -146,7 +149,7 @@ PRICE_NUMBER = r"(?:\d+(?:\.\d+)?|\.\d+|\d+\.(?![\d.]))"
 def _read_prices(value, kind):
     """(prices, candle timeframe, error) for one value; any doubt is an error, never a guess."""
     if MEANING_CHANGERS.search(value):
-        return [], "", "condition ou alternative (or, market, above…) non prise en charge"
+        return [], "", "condition ou alternative (or, market, au marché, above…) non prise en charge"
     timeframe, notes = "", []
     text = re.sub(r"[(\[{]([^)\]}]*)[)\]}]", lambda m: notes.append(m[1]) or " ", value)
     for note in notes:

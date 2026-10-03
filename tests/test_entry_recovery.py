@@ -113,3 +113,138 @@ def test_worker_persists_partial_then_completed_purchase_across_restart(recovery
         assert restored.entries[0].executed_qty == quantity
         assert restored.metrics.net_qty == pytest.approx(quantity * 0.999)
     assert restored.entries[0].status is EntryStatus.FILLED
+
+
+def ticking_worker(engine, store, loop, *, restarted=False, clock=None):
+    from scripts.bot_worker import Worker
+
+    worker = Worker.__new__(Worker)
+    worker.positions = store
+    worker.reconciliation = engine
+    worker.notifications = SimpleNamespace(desync=lambda *args: None, notify_position_event=lambda *args: None)
+    worker._loop = loop
+    worker._resume_reconcile = restarted        # pose par Worker.__init__ (demarrage) et _leave_standby (veille)
+    worker._price_provider = lambda symbols: (lambda symbol: None)     # aucun prix : seul le suivi compte
+    worker._sync_quote_balance = lambda: None
+    if clock is not None:
+        worker._monotonic = lambda: clock[0]    # horloge monotone simulee, en secondes
+    return worker
+
+
+def test_a_filled_limit_entry_is_recorded_on_the_next_tick_not_twelve_ticks_later(recovery):
+    """Lacune L1 (audit du 2026-10-01) : tant que l'achat rempli n'est pas constate, aucun stop.
+    Premiere relecture d'un achat en attente : au tour suivant, puis au plus toutes les 10 s."""
+    engine, state, position, store = recovery
+    store.save(position)
+    state["order"] = order("FILLED", 1.0)
+    ticking_worker(engine, store, loop=5, clock=[1000.0])._tick()   # ni premier tour, ni multiple de 12
+    restored = store.load(position.position_id)
+    assert restored.entries[0].status is EntryStatus.FILLED
+    assert restored.metrics.net_qty == pytest.approx(0.999)
+
+
+def test_a_pending_entry_is_reread_at_most_once_every_ten_seconds(recovery):
+    """Charge Binance : a 1 s par tour, relire un achat en attente a chaque tour approchait la
+    limite de poids (6 000/min) avec 5 positions ; une relecture toutes les 10 s suffit."""
+    from scripts.bot_worker import AWAITING_FILL_RECONCILE_SECONDS
+
+    engine, _, position, store = recovery
+    store.save(position)                                            # entree SUBMITTED : en attente
+    seen = []
+    spy = SimpleNamespace(reconcile=lambda p: seen.append(p.position_id) or engine.reconcile(p))
+    clock = [1000.0]
+    worker = ticking_worker(spy, store, loop=5, clock=clock)        # ni reprise, ni multiple de 12
+    worker._tick()
+    clock[0], worker._loop = clock[0] + 1, 6                        # tour suivant, 1 s plus tard
+    worker._tick()
+    assert seen == [position.position_id]
+    clock[0], worker._loop = 1000.0 + AWAITING_FILL_RECONCILE_SECONDS, 7
+    worker._tick()                                                  # 10 s apres la premiere relecture
+    assert seen == [position.position_id] * 2
+
+
+def test_a_full_reconciliation_also_counts_as_a_reread_of_pending_entries(recovery):
+    from scripts.bot_worker import RECONCILE_EVERY
+
+    engine, _, position, store = recovery
+    store.save(position)
+    seen = []
+    spy = SimpleNamespace(reconcile=lambda p: seen.append(p.position_id) or engine.reconcile(p))
+    clock = [1000.0]
+    worker = ticking_worker(spy, store, loop=RECONCILE_EVERY, clock=clock)
+    worker._tick()                                                  # reconciliation complete
+    clock[0], worker._loop = clock[0] + 1, RECONCILE_EVERY + 1
+    worker._tick()                                                  # pas de seconde lecture 1 s apres
+    assert seen == [position.position_id]
+
+
+def test_a_starting_worker_owes_a_full_reconciliation_on_its_first_tick(monkeypatch):
+    """Le constructeur pose le drapeau de reprise ; aucun composant reel (Binance, stockage) n'est cree."""
+    from unittest.mock import MagicMock
+
+    from scripts import bot_worker
+
+    for name in ("get_settings", "EventStore", "PositionStore", "RuntimeStore", "WorkerLock",
+                 "BinanceSpotClient", "SymbolRulesCache", "ExecutionEngine", "PositionEngine",
+                 "AutomationEngine", "ReconciliationEngine", "NotificationEngine", "DemoMarketPriceStream",
+                 "CommandStore", "SignalInbox", "DashboardService", "CommandProcessor", "FeeTokenMonitor",
+                 "TelegramSignalPoller", "account_scope", "AutomaticSignalExecutor", "CsiClient"):
+        monkeypatch.setattr(bot_worker, name, MagicMock())
+    assert bot_worker.Worker()._resume_reconcile is True
+
+
+def test_every_open_position_is_reconciled_on_the_first_tick_after_a_restart(recovery):
+    engine, _, position, store = recovery
+    position.entries[0].status = EntryStatus.FILLED                 # rien en attente : seul le 1er tour compte
+    store.save(position)
+    seen = []
+    spy = SimpleNamespace(reconcile=lambda p: seen.append(p.position_id) or engine.reconcile(p))
+    worker = ticking_worker(spy, store, loop=1, restarted=True)
+    worker._tick()
+    assert seen == [position.position_id]
+    seen.clear()
+    worker._loop = 2
+    worker._tick()                                                  # la reprise n'est faite qu'une fois
+    assert seen == []
+
+
+def test_restart_reconciliation_is_postponed_not_lost_when_the_first_tick_fails(recovery):
+    engine, _, position, store = recovery
+    position.entries[0].status = EntryStatus.FILLED
+    store.save(position)
+    seen = []
+    spy = SimpleNamespace(reconcile=lambda p: seen.append(p.position_id) or engine.reconcile(p))
+    worker = ticking_worker(spy, store, loop=1, restarted=True)
+    healthy = worker._price_provider
+
+    def unavailable(symbols):
+        raise RuntimeError("prix illisibles")
+
+    worker._price_provider = unavailable
+    with pytest.raises(RuntimeError, match="prix illisibles"):
+        worker._tick()
+    assert seen == []
+    worker._price_provider = healthy
+    worker._loop = 2
+    worker._tick()
+    assert seen == [position.position_id]
+
+
+def test_every_open_position_is_reconciled_again_when_the_worker_leaves_standby(recovery):
+    """Sous Docker, Arreter met le worker en veille sans quitter le process : la relance est une
+    reprise (rien n'a ete suivi pendant la veille) alors que _loop ne repasse jamais a 1."""
+    engine, _, position, store = recovery
+    position.entries[0].status = EntryStatus.FILLED                 # rien en attente de remplissage
+    store.save(position)
+    seen = []
+    spy = SimpleNamespace(reconcile=lambda p: seen.append(p.position_id) or engine.reconcile(p))
+    worker = ticking_worker(spy, store, loop=7)                     # ni premier tour, ni multiple de 12
+    worker.events = engine.events
+    worker._in_standby = True
+    worker._leave_standby()
+    worker._tick()
+    assert seen == [position.position_id]
+    seen.clear()
+    worker._loop = 8
+    worker._tick()
+    assert seen == []

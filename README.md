@@ -310,6 +310,9 @@ il cherche l'ordre côté Binance, mais ne renvoie pas automatiquement une
 est nécessaire. Un journal SQLite réserve durablement chaque identifiant avant
 le POST et interdit son renvoi, y compris après redémarrage. Ce journal ne prouve
 pas que l'ordre existe ; il ne faut pas le supprimer pour débloquer une opération.
+Seule exception, pour un SL : si son identifiant reste inconnu de Binance une fois
+`recvWindow` + 60 s écoulés depuis l'inscription de l'intention, la requête ne peut
+plus être acceptée ; le SL est recréé sous un nouvel identifiant (`…-SL1`).
 En cas de `429` ou `418`, le client respecte `Retry-After`.
 
 **Confirmation obligatoire des TP.** Un TP n'est jamais considéré exécuté parce que le prix
@@ -336,6 +339,18 @@ marché peut s'exécuter sous le stop.
 **Refus Binance et nouvel identifiant.** Un ordre SL ou TP refusé de façon
 certaine par Binance est retenté avec un nouveau `clientOrderId` ; seul un
 résultat incertain (timeout, `5xx`) bloque pour vérification.
+
+**Reprise et ordres orphelins.** Au démarrage du worker et à sa sortie de veille,
+toutes les positions sont réconciliées au premier tour, puis tous les 12 tours ;
+entre deux, une position dont un achat attend son remplissage est relue au plus
+toutes les 10 s (horloge monotone), pour que le SL soit posé peu après l'achat
+constaté sans approcher la limite de poids Binance. Au même premier tour (avant
+tout signal automatique), puis tous les 60 tours, le worker compare aussi les
+ordres ouverts du compte (toutes paires) aux positions
+locales : un ordre `BSM-…` inconnu (second worker sur la même clé, stockage
+restauré…) déclenche une alerte critique et suspend l'exécution automatique des
+signaux, jusqu'à ce qu'un contrôle n'en trouve plus. Le suivi des positions et
+les commandes confirmées dans l'interface continuent ; rien n'est annulé.
 
 **Notifications limitées.** Les erreurs et désynchronisations répétées sont
 envoyées au plus une fois par minute, et un message identique au plus une fois

@@ -166,7 +166,7 @@ class BinanceSpotClient:
             client_id = intent_payload.get("newClientOrderId") or intent_payload.get("listClientOrderId")
             if not client_id:
                 raise SecurityError("Identifiant stable requis avant de creer un ordre Demo")
-            namespace = self.base_url + ":" + hashlib.sha256(self.settings.api_key.encode()).hexdigest()
+            namespace = self._journal_namespace()
             if not self._order_journal.claim(namespace, str(intent_payload.get("symbol", "")), str(client_id), intent_payload):
                 raise BinanceError(
                     "Intention deja enregistree : consulter Binance, aucun renvoi automatique",
@@ -195,6 +195,20 @@ class BinanceSpotClient:
             if not isinstance(body, dict) or "orderListId" not in body or len(body.get("orders", [])) != 2:
                 raise BinanceError("Reponse OCO incomplete : statut inconnu", code=-1006, endpoint=endpoint)
         return body
+
+    def _journal_namespace(self) -> str:
+        """Compte Binance des intentions : URL + empreinte de la cle, jamais la cle elle-meme."""
+        return self.base_url + ":" + hashlib.sha256(self.settings.api_key.encode()).hexdigest()
+
+    def intent_created_at(self, symbol: str, client_order_id: str):
+        """Date (UTC) d'inscription de l'intention d'ordre `client_order_id`, ou None.
+
+        L'intention est inscrite APRES la signature de la requete : son horodatage Binance est
+        anterieur ou egal a cette date.
+        """
+        return self._order_journal.created_at(
+            self._journal_namespace(), symbol.upper(), client_order_id
+        )
 
     def _parse(self, response: requests.Response, endpoint: str) -> Any:
         try:

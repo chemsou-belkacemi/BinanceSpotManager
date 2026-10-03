@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from .event_store import EventStore
-from .execution_engine import ExecutionEngine, OrderResult, normalize_order_response
+from .execution_engine import CLIENT_ID_PREFIX, ExecutionEngine, OrderResult, normalize_order_response
 from .models import (
     CloseReason,
     Commission,
@@ -562,6 +562,20 @@ class ReconciliationEngine:
 # ==========================================================================
 
 
+def owned_order_ids(position: Position) -> tuple[set[Any], set[str]]:
+    """(orderId, clientOrderId) des ordres qu'une position a crees ou adoptes."""
+    ids: set[Any] = set()
+    client_ids: set[str] = set()
+    for item in (*position.entries, *position.take_profits, position.stop_loss, *position.manual_exits):
+        if item.order_id:
+            ids.add(item.order_id)
+        if item.client_order_id:
+            client_ids.add(item.client_order_id)
+    if position.oco_exit:
+        ids.update({position.oco_exit.tp_order_id, position.oco_exit.sl_order_id})
+    return ids, client_ids
+
+
 def audit_open_orders(
     position: Position,
     open_orders: list[dict[str, Any]],
@@ -580,26 +594,9 @@ def audit_open_orders(
     for owner in tracked:
         if owner.symbol != position.symbol:
             continue
-        for entry in owner.entries:
-            if entry.order_id:
-                known_ids.add(entry.order_id)
-            if entry.client_order_id:
-                known_client_ids.add(entry.client_order_id)
-        for tp in owner.take_profits:
-            if tp.order_id:
-                known_ids.add(tp.order_id)
-            if tp.client_order_id:
-                known_client_ids.add(tp.client_order_id)
-        if owner.stop_loss.order_id:
-            known_ids.add(owner.stop_loss.order_id)
-        if owner.stop_loss.client_order_id:
-            known_client_ids.add(owner.stop_loss.client_order_id)
-        for sale in owner.manual_exits:
-            if sale.order_id:
-                known_ids.add(sale.order_id)
-            known_client_ids.add(sale.client_order_id)
-        if owner.oco_exit:
-            known_ids.update({owner.oco_exit.tp_order_id, owner.oco_exit.sl_order_id})
+        ids, client_ids = owned_order_ids(owner)
+        known_ids |= ids
+        known_client_ids |= client_ids
 
     findings: list[Finding] = []
     for order in open_orders:
@@ -627,3 +624,28 @@ def audit_open_orders(
             )
         )
     return findings
+
+
+def find_orphan_bot_orders(
+    open_orders: list[dict[str, Any]], positions: list[Position]
+) -> list[dict[str, Any]]:
+    """Ordres ouverts crees par un BSM (clientOrderId « BSM-… ») qu'aucune position locale ne connait.
+
+    Lacune L2 (audit du 2026-10-01) : un tel ordre vient d'un second worker sur la meme cle, d'un
+    stockage perdu ou restaure, ou d'un arret entre l'envoi et l'enregistrement. Toutes les
+    positions comptent, fermees comprises. Les ordres passes hors du bot (sans prefixe) relevent de
+    audit_open_orders. Les cles incluent la paire : un orderId n'est unique que par paire.
+    """
+    known_ids: set[tuple[str, Any]] = set()
+    known_client_ids: set[tuple[str, str]] = set()
+    for position in positions:
+        ids, client_ids = owned_order_ids(position)
+        known_ids.update((position.symbol, order_id) for order_id in ids)
+        known_client_ids.update((position.symbol, client_id) for client_id in client_ids)
+    prefix = CLIENT_ID_PREFIX + "-"
+    return [
+        order for order in open_orders
+        if str(order.get("clientOrderId") or "").startswith(prefix)
+        and (order.get("symbol"), order.get("orderId")) not in known_ids
+        and (order.get("symbol"), order.get("clientOrderId")) not in known_client_ids
+    ]

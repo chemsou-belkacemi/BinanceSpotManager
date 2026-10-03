@@ -25,6 +25,7 @@ from .signal_plan import (
     automatic_signal_selection,
     automatic_tp_allocations,
     prepare_signal,
+    signal_identity,
     signal_sl_after_tp,
 )
 from .signal_routing import (
@@ -90,6 +91,9 @@ class AutomaticSignalExecutor:
         # Avis de CryptoSignalIntelligence (lecture et évaluation seulement) : il peut retenir
         # un signal automatique, jamais l'envoyer. Absent = CSI considéré injoignable.
         self.csi_client = csi_client
+        #: Raison d'une suspension (échec sûr), vide sinon : posée par le worker tant que des ordres
+        #: BSM orphelins existent chez Binance ou que leur contrôle est impossible.
+        self.suspended_reason = ""
         self._diagnostics = {
             "state": "DISABLED",
             "queued_total": 0,
@@ -112,11 +116,24 @@ class AutomaticSignalExecutor:
         return limits if isinstance(limits, RiskLimits) else RiskLimits(
             min_reserve_percent=float(getattr(limits, "min_reserve_percent", 20.0)))
 
+    def suspend(self, reason):
+        """Plus aucune mise en file automatique tant que la raison tient (suivi des positions et
+        commandes confirmées à la main continuent ailleurs)."""
+        self.suspended_reason = str(reason) or "Exécution automatique suspendue"
+
+    def resume(self):
+        self.suspended_reason = ""
+
     def process_pending(self, limit=3):
         preferences = self.preferences_loader()
         preferences = preferences if isinstance(preferences, dict) else {}
         if not preferences.get("signal_auto_execute_enabled", False):
             self._update(state="DISABLED", last_detail="")
+            return []
+        if self.suspended_reason:
+            # Les signaux reçus pendant la suspension restent dans la boîte ; à la reprise, seuls
+            # ceux encore assez récents (âge maximal des réglages) partent automatiquement.
+            self._update(state="SUSPENDED", last_detail=self.suspended_reason)
             return []
         telegram_ready = bool(preferences.get("signal_telegram_enabled", False)
                               and preferences.get("signal_telegram_auto_enabled", False))
@@ -307,6 +324,10 @@ class AutomaticSignalExecutor:
                 current_price=current_price,
                 signal_id=signal_id,
                 source=source,
+                # Même signal, même compte : même position et mêmes clientOrderId sur toute
+                # installation BSM (deux workers sur la même clé n'achètent pas deux fois).
+                account_scope=self.scope,
+                signal_key=signal_identity(row),
                 sl_after_tp=signal_sl_after_tp(preferences.get("signal_sl_after_tp")),
                 touch_stop=bool(policy.touch_stop
                                 or signal_routing.unknown_candle_stop(parsed.stop_timeframe)),

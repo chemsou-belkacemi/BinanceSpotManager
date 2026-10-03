@@ -7,6 +7,11 @@ Chaque signal confirmé crée une stratégie avec son propre `position_id`, mêm
 si d'autres stratégies suivent la même paire. Les entrées d'un même signal
 restent regroupées dans cette stratégie. Les limites de risque cumulent les
 positions de la paire ; les ordres existants ne sont pas transférés.
+Ce `position_id` est dérivé du compte Demo (scope, mode compris) et du signal :
+`IDEMPOTENCY_KEY` pour un signal CSI au contrat V3, sinon l'empreinte du texte
+normalisé. Deux installations BSM sur la même clé qui reçoivent le même signal
+calculent donc les mêmes `clientOrderId` : Binance n'accepte qu'un achat. Les
+positions manuelles (New Trade, Investissement) gardent un identifiant aléatoire.
 
 ## Formats
 
@@ -30,7 +35,7 @@ Un en-tête sans prix (`TARGETS:`, `ENTRY ZONE:`) peut être suivi de prix seuls
 Direction : achat, sauf `SHORT`, `SELL` en tête, levier, futures ou marge (refusés) ; un short non
 annoncé est de toute façon refusé par la règle SL < entrées < TP.
 
-**Refusé plutôt que deviné** : deux prix pour un TP ou un SL, `or market`, `above`/`breakout`,
+**Refusé plutôt que deviné** : deux prix pour un TP ou un SL, `or market`, `(market)`/`(au marché)`, `above`/`breakout`,
 `150K`, `160+`, virgule (`140,5`, `84,000`), prix négatif, deux paires, paire sans USDT/USDC,
 plateforme autre que Binance, TP non strictement croissants (y compris publiés à l'envers),
 numérotation discontinue. Le motif affiché cite la ligne en cause. XAU/USD, indices NIFTY et
