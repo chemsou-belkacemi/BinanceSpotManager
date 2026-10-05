@@ -67,6 +67,34 @@ def require_login() -> Optional[str]:
     return None  # jamais atteint : st.stop() interrompt la page
 
 
+def _client_address() -> str:
+    """Adresse du navigateur transmise par le proxy HTTPS (X-Forwarded-For) ; inconnue en tunnel SSH."""
+    try:
+        headers = st.context.headers
+        forwarded = headers.get("X-Forwarded-For") or headers.get("X-Real-Ip") or ""
+    except Exception:  # noqa: BLE001 - affichage seulement
+        forwarded = ""
+    return forwarded.split(",")[0].strip()[:64] or "inconnue (tunnel SSH ou acces local)"
+
+
+def _alert_login(kind: str, username: str) -> None:
+    """Alerte Telegram en arriere-plan (connexion reussie ou compte bloque) ; jamais bloquante."""
+    import threading
+
+    from binance_spot_manager.notification_engine import NotificationEngine
+    from binance_spot_manager.position_store import get_settings_store
+
+    try:
+        preferences = get_settings_store().load()
+        if isinstance(preferences, dict) and not preferences.get("login_alerts_enabled", True):
+            return
+        engine = NotificationEngine(get_settings())
+        notice = engine.login_alert(kind, username, _client_address())
+        threading.Thread(target=engine.notify, args=(notice,), name="bsm-login-alert", daemon=True).start()
+    except Exception:  # noqa: BLE001 - la connexion ne depend jamais de l'alerte
+        pass
+
+
 def _login_page(store: "auth.AccountStore") -> None:
     st.title("BinanceSpotManager")
     st.caption("Connexion requise")
@@ -96,7 +124,10 @@ def _login_page(store: "auth.AccountStore") -> None:
             return
         if result.ok:
             auth.open_session(st.session_state, result)
+            _alert_login("LOGIN", result.username)
             st.rerun()
+        if result.locked:
+            _alert_login("LOCKED", result.username)
         st.error(result.message)
     st.caption(
         f"Session fermée après {auth.idle_timeout_seconds() // 60} min d'inactivité. "

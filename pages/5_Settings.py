@@ -1338,6 +1338,13 @@ with tabs[3]:
                                              "telegram_owner_id": owner_text})
                 st.success("Commandes Telegram enregistrées.")
 
+    with st.form("login_alert_preferences"):
+        login_alerts = st.toggle("Me prévenir à chaque connexion à l'interface et si un compte est bloqué",
+                                 key="login_alerts_toggle", value=bool(commands_saved.get("login_alerts_enabled", True)))
+        if st.form_submit_button("Enregistrer les alertes de connexion"):
+            get_settings_store().update({"login_alerts_enabled": bool(login_alerts)})
+            st.success("Alertes de connexion enregistrées.")
+
 
 # ==========================================================================
 # Diagnostic

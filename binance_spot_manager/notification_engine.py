@@ -52,6 +52,7 @@ NOTIFIABLE_EVENTS: dict[str, str] = {
     "MARKET_GUARD": "Protection marche (chute de BTC)",
     "DAILY_REPORT": "Rapport quotidien",
     "DAILY_LOSS": "Perte maximale du jour",
+    "LOGIN": "Connexion a l'interface",
 }
 
 #: Evenements qui se repetent a chaque cycle tant que le probleme persiste.
@@ -568,6 +569,16 @@ class NotificationEngine:
             body=detail,
             level="WARNING" if started else "INFO",
         )
+
+    def login_alert(self, kind: str, username: str, address: str) -> Notification:
+        """Connexion reussie a l'interface (kind="LOGIN") ou compte bloque apres trop d'echecs ("LOCKED")."""
+        when = time.strftime("%d/%m %H:%M UTC", time.gmtime())
+        advice = "Si ce n'est pas toi : changer le mot de passe (make compte) et verifier le VPS."
+        if kind == "LOCKED":
+            return Notification(event="LOGIN", title=f"Compte {username} bloque apres trop d'echecs",
+                                body=f"Dernier essai : {when}, adresse {address}.\n{advice}", level="CRITICAL")
+        return Notification(event="LOGIN", title=f"Connexion a l'interface : {username}",
+                            body=f"{when}, adresse {address}.\n{advice}", level="WARNING")
 
     def daily_loss(self, kind: str, detail: str) -> Notification:
         """Perte maximale du jour atteinte (kind="STARTED") ou blocage leve."""
