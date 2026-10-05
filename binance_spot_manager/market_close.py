@@ -70,7 +70,11 @@ def _finish_stuck_remainder(position, execution, price):
     if not _nothing_live(position):
         return
     reference = price or position.metrics.current_price or position.metrics.average_price
-    if not execution.rules(position.symbol).below_minimums(position.metrics.net_qty, reference, market=True):
+    try:
+        rules = execution.rules(position.symbol)
+    except Exception:  # noqa: BLE001 - filtres illisibles : on reessaie au cycle suivant, sans erreur
+        return
+    if not rules.below_minimums(position.metrics.net_qty, reference, market=True):
         return
     reason = (position.manual_exits[-1].close_reason if position.manual_exits
               else CloseReason.ALL_TP_HIT if position.hit_tps else CloseReason.MANUAL_CLOSE)

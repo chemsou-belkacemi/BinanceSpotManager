@@ -279,10 +279,13 @@ class DashboardService:
             p.pnl.realized * rates.get(p.quote_asset, 0.0) for p in positions
         )
         view.total_pnl = view.unrealized_pnl + view.realized_pnl
-        figures = results(positions, utcnow())
-        view.realized_today = sum(p.pnl.realized for p in figures.today)
+        def rate(p: Position) -> float:
+            return rates.get(p.quote_asset, 0.0)
+
+        figures = results(positions, utcnow(), rate)
+        view.realized_today = sum(p.pnl.realized * rate(p) for p in figures.today)
         view.closed_today = len(figures.today)
-        view.realized_week = sum(p.pnl.realized for p in figures.week)
+        view.realized_week = sum(p.pnl.realized * rate(p) for p in figures.week)
         view.closed_week = len(figures.week)
         view.realized_on_open = figures.realized_open
         view.total_risk_quote = sum(

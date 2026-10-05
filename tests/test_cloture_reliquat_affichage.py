@@ -175,3 +175,112 @@ def test_the_report_gives_the_dashboard_figures_and_the_dashboard_the_report_fig
     assert view.realized_on_open == pytest.approx(partial.pnl.realized)
     assert (view.closed_today, view.closed_week) == (1, 1)                # les positions terminées du rapport
     assert view.realized_today == view.realized_week == pytest.approx(today.pnl.realized)
+
+
+# -- gardes : jamais terminée tant qu'un ordre de la position peut vivre chez Binance (relecture du 2026-10-05) ----
+
+def _live_entry(position):
+    from binance_spot_manager.models import Entry
+    position.entries.append(Entry(status=EntryStatus.SUBMITTED, order_id=5))
+
+
+def _live_tp(status, **ids):
+    def apply(position):
+        from binance_spot_manager.models import TakeProfit
+        position.take_profits.append(TakeProfit(sequence_number=2, status=status, **ids))
+    return apply
+
+
+def _sl(status, **ids):
+    def apply(position):
+        position.stop_loss.status = status
+        for key, value in ids.items():
+            setattr(position.stop_loss, key, value)
+    return apply
+
+
+def _oco(status):
+    def apply(position):
+        from binance_spot_manager.models import OcoExit
+        position.oco_exit = OcoExit(order_list_id=8, list_client_order_id="oco", tp_order_id=2, sl_order_id=3,
+                                    quantity=DUST, status=status)
+    return apply
+
+
+@pytest.mark.parametrize("live", [
+    _live_entry, _live_tp(TPStatus.SUBMITTED, order_id=6), _live_tp(TPStatus.PARTIALLY_EXECUTED, order_id=6),
+    _live_tp(TPStatus.FAILED, client_order_id="tp-6"), _sl(SLStatus.REPLACING), _sl(SLStatus.FAILED, order_id=3),
+    _oco("ACTIVE"), _oco("ERROR"),
+], ids=["achat", "tp-soumis", "tp-partiel", "tp-echec-avec-id", "sl-remplacement", "sl-echec-avec-id",
+        "oco-actif", "oco-inconnu"])
+def test_a_dust_closing_is_never_written_off_while_an_order_may_live(setup, live):  # noqa: F811
+    position, _, store, execution, _, calls = setup
+    with_dust(position)
+    position.stop_loss.status, position.stop_loss.order_id = SLStatus.CANCELED, None
+    position.status = PositionStatus.CLOSING
+    live(position)
+    recompute_position(position)
+    assert poll_market_close(position, execution, 84000) and position.status is PositionStatus.CLOSING
+    assert calls == []
+
+
+def test_unreadable_filters_leave_a_stuck_closing_for_the_next_cycle(setup):  # noqa: F811
+    position, _, store, execution, _, _ = setup
+    with_dust(position)
+    position.stop_loss.status = SLStatus.CANCELED
+    position.status = PositionStatus.CLOSING
+
+    def unreadable(*args, **kwargs):
+        raise RuntimeError("exchangeInfo indisponible")
+
+    execution.rules = unreadable
+    assert poll_market_close(position, execution, 84000) and position.status is PositionStatus.CLOSING
+
+
+def test_an_expired_partial_sale_leaving_dust_finishes_with_the_sale_reason(setup):  # noqa: F811
+    position, _, store, execution, _, _ = setup
+    position.status = PositionStatus.CLOSING
+    sale = ManualExit(client_order_id="MC1", requested_qty=.00099, close_reason=CloseReason.STOP_CROSSED)
+    position.manual_exits.append(sale)
+    result = OrderResult(success=True, order_id=4, status="EXPIRED", executed_qty=.00095,
+                         average_price=84000, cummulative_quote_qty=.00095 * 84000)
+    apply_sale(position, sale, result, execution.rules())
+    assert not position.is_open and position.close_reason is CloseReason.STOP_CROSSED
+
+
+def test_a_canceled_sale_with_a_sellable_rest_still_pauses(setup):  # noqa: F811
+    position, _, store, execution, _, _ = setup
+    position.status = PositionStatus.CLOSING
+    sale = ManualExit(client_order_id="MC1", requested_qty=.00099)
+    position.manual_exits.append(sale)
+    apply_sale(position, sale, OrderResult(success=True, order_id=4, status="CANCELED"), execution.rules())
+    assert position.status is PositionStatus.ACTIVE                       # ≈ 84 USDT restants : rien n'est oublié
+
+
+def test_the_worker_passes_its_price_and_announces_the_end(setup, monkeypatch):  # noqa: F811
+    from binance_spot_manager.position_engine import finish_position
+    from scripts import bot_worker
+
+    position, _, store, _, _, _ = setup
+    position.status = PositionStatus.CLOSING
+    seen, announced = [], []
+
+    def poll(target, execution, price=None):
+        seen.append(price)
+        finish_position(target, CloseReason.ALL_TP_HIT)
+        return True
+
+    monkeypatch.setattr("binance_spot_manager.market_close.poll_market_close", poll)
+    worker = bot_worker.Worker.__new__(bot_worker.Worker)
+    worker.positions, worker.execution = store, SimpleNamespace()
+    worker._notify_finished = announced.append
+    worker._process_position(position, 0.25)
+    assert seen == [0.25] and announced == [position]
+    assert store.load(position.position_id).status is PositionStatus.CLOSED
+
+
+def test_the_shared_figures_convert_each_quote_currency(rules):  # noqa: F811
+    win = winning_position(rules)
+    win.closed_at = NOW - timedelta(hours=1)
+    plain, doubled = results([win], NOW), results([win], NOW, rate=lambda p: 2.0)
+    assert doubled.realized_all == pytest.approx(2 * plain.realized_all) and plain.realized_all > 0

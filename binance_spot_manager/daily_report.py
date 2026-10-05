@@ -46,16 +46,18 @@ class Results:
     latent: float                  # positions ouvertes, au dernier prix connu
 
 
-def results(positions: list[Position], now: datetime) -> Results:
+def results(positions: list[Position], now: datetime,
+            rate: Callable[[Position], float] = lambda p: 1.0) -> Results:
+    """`rate` : conversion de la devise de cotation de chaque position (le Dashboard passe ses taux)."""
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week = closed_between(positions, now - timedelta(days=7), now + timedelta(seconds=1))
     open_positions = [p for p in positions if p.is_open]
     return Results(
         today=[p for p in week if (p.closed_at or p.updated_at) >= midnight],
         week=week,
-        realized_all=sum(p.pnl.realized for p in positions),
-        realized_open=sum(p.pnl.realized for p in open_positions),
-        latent=sum(p.pnl.unrealized for p in open_positions),
+        realized_all=sum(p.pnl.realized * rate(p) for p in positions),
+        realized_open=sum(p.pnl.realized * rate(p) for p in open_positions),
+        latent=sum(p.pnl.unrealized * rate(p) for p in open_positions),
     )
 
 
