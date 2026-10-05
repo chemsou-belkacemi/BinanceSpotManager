@@ -664,6 +664,22 @@ def test_sl_rule_previous_tp(rules):
     ) == pytest.approx(executed.target_price)
 
 
+def test_sl_rule_previous_tp_counts_a_partially_executed_tp(rules):
+    """TP2 marque PARTIALLY_EXECUTED (vente un peu sous l'estimation, arrondi au stepSize) : apres TP3,
+    le stop « au TP precedent » va au TP2, pas au TP1 (constat du journal Telegram du 2026-10-05)."""
+    position = make_position(rules)
+    engine = PositionEngine(rules)
+    tps = position.sorted_tps
+    tps[0].status, tps[0].executed_qty = TPStatus.EXECUTED, 0.01
+    if len(tps) < 3:
+        pytest.skip("position de test a moins de 3 TP")
+    tps[1].status, tps[1].executed_qty = TPStatus.PARTIALLY_EXECUTED, 0.0099
+    assert engine.compute_sl_rule_price(position, "PREVIOUS_TP", after_tp_sequence=3) == pytest.approx(
+        tps[1].target_price)
+    assert [t.sequence_number for t in position.hit_tps] == [1, 2]
+    assert [t.sequence_number for t in position.executed_tps] == [1]
+
+
 def test_sl_rule_custom_percent(rules):
     position = make_position(rules)
     engine = PositionEngine(rules)

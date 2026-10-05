@@ -106,7 +106,7 @@ def test_worker_persists_partial_then_completed_purchase_across_restart(recovery
         worker = Worker.__new__(Worker)
         worker.positions = store
         worker.reconciliation = engine
-        worker.notifications = SimpleNamespace(desync=lambda *args: None, notify_position_event=lambda *args: None)
+        worker.notifications = SimpleNamespace(desync=lambda *args: None, entry_filled=lambda *args: None, notify_position_event=lambda *args: None)
         state["order"] = order(status, quantity)
         worker._reconcile(store.list_open())
         restored = store.load(position.position_id)
@@ -121,7 +121,7 @@ def ticking_worker(engine, store, loop, *, restarted=False, clock=None):
     worker = Worker.__new__(Worker)
     worker.positions = store
     worker.reconciliation = engine
-    worker.notifications = SimpleNamespace(desync=lambda *args: None, notify_position_event=lambda *args: None)
+    worker.notifications = SimpleNamespace(desync=lambda *args: None, entry_filled=lambda *args: None, notify_position_event=lambda *args: None)
     worker._loop = loop
     worker._resume_reconcile = restarted        # pose par Worker.__init__ (demarrage) et _leave_standby (veille)
     worker._price_provider = lambda symbols: (lambda symbol: None)     # aucun prix : seul le suivi compte

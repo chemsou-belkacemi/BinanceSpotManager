@@ -620,6 +620,15 @@ class Position(BSMModel):
     def executed_tps(self) -> list[TakeProfit]:
         return [t for t in self.sorted_tps if t.status == TPStatus.EXECUTED]
 
+    @property
+    def hit_tps(self) -> list[TakeProfit]:
+        """TP atteints : ceux qui ont vendu quelque chose (EXECUTED ou PARTIALLY_EXECUTED).
+
+        L'arrondi au stepSize laisse souvent une vente un peu sous la quantite estimee, marquee
+        PARTIALLY_EXECUTED : ce TP a bien ete atteint (compteurs, stop « au TP precedent »).
+        """
+        return [t for t in self.sorted_tps if t.status == TPStatus.EXECUTED or t.executed_qty > 1e-12]
+
     # -- mutation -------------------------------------------------------
 
     def touch(self) -> None:

@@ -448,7 +448,9 @@ class PositionEngine:
             return metrics.break_even_with_fees or metrics.average_price or None
 
         if rule == "PREVIOUS_TP":
-            executed = position.executed_tps
+            # TP ayant vendu quelque chose : un TP2 marque PARTIALLY_EXECUTED (arrondi au stepSize) est
+            # bien le TP precedent du TP3 ; avec les seuls EXECUTED, le stop restait au TP1.
+            executed = position.hit_tps
             if after_tp_sequence is not None:
                 executed = [
                     t for t in executed if t.sequence_number < after_tp_sequence

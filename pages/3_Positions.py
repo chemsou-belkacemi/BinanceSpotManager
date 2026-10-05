@@ -179,7 +179,7 @@ def live_position_summary(position_id):
         "Prochain TP",
         f"TP{next_tp.sequence_number} @ {fmt_price(next_tp.target_price)}" if next_tp else "—",
     )
-    progress_cols[1].metric("TP atteints", f"{len(position.executed_tps)}/{len(position.take_profits)}")
+    progress_cols[1].metric("TP atteints", f"{len(position.hit_tps)}/{len(position.take_profits)}")
     progress_cols[2].metric(
         "SL", f"{fmt_price(position.stop_loss.resolved_price)} ("
               + (f"clôture {position.stop_loss.candle_interval}"
@@ -193,7 +193,7 @@ def live_position_summary(position_id):
     )
 
     if position.take_profits:
-        st.progress(len(position.executed_tps) / len(position.take_profits))
+        st.progress(len(position.hit_tps) / len(position.take_profits))
 
 
 live_position_summary(position.position_id)

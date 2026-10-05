@@ -12,7 +12,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from datetime import timedelta  # noqa: E402
+
 from binance_spot_manager.config import get_settings  # noqa: E402
+from binance_spot_manager.models import utcnow  # noqa: E402
 from binance_spot_manager.position_engine import recompute_position  # noqa: E402
 from ui_common import (  # noqa: E402
     banner,
@@ -72,14 +75,12 @@ result_filter = col3.multiselect("Résultat", list(results.keys()))
 days = col4.slider("Fenêtre (jours)", 1, 365, 90)
 
 filtered = []
+# Fenetre : positions fermees depuis au plus `days` jours (365 : tout l'historique). Le filtre ne
+# faisait rien auparavant (branche « pass »).
+window_start = utcnow() - timedelta(days=days) if days < 365 else None
 for position in closed:
-    age_days = (
-        service.runtime().heartbeat_at - position.updated_at
-    ).days if service.runtime().heartbeat_at else 0
-    if (position.closed_at or position.updated_at).date() < (
-        service.runtime().heartbeat_at.date() if service.runtime().heartbeat_at else position.updated_at.date()
-    ) and days < 365:
-        pass
+    if window_start is not None and (position.closed_at or position.updated_at) < window_start:
+        continue
     if symbol_filter and position.symbol not in symbol_filter:
         continue
     if source_filter and not any(g.source.value in source_filter for g in position.source_groups):
@@ -114,7 +115,7 @@ for position in filtered:
             "Capital": fmt_price(position.metrics.capital_committed),
             "PnL réalisé": fmt_price(position.pnl.realized),
             "Frais": fmt_price(position.pnl.fees_paid),
-            "TP atteints": f"{len(position.executed_tps)}/{len(position.take_profits)}",
+            "TP atteints": f"{len(position.hit_tps)}/{len(position.take_profits)}",
             "Entries": len(position.entries),
             "SL final": fmt_price(position.stop_loss.resolved_price),
         }

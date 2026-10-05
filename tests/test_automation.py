@@ -1094,7 +1094,7 @@ def test_worker_sells_remainder_when_break_even_stop_is_already_crossed(
     worker.notifications = SimpleNamespace(
         tp_executed=lambda *a: "tp", sl_moved=lambda *a: "sl_moved",
         stop_crossed_exit=lambda *a: "exit", stop_crossed_paused=lambda *a: "paused",
-        position_finished=lambda *a: "finished",
+        position_finished=lambda *a, **k: "finished",
         notify_position_event=lambda position, notice: sent.append(notice),
     )
     fake.reject["STOP_LOSS_LIMIT"] = [_rejection("Stop price would trigger immediately.")]
