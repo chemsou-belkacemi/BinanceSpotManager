@@ -268,3 +268,73 @@ def test_a_backup_cancelled_outside_the_bot_keeps_the_candle_watch(candles, rule
     clock["now"] = T0 + 2 * QUARTER + MIN
     assert automation.run_cycle(position, 79500).candle_stop_hit.close_price == 79000
     assert len([o for o in fake.created if o["type"] == "STOP_LOSS_LIMIT"]) == 1   # pas reposé
+
+
+
+# --- Contre-vérification : exécution partielle, DRY_RUN, annulation par le bot ----------------------------------
+
+
+def backup_worker(settings, rules, events, tmp_path, monkeypatch, *, status, executed):  # noqa: F811
+    """Position à la clôture 15m avec un secours chez Binance déjà en partie (ou entièrement) exécuté."""
+    position = backup_position(rules)
+    worker, fake, sent = worker_for(position, settings, rules, events, tmp_path, monkeypatch)
+    fake.seed_stop_loss(qty=0.006, stop=BACKUP)
+    order = fake.orders[SL_CLIENT_ID]
+    order.update(status=status, executedQty=str(executed), cummulativeQuoteQty=str(executed * 78000.0))
+    sl = position.stop_loss
+    sl.status, sl.order_id, sl.client_order_id, sl.quantity = SLStatus.ACTIVE, SL_ORDER_ID, SL_CLIENT_ID, 0.006
+    worker.positions.save(position)
+    return position, worker, fake
+
+
+def test_a_partly_filled_backup_lets_the_candle_exit_sell_the_rest(settings, rules, events, tmp_path, monkeypatch):  # noqa: F811
+    position, worker, fake = backup_worker(settings, rules, events, tmp_path, monkeypatch,
+                                           status="PARTIALLY_FILLED", executed=0.002)
+    try:
+        worker._process_position(position, 77500)                            # bougie 15m close à 79 000
+    except RuntimeError:
+        pass                                                                   # « SL partiellement exécuté » signalé
+    assert [o["qty"] for o in fake.created if o["type"] == "MARKET"] == pytest.approx([0.004])
+    assert not position.is_open
+
+
+def test_a_backup_filled_on_a_smaller_quantity_lets_the_candle_exit_sell_the_rest(settings, rules, events, tmp_path,
+                                                                                 monkeypatch):  # noqa: F811
+    position, worker, fake = backup_worker(settings, rules, events, tmp_path, monkeypatch,
+                                           status="FILLED", executed=0.004)
+    try:
+        worker._process_position(position, 77500)
+    except RuntimeError:
+        pass
+    assert [o["qty"] for o in fake.created if o["type"] == "MARKET"] == pytest.approx([0.002])
+    assert not position.is_open
+
+
+def test_in_dry_run_a_breach_candle_is_announced_once(settings, rules, events):  # noqa: F811
+    from binance_spot_manager.config import RunMode
+    from test_automation import build_automation, build_execution
+    from test_candle_stop import CandleClient
+
+    fake = CandleClient(rules)
+    dry = settings.model_copy(update={"run_mode": RunMode.DRY_RUN})
+    automation = build_automation(build_execution(dry, rules, events, fake), rules, events)
+    automation.clock = lambda: (T0 + 2 * QUARTER + MIN) / 1000
+    assert automation.execution.settings.dry_run
+    position = backup_position(rules, percent=0.0)
+    fake.klines = [kline(T0, 81000), kline(T0 + QUARTER, 79000)]
+    assert automation.run_cycle(position, 79500).candle_stop_hit is not None
+    assert automation.run_cycle(position, 79500).candle_stop_hit is None           # annoncée une seule fois
+
+
+def test_the_bot_s_own_uncertain_cancel_is_not_taken_for_a_manual_one(candles, rules):  # noqa: F811
+    automation, fake, _ = candles
+    position = backup_position(rules)
+    order = placed(automation, fake, position)
+    sl = position.stop_loss
+    sl.cancel_pending = True                                                   # annulation du bot restée incertaine
+    order["status"] = "CANCELED"
+    result = automation.run_cycle(position, 81500)
+    assert sl.backup_percent == 3.0 and sl.status is SLStatus.FAILED and not sl.cancel_pending
+    assert not result.errors and not position.automation.paused
+    automation.run_cycle(position, 81500)
+    assert live_stops(fake) == [pytest.approx(BACKUP)]                          # secours reposé

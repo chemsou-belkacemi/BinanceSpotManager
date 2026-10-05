@@ -71,6 +71,9 @@ class CycleResult:
     stop_crossed_at: Optional[float] = None
     #: Bougie cloturee au SL ou dessous (mode CANDLE_CLOSE) : le worker vend au marche.
     candle_stop_hit: Optional[CandleBreach] = None
+    #: Etat de l'ordre stop chez Binance inconnu (creation incertaine ou ordre illisible) : la lecture de la
+    #: cloture attend qu'il soit tranche (close_market refuserait de vendre).
+    stop_unknown: bool = False
 
     @property
     def changed(self) -> bool:
@@ -247,10 +250,11 @@ class AutomationEngine:
         # un SL incertain) ; la bougie n'est alors lue qu'au cycle suivant, rien n'est perdu (rattrapage).
         if sl.trigger is SLTrigger.CANDLE_CLOSE:
             if sl.backup_percent > 0 or sl.order_id or sl.client_order_id:
-                blocked_before = result.exits_blocked
                 self._check_binance_stop(position, current_price, result)
+                # Seul un etat INCONNU du secours retient la lecture de la cloture ; une execution partielle la
+                # laisse lire : close_market annule le reste de l'ordre, compte ce qui est vendu et vend le solde.
                 if (result.position_finished or not position.is_open or sl.status is SLStatus.REPLACING
-                        or (result.exits_blocked and not blocked_before)):
+                        or result.stop_unknown):
                     return
             self._check_candle_close(position, result)
             return
@@ -299,6 +303,7 @@ class AutomationEngine:
             if status is None:
                 position.sync_status = SyncStatus.DESYNC_DETECTED
                 result.exits_blocked = True
+                result.stop_unknown = True
                 result.actions.append("SL incertain : verification Binance requise")
                 return
             if status.executed_qty > QTY_EPSILON:
@@ -330,11 +335,19 @@ class AutomationEngine:
                 result.actions.append("SL introuvable cote Binance — reconciliation requise")
                 position.sync_status = position.sync_status.__class__.DESYNC_DETECTED
                 result.exits_blocked = True
+                result.stop_unknown = True
                 return
             if status is not None and status.executed_qty > QTY_EPSILON:
                 self._record_sl_execution(position, status, result)
                 return
             if status is not None and status.is_terminal_dead:
+                if sl.trigger is SLTrigger.CANDLE_CLOSE and sl.cancel_pending:
+                    # Annulation demandee par le bot lui-meme, restee incertaine puis confirmee ici : le secours est
+                    # repose au prochain cycle (pas un geste manuel).
+                    sl.status, sl.order_id, sl.cancel_pending = SLStatus.FAILED, None, False
+                    sl.replace_count += 1
+                    result.actions.append("Annulation du stop de secours par le bot confirmee : secours repose")
+                    return
                 if sl.trigger is SLTrigger.CANDLE_CLOSE:
                     # Stop de secours annule hors du bot : la cloture reste surveillee par le worker ; le secours
                     # n'est pas repose (un geste manuel est respecte), le proprietaire est prevenu.
@@ -460,10 +473,12 @@ class AutomationEngine:
                 f"SL à la clôture {interval} : bougies illisibles ({exc}), protection non vérifiée"
             )
             return
-        if breach is None:
+        if breach is None or self.execution.settings.dry_run:
+            # DRY_RUN : aucune vente n'aura lieu, la bougie fautive n'est annoncee qu'une fois.
             if checked is not None:
                 sl.candle_checked_until = checked
-            return
+            if breach is None:
+                return
         # Bougie fautive : la lecture n'avance pas tant que la sortie n'est pas faite ; si la vente echoue (position
         # en pause), la meme bougie redemande la sortie a la reprise.
         result.candle_stop_hit = breach
@@ -882,6 +897,7 @@ class AutomationEngine:
         if not sl.order_id and not sl.client_order_id:
             result.errors.append("SL actif sans identifiant : vente TP suspendue")
             return False
+        sl.cancel_pending = True                   # annulation par le bot : jamais prise pour un geste manuel
         cancelled = self.execution.cancel_order(
             position.symbol,
             order_id=sl.order_id,
@@ -894,6 +910,7 @@ class AutomationEngine:
                 f"({cancelled.error or cancelled.status})"
             )
             return False
+        sl.cancel_pending = False
         sl.status = SLStatus.CANCELED
         sl.order_id = None
         sl.replace_count += 1
@@ -1073,7 +1090,13 @@ class AutomationEngine:
         if position.stop_loss.status is SLStatus.REPLACING:
             # Un ordre stop est incertain chez Binance : aucun deplacement tant que son etat n'est pas tranche
             # (sinon l'ordre incertain serait ensuite adopte comme s'il etait au nouveau niveau).
-            result.errors.append(f"SL incertain chez Binance : deplacement vers {new_price} reporte")
+            result.errors.append(f"SL incertain chez Binance : deplacement vers {new_price} NON fait")
+            self.events.append(
+                EventType.ERROR,
+                f"SL {position.symbol} incertain chez Binance : deplacement vers {new_price} {why} non fait "
+                "(a refaire a la main une fois l'etat tranche, si besoin)",
+                position_id=position.position_id, symbol=position.symbol, level="WARNING",
+            )
             return
 
         previous = position.stop_loss.resolved_price or 0.0

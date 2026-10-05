@@ -66,9 +66,22 @@ def test_a_silent_worker_is_announced_with_unprotected_positions_then_its_return
 def test_a_stopped_worker_is_announced_as_stopped(tmp_path, rules):  # noqa: F811
     box = Box(tmp_path, [make_position(rules)])
     box.at(0)
-    assert box.at(200, runtime(age_seconds=1, state=WorkerState.STOPPED)) == []         # un seul contrôle : attendre
-    assert box.at(230, runtime(age_seconds=1, state=WorkerState.STOPPED)) == ["SILENT"]
+    stopped = runtime(age_seconds=1, state=WorkerState.STOPPED)
+    assert box.at(200, stopped) == [] and box.at(230, stopped) == []                 # arrêt propre : délai
+    assert box.at(380, stopped) == []                                                  # < 3 min : sauvegarde, redémarrage
+    assert box.at(420, stopped) == ["SILENT"]
     assert box.sent[-1][2] is True
+
+
+def test_a_short_planned_stop_is_quiet_but_a_frozen_heartbeat_is_not(tmp_path):
+    box = Box(tmp_path)
+    box.at(0)
+    stopped = runtime(age_seconds=1, state=WorkerState.STOPPED)
+    for second in (200, 230, 260, 290):                                               # 1 min 30 d'arrêt propre
+        assert box.at(second, stopped) == []
+    assert box.at(320, runtime()) == [] and box.sent == []                            # revenu : rien à dire
+    assert box.at(500, runtime(age_seconds=300)) == []                                 # plantage : 1er contrôle
+    assert box.at(530, runtime(age_seconds=330)) == ["SILENT"]                         # pas de délai d'arrêt propre
 
 
 def test_a_worker_in_error_that_keeps_beating_is_alive(tmp_path):

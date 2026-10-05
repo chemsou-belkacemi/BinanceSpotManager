@@ -785,6 +785,7 @@ class ExecutionEngine:
             ):
                 position.stop_loss.status = SLStatus.ACTIVE
                 return OrderResult(success=False, error="Annule par l'utilisateur")
+            position.stop_loss.cancel_pending = True   # annulation par le bot : jamais prise pour un geste manuel
             cancelled = self.cancel_order(
                 position.symbol,
                 order_id=previous_order_id,
@@ -806,6 +807,7 @@ class ExecutionEngine:
                 )
                 return cancelled
 
+        position.stop_loss.cancel_pending = False
         position.stop_loss.replace_count += 1
         result = self.place_stop_loss(
             position,

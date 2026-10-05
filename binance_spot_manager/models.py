@@ -404,6 +404,9 @@ class StopLoss(BSMModel):
     #: Stop de secours chez Binance pour un SL a la cloture de bougie : ordre stop pose X % sous le niveau de
     #: cloture, qui protege meme si le worker s'arrete (0 : aucun ordre Binance, surveillance par le worker seul).
     backup_percent: float = 0.0
+    #: Annulation de l'ordre stop demandee par le bot et pas encore confirmee : si Binance montre ensuite l'ordre
+    #: annule, c'est le bot (pas un geste manuel) ; le stop de secours est alors repose.
+    cancel_pending: bool = False
     #: closeTime (ms) de la derniere bougie cloturee deja evaluee
     candle_checked_until: Optional[int] = None
 

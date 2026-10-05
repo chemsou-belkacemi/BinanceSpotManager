@@ -33,6 +33,8 @@ REPEAT_SECONDS = 1800
 STANDBY_REMIND_SECONDS = 6 * 3600
 PING_SECONDS = 300
 CHECK_SECONDS = 30
+#: Un worker ARRÊTÉ proprement (sauvegarde chiffrée de la nuit, redémarrage) n'est annoncé qu'après ce délai.
+STOPPED_GRACE_SECONDS = 180
 
 
 @dataclass
@@ -70,6 +72,7 @@ class Watchdog:
         self.stale, self.repeat, self.remind, self.ping_every = stale, repeat, remind, ping_every
         self._started = clock()
         self._silent_checks = 0
+        self._stopped_since: Optional[float] = None
         self._silent_since: Optional[float] = None
         self._last_alert = 0.0
         self._standby_alert = 0.0
@@ -106,6 +109,13 @@ class Watchdog:
             self._silent_checks += 1
             if now - self._started < limit or self._silent_checks < 2:
                 return sent                       # démarrage, ou un seul contrôle silencieux : on attend le suivant
+            fresh = age is not None and age <= limit
+            if stopped and fresh:
+                # Arrêt propre (le worker a écrit STOPPED) : la sauvegarde de nuit ou un redémarrage durent moins
+                # que STOPPED_GRACE_SECONDS ; au-delà, c'est un vrai arrêt.
+                self._stopped_since = self._stopped_since or now
+                if now - self._stopped_since < STOPPED_GRACE_SECONDS:
+                    return sent
             if self._silent_since is None:
                 self._silent_since = now - (age if age is not None else 0.0)
             if now - self._last_alert >= self.repeat:
@@ -116,6 +126,7 @@ class Watchdog:
                 sent.append("SILENT")
             return sent
         self._silent_checks = 0
+        self._stopped_since = None
         if self._silent_since is not None:
             if self._last_alert:
                 minutes = int((now - self._silent_since) // 60)
