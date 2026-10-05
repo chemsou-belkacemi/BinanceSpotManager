@@ -217,6 +217,9 @@ class FakeClient:
     def get_prices(self, symbols=None):
         return {"BTCUSDT": self.price}
 
+    def get_ticker_24h(self, symbol: str):
+        return {"quoteVolume": "1000000000", "bidPrice": str(self.price), "askPrice": str(self.price)}
+
     def get_price(self, symbol: str) -> float:
         return self.price
 

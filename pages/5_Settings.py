@@ -307,6 +307,28 @@ with tabs[5]:
             st.success("Réglage enregistré.")
 
     st.divider()
+    st.subheader("Liquidité de la paire")
+    with st.form("signal_liquidity_preferences"):
+        liquidity_on = st.toggle(
+            "Mettre « À confirmer » les signaux automatiques sur une paire peu liquide",
+            value=bool(signal_preferences.get("signal_liquidity_enabled", True)), key="signal_liquidity_toggle",
+            help="Volume des dernières 24 h trop bas ou écart achat/vente trop large : risque de pump & dump et de "
+                 "glissement. Rien n'est refusé : le signal attend ta confirmation.",
+        )
+        liquidity_cols = st.columns(2)
+        min_volume = liquidity_cols[0].number_input(
+            "Volume 24 h minimum (USDT)", min_value=0, max_value=1_000_000_000, step=100_000,
+            value=int(signal_preferences.get("signal_min_volume_usdt", 500_000)), key="signal_min_volume_input")
+        max_spread = liquidity_cols[1].number_input(
+            "Écart achat/vente maximum (%)", min_value=0.01, max_value=20.0, step=0.05,
+            value=float(signal_preferences.get("signal_max_spread_percent", 0.5)), key="signal_max_spread_input")
+        if st.form_submit_button("Enregistrer le filtre de liquidité"):
+            get_settings_store().update({"signal_liquidity_enabled": bool(liquidity_on),
+                                         "signal_min_volume_usdt": float(min_volume),
+                                         "signal_max_spread_percent": float(max_spread)})
+            st.success("Filtre de liquidité enregistré.")
+
+    st.divider()
     st.subheader("Exécution automatique")
     auto_was_enabled = bool(signal_preferences.get("signal_auto_execute_enabled", False))
     auto_execute = st.toggle(

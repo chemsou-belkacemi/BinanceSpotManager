@@ -71,6 +71,9 @@ class SharedBinance:
     def get_prices(self, symbols=None):
         return {"BTCUSDT": 84500.0}
 
+    def get_ticker_24h(self, symbol):
+        return {"quoteVolume": "1000000000", "bidPrice": "84499", "askPrice": "84500"}
+
     def get_balances(self):
         return {"USDT": {"free": 10000.0, "locked": 0.0}}
 

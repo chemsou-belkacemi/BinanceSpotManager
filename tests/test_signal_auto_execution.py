@@ -13,6 +13,8 @@ from binance_spot_manager.symbol_rules import SymbolRulesCache, parse_symbol_rul
 
 
 SIMPLE = "PAIR: BTC/USDT\nENTRY 1: 84000\nT1: 90000\nSL: 80000"
+#: Statistiques 24 h d'une paire liquide (filtre de liquidité des signaux automatiques).
+LIQUID = {"quoteVolume": "1000000000", "bidPrice": "84499", "askPrice": "84500"}
 #: Empreinte du bot (sha256 du token) : forme réelle de l'identifiant externe Telegram.
 BOT = "ab" * 32
 TRUSTED_CHAT = -100123
@@ -59,6 +61,7 @@ def executor(tmp_path, inbox, preferences, *, now=1000, run_mode="DEMO_AUTO", po
         get_price=lambda symbol: 84500,
         get_prices=lambda: {"BTCUSDT": 84500},
         get_balances=lambda: {"USDT": {"free": 1000, "locked": 0}},
+        get_ticker_24h=lambda symbol: dict(LIQUID),
     )
     commands = CommandStore(tmp_path / "commands.db")
     worker = AutomaticSignalExecutor(
