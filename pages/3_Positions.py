@@ -525,10 +525,14 @@ def live_stop_loss(position_id):
     sl = position.stop_loss
     if sl.trigger is SLTrigger.CANDLE_CLOSE:
         backup = sl.binance_stop_price()
-        protection = (f"stop de secours chez Binance à {fmt_price(backup)} ({sl.backup_percent:g} % plus bas, "
-                      f"statut {sl.status.value}) : il protège aussi si le worker s'arrête"
-                      if backup else "aucun ordre stop sur Binance : le worker doit rester actif pour protéger "
-                                     "la position")
+        if backup and sl.status is SLStatus.ACTIVE and sl.order_id:
+            protection = (f"stop de secours chez Binance à {fmt_price(backup)} ({sl.backup_percent:g} % plus bas) : "
+                          "il protège aussi si le worker s'arrête")
+        elif backup:
+            protection = (f"stop de secours prévu à {fmt_price(backup)} mais PAS en place chez Binance (statut "
+                          f"{sl.status.value}) : le worker doit rester actif pour protéger la position")
+        else:
+            protection = "aucun ordre stop sur Binance : le worker doit rester actif pour protéger la position"
         st.info(
             f"SL à la clôture de bougie {sl.candle_interval} : le worker vend au marché si une bougie "
             f"{sl.candle_interval} clôture à {fmt_price(sl.resolved_price)} ou dessous ; {protection}."

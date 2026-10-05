@@ -344,10 +344,12 @@ class CommandProcessor:
         if target >= price:
             raise RejectedCommand("Le SL doit etre sous le cours actuel")
         result = self.execution.move_stop_loss(position, new_stop_price=target, quantity=position.metrics.net_qty)
-        if result.success and not result.dry_run:
-            position.stop_loss.resolved_price = target
-            # Deplacement manuel = stop au prix sur Binance, plus une surveillance de cloture.
-            sl = position.stop_loss
+        sl = position.stop_loss
+        if not result.dry_run and (result.success or sl.status is SLStatus.REPLACING):
+            # Deplacement manuel = stop au prix sur Binance (pose, ou incertain chez Binance), plus une surveillance
+            # de cloture. Annulation refusee : l'ancien ordre et son mode restent ; creation refusee : l'ancien
+            # niveau est protege de nouveau au cycle suivant.
+            sl.resolved_price = target
             sl.trigger, sl.candle_interval, sl.candle_checked_until = SLTrigger.TOUCH, "", None
         recompute_position(position)
         self.positions.save(position)

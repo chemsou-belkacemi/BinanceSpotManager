@@ -62,12 +62,14 @@ class Watchdog:
     def __init__(self, runtime: Callable[[], BotRuntime], positions: Callable[[], list[Position]],
                  notify: Callable[..., object], messages, *, standby_flag: Path,
                  clock: Callable[[], float] = time.time, ping: Optional[Callable[[str], None]] = None,
-                 ping_url: str = "", stale: float = STALE_SECONDS, repeat: float = REPEAT_SECONDS,
-                 remind: float = STANDBY_REMIND_SECONDS, ping_every: float = PING_SECONDS) -> None:
+                 ping_url: str = "", stale: "float | Callable[[], float]" = STALE_SECONDS,
+                 repeat: float = REPEAT_SECONDS, remind: float = STANDBY_REMIND_SECONDS,
+                 ping_every: float = PING_SECONDS) -> None:
         self.runtime, self.positions, self.notify, self.messages = runtime, positions, notify, messages
         self.standby_flag, self.clock, self.ping, self.ping_url = Path(standby_flag), clock, ping, ping_url
         self.stale, self.repeat, self.remind, self.ping_every = stale, repeat, remind, ping_every
         self._started = clock()
+        self._silent_checks = 0
         self._silent_since: Optional[float] = None
         self._last_alert = 0.0
         self._standby_alert = 0.0
@@ -80,17 +82,30 @@ class Watchdog:
             logger.exception("Positions illisibles")
             return Exposure()
 
+    def limit(self) -> float:
+        """Âge maximal d'un heartbeat vivant : au moins STALE_SECONDS, et au moins la limite du Dashboard
+        (heartbeat_stale_after, 3 × la cadence réglée + 5 s) quand `stale` est une fonction des réglages."""
+        try:
+            value = float(self.stale() if callable(self.stale) else self.stale)
+        except Exception:  # noqa: BLE001 - réglages illisibles : limite par défaut
+            value = STALE_SECONDS
+        return value if value == value and value > 0 else STALE_SECONDS
+
     def check(self) -> list[str]:
-        """Événements envoyés : "SILENT", "BACK", "STANDBY"."""
+        """Événements envoyés : "SILENT", "BACK", "STANDBY". Un worker en ERREUR qui écrit encore son heartbeat
+        est vivant (il continue de suivre les positions) ; seuls un arrêt (STOPPED) ou un heartbeat trop vieux
+        comptent, et seulement après deux contrôles silencieux d'affilée (pas d'alerte sur un tour lent)."""
         now = self.clock()
         runtime = self.runtime()
         age = runtime.heartbeat_age()
-        stopped = runtime.state in {WorkerState.STOPPED, WorkerState.ERROR}
-        alive = age is not None and age <= self.stale and not stopped
+        limit = self.limit()
+        stopped = runtime.state is WorkerState.STOPPED
+        alive = age is not None and age <= limit and not stopped
         sent: list[str] = []
         if not alive:
-            if now - self._started < self.stale:
-                return sent                                   # démarrage : le worker n'a pas encore écrit
+            self._silent_checks += 1
+            if now - self._started < limit or self._silent_checks < 2:
+                return sent                       # démarrage, ou un seul contrôle silencieux : on attend le suivant
             if self._silent_since is None:
                 self._silent_since = now - (age if age is not None else 0.0)
             if now - self._last_alert >= self.repeat:
@@ -100,6 +115,7 @@ class Watchdog:
                 self._last_alert = now
                 sent.append("SILENT")
             return sent
+        self._silent_checks = 0
         if self._silent_since is not None:
             if self._last_alert:
                 minutes = int((now - self._silent_since) // 60)

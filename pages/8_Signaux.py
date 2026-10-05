@@ -73,7 +73,12 @@ if analyze:
             st.success("Analyse enregistrée. Les doublons retrouvent le même signal.")
 
 with st.expander("Recevoir depuis Telegram"):
-    automatic = bool(preferences.get("signal_telegram_auto_enabled", False))
+    from binance_spot_manager.telegram_commands import owner_id
+
+    # Le worker lit le bot dès que la relève automatique OU les commandes Telegram sont actives : un second lecteur
+    # (ce bouton) déclencherait des conflits chez Telegram (un seul lecteur par bot).
+    automatic = bool(preferences.get("signal_telegram_auto_enabled", False)) or (
+        owner_id(preferences, settings.telegram_chat_id) is not None)
     st.caption("Le bot doit avoir accès aux messages, ou les recevoir par transfert. La réception seule ne crée jamais d'ordre.")
     if automatic:
         diagnostics = getattr(service.runtime(), "telegram_diagnostics", {})

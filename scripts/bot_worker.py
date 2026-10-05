@@ -410,7 +410,11 @@ class Worker:
         if hasattr(self, "daily_guard"):
             self._check_daily_loss()
         if hasattr(self, "manual_pause") and hasattr(self, "auto_signal_executor"):
-            self.auto_signal_executor.manual_pause_reason = self.manual_pause.refusal()
+            try:
+                self.auto_signal_executor.manual_pause_reason = self.manual_pause.refusal()
+            except Exception:  # noqa: BLE001 - fichier illisible : pause gardee par prudence
+                logging.getLogger("bsm.worker").exception("Pause manuelle illisible")
+                self.auto_signal_executor.manual_pause_reason = "Pause manuelle illisible : aucune entrée automatique"
         if hasattr(self, "auto_signal_executor"):
             # Toujours AVANT une mise en file automatique : au demarrage, aucun signal ne part
             # tant que les ordres ouverts du compte n'ont pas ete compares aux positions locales.
@@ -558,8 +562,11 @@ class Worker:
                 balances = self.client.get_balances()
                 quote = balances.get(self.settings.quote_asset, {})
                 positions = self.positions.list_all()
+                # Capital = USDT (libre + bloque) + valeur des cryptos encore detenues (quantite nette au dernier prix
+                # connu, sinon au prix moyen) : apres un TP, le produit de la vente n'est plus compte deux fois.
                 capital = float(quote.get("free") or 0) + float(quote.get("locked") or 0) + sum(
-                    p.metrics.capital_committed for p in positions if p.is_open)
+                    p.metrics.net_qty * (p.metrics.current_price or p.metrics.average_price)
+                    for p in positions if p.is_open)
                 prices: dict = {}
 
                 def price_of(symbol):

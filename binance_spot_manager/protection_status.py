@@ -25,7 +25,8 @@ def protection_overview(positions, report=None, *, now=None):
         elif p.oco_exit is None and p.stop_loss.status is SLStatus.NONE:
             state = "Sans SL volontairement"
         elif candle_stop(p) and not issues:
-            state = f"SL à la clôture {p.stop_loss.candle_interval} (surveillé par le worker)"
+            state = f"SL à la clôture {p.stop_loss.candle_interval} (surveillé par le worker)" + (
+                " + stop de secours chez Binance" if backup_live(p) else "")
         elif fresh and checks and all(r["Resultat"] == "OK" for r in checks) and any("SL" in r["Sortie"] for r in checks) and not issues:
             state = "Sorties verifiees sur Binance (instantane)"
         elif issues:
@@ -39,10 +40,15 @@ def protection_overview(positions, report=None, *, now=None):
 
 
 def candle_stop(position: Position) -> bool:
-    """SL a la cloture de bougie : aucun ordre Binance par conception, le worker le surveille."""
+    """SL a la cloture de bougie : le worker le surveille (avec ou sans stop de secours chez Binance)."""
     sl = position.stop_loss
-    return (sl.trigger is SLTrigger.CANDLE_CLOSE and sl.status is not SLStatus.NONE
-            and not sl.order_id and not sl.client_order_id)
+    return sl.trigger is SLTrigger.CANDLE_CLOSE and sl.status is not SLStatus.NONE
+
+
+def backup_live(position: Position) -> bool:
+    """Stop de secours d'un SL a la cloture, actif chez Binance."""
+    sl = position.stop_loss
+    return candle_stop(position) and sl.status is SLStatus.ACTIVE and bool(sl.order_id)
 
 
 def protection_alerts(positions: list[Position]) -> list[dict]:
@@ -66,7 +72,10 @@ def protection_alerts(positions: list[Position]) -> list[dict]:
                 issues.append("Une branche OCO n'a pas été retrouvée lors du dernier contrôle")
                 critical = True
         elif candle_stop(position):
-            pass  # protection assuree par le worker (cloture de bougie), pas par un ordre Binance
+            # Protection assuree par le worker (cloture de bougie) ; un stop de secours prevu mais absent est signale.
+            if position.stop_loss.backup_percent > 0 and not backup_live(position):
+                issues.append(f"Stop de secours absent chez Binance ({position.stop_loss.status.value}) : seule la "
+                              "clôture surveillée par le worker protège")
         elif position.stop_loss.status is not SLStatus.ACTIVE:
             issues.append("Aucun SL actif enregistré — cela peut être volontaire pour un TP seul")
         elif not position.stop_loss.order_id and not position.stop_loss.client_order_id:

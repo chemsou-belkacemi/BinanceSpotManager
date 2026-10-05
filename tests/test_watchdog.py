@@ -66,8 +66,28 @@ def test_a_silent_worker_is_announced_with_unprotected_positions_then_its_return
 def test_a_stopped_worker_is_announced_as_stopped(tmp_path, rules):  # noqa: F811
     box = Box(tmp_path, [make_position(rules)])
     box.at(0)
-    assert box.at(200, runtime(age_seconds=1, state=WorkerState.STOPPED)) == ["SILENT"]
+    assert box.at(200, runtime(age_seconds=1, state=WorkerState.STOPPED)) == []         # un seul contrôle : attendre
+    assert box.at(230, runtime(age_seconds=1, state=WorkerState.STOPPED)) == ["SILENT"]
     assert box.sent[-1][2] is True
+
+
+def test_a_worker_in_error_that_keeps_beating_is_alive(tmp_path):
+    box = Box(tmp_path)
+    box.at(0)
+    for second in range(30, 600, 30):                                                  # erreur un tour sur deux
+        state = WorkerState.ERROR if second % 60 else WorkerState.MONITORING
+        assert box.at(second, runtime(age_seconds=3, state=state)) == []
+    assert box.sent == []
+
+
+def test_one_slow_check_is_not_an_alert_and_the_limit_follows_the_settings(tmp_path):
+    box = Box(tmp_path, stale=lambda: 905.0)                                         # cadence 300 s : 3 × 300 + 5
+    box.at(0)
+    assert box.at(1000, runtime(age_seconds=600)) == [] and box.at(1030, runtime(age_seconds=630)) == []
+    assert box.at(1060, runtime(age_seconds=1000)) == []                               # un seul contrôle trop vieux
+    assert box.at(1090, runtime(age_seconds=1030)) == ["SILENT"]
+    broken = Box(tmp_path, stale=lambda: (_ for _ in ()).throw(OSError("réglages illisibles")))
+    assert broken.watchdog.limit() == 120
 
 
 def test_standby_with_open_positions_is_announced_and_reminded(tmp_path, rules):  # noqa: F811

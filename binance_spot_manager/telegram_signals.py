@@ -106,7 +106,13 @@ def import_telegram(
     for update in sorted(updates, key=lambda item: item["update_id"]):
         message = next((update[k] for k in ("message", "channel_post", "edited_message", "edited_channel_post") if k in update), {})
         if commands is not None and message:
-            reply = commands.handle(message, edited="edited_message" in update or "edited_channel_post" in update)
+            try:
+                reply = commands.handle(message, edited="edited_message" in update or "edited_channel_post" in update)
+            except Exception:  # noqa: BLE001 - une commande en echec ne bloque jamais les messages suivants
+                logger.exception("Commande Telegram non traitée")
+                # Seul un message de commande (« /… ») reçoit la réponse d'erreur ; un signal suit son chemin habituel.
+                is_command = str(message.get("text") or "").strip().startswith("/")
+                reply = "Commande non traitée (erreur interne, voir les journaux du worker)." if is_command else None
             if reply:
                 send_reply(session, token, message["chat"]["id"], reply)
                 inbox.advance(bot, int(update["update_id"]) + 1)
@@ -201,8 +207,10 @@ class TelegramSignalPoller:
             return []
         if not self.token:
             raise ValueError("Token Telegram absent de la configuration actuelle.")
-        # Signaux seulement en relève automatique ; sinon, ce lecteur ne sert qu'aux commandes du propriétaire.
-        chats = chat_allowlist(preferences.get("signal_telegram_chats", "")) if enabled and automatic else set()
+        # Dès que la réception est activée, ce lecteur enregistre les signaux des conversations autorisées, même en
+        # relève « manuelle » : sinon, lisant le bot pour les commandes, il les consommerait sans les garder (un seul
+        # lecteur par bot). Enregistrer ne crée aucun ordre ; l'exécution automatique exige la relève automatique.
+        chats = chat_allowlist(preferences.get("signal_telegram_chats", "")) if enabled else set()
         self._update(state="POLLING", running=True)
         items = import_telegram(
             self.token, chats, self.inbox, self.scope, session=self.session,

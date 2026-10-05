@@ -5,12 +5,13 @@ from __future__ import annotations
 
 import pytest
 
+from binance_spot_manager.binance_client import BinanceError
 from binance_spot_manager.models import CloseReason, SLRuleAfterTP, SLStatus, SLTrigger
 from binance_spot_manager.signal_parser import parse_signal
 from binance_spot_manager.signal_plan import prepare_signal
 from binance_spot_manager.watchdog import exposure
 from test_automation import SL_CLIENT_ID, SL_ORDER_ID, events, rules, settings  # noqa: F401 - fixtures partagees
-from test_candle_stop import STOP, T0, candle_position, candles, kline, worker_for  # noqa: F401
+from test_candle_stop import MIN, QUARTER, STOP, T0, candle_position, candles, kline, worker_for  # noqa: F401
 
 BACKUP = 78220.8          # 80 640 × (1 − 3 %), arrondi au tick de 0,01 vers le bas
 
@@ -140,3 +141,130 @@ def test_the_watchdog_counts_a_live_backup_as_protection(rules):  # noqa: F811
     without, protected = candle_position(rules), backup_position(rules)
     protected.stop_loss.status, protected.stop_loss.order_id = SLStatus.ACTIVE, SL_ORDER_ID
     assert exposure([without, protected]).unprotected == ["BTCUSDT"]
+
+
+# --- Relecture du 2026-10-05 : chemins d'échec ---------------------------------------------------------------------
+
+
+def placed(automation, fake, position):
+    fake.klines = [kline(T0, 81000)]
+    automation.run_cycle(position, 81500)
+    assert position.stop_loss.status is SLStatus.ACTIVE
+    return next(o for o in fake.orders.values() if o["type"] == "STOP_LOSS_LIMIT")
+
+
+def test_an_uncertain_backup_is_settled_before_any_candle_exit(candles, rules):  # noqa: F811
+    automation, fake, clock = candles
+    position = backup_position(rules)
+    fake.klines = [kline(T0, 81000)]
+    fake.fail_next = BinanceError("Timeout", code=-1007)                      # réponse perdue
+    automation.run_cycle(position, 81500)
+    sl = position.stop_loss
+    assert sl.status is SLStatus.REPLACING
+    fake.klines.append(kline(T0 + QUARTER, 79000))                           # clôture fautive pendant l'incertitude
+    clock["now"] = T0 + 2 * QUARTER + MIN
+    result = automation.run_cycle(position, 79500)
+    assert result.candle_stop_hit is None and not position.automation.paused
+    assert sl.candle_checked_until is None or sl.candle_checked_until < T0 + 2 * QUARTER - 1   # rien de consommé
+    # L'ordre était bien arrivé chez Binance : il est adopté, puis la clôture fautive demande la sortie.
+    fake.orders[sl.client_order_id] = {
+        "symbol": "BTCUSDT", "orderId": 999, "clientOrderId": sl.client_order_id, "side": "SELL",
+        "type": "STOP_LOSS_LIMIT", "status": "NEW", "price": "77986.1", "stopPrice": str(BACKUP), "origQty": "0.006",
+        "executedQty": "0", "cummulativeQuoteQty": "0", "fills": []}
+    result = automation.run_cycle(position, 79500)
+    assert sl.status is SLStatus.ACTIVE and result.candle_stop_hit.close_price == 79000
+
+
+def test_a_breach_candle_is_not_consumed_until_the_exit_is_done(candles, rules):  # noqa: F811
+    automation, fake, clock = candles
+    position = backup_position(rules, percent=0.0)
+    fake.klines = [kline(T0, 81000), kline(T0 + QUARTER, 79000)]
+    clock["now"] = T0 + 2 * QUARTER + MIN
+    first = automation.run_cycle(position, 79500)
+    assert first.candle_stop_hit.close_price == 79000
+    again = automation.run_cycle(position, 79500)                             # vente échouée : redemandée
+    assert again.candle_stop_hit.close_price == 79000
+
+
+def test_a_refused_cancel_keeps_the_backup_and_the_candle_watch(candles, rules):  # noqa: F811
+    automation, fake, _ = candles
+    position = backup_position(rules)
+    order = placed(automation, fake, position)
+    fake.orders.pop(order["clientOrderId"])                                  # l'annulation ne peut être confirmée
+    outcome = automation.raise_stop(position, 84100.0, why="(protection marché)")
+    sl = position.stop_loss
+    assert outcome.sl_moved_to is None and outcome.errors
+    assert (sl.trigger, sl.candle_interval, sl.resolved_price) == (SLTrigger.CANDLE_CLOSE, "15m", STOP)
+
+
+def test_no_move_while_a_stop_is_uncertain(candles, rules):  # noqa: F811
+    automation, fake, _ = candles
+    position = backup_position(rules)
+    position.stop_loss.status, position.stop_loss.client_order_id = SLStatus.REPLACING, "BSM-X-SL"
+    outcome = automation.raise_stop(position, 84100.0, why="(protection marché)")
+    assert any("incertain" in error for error in outcome.errors) and fake.created == []
+    assert position.stop_loss.resolved_price == STOP and position.stop_loss.trigger is SLTrigger.CANDLE_CLOSE
+
+
+def test_an_uncertain_manual_move_becomes_a_price_stop_at_the_target(settings, rules, tmp_path):  # noqa: F811
+    from types import SimpleNamespace
+
+    from binance_spot_manager.command_processor import CommandProcessor
+    from binance_spot_manager.execution_engine import OrderResult
+    from binance_spot_manager.position_store import PositionStore
+
+    position = backup_position(rules)
+    position.stop_loss.status, position.stop_loss.order_id = SLStatus.ACTIVE, SL_ORDER_ID
+    store = PositionStore(tmp_path / "positions")
+    store.save(position)
+
+    def uncertain_move(current, *, new_stop_price, quantity, keep_level=False):
+        sl = current.stop_loss
+        sl.status, sl.order_id, sl.client_order_id = SLStatus.REPLACING, None, "BSM-X-SL1"
+        sl.resolved_price = new_stop_price                                    # place_stop_loss sans keep_level
+        return OrderResult(success=False, status="UNKNOWN", error="Statut du SL incertain")
+
+    execution = SimpleNamespace(settings=settings, client=SimpleNamespace(get_price=lambda symbol: 86000.0),
+                                move_stop_loss=uncertain_move)
+    processor = CommandProcessor(None, store, execution, lambda: None)
+    try:
+        processor._move_sl({"position_id": position.position_id, "expected_order_id": SL_ORDER_ID,
+                            "target_price": 83000.0})
+    except Exception:  # noqa: BLE001 - le résultat incertain est signalé ; l'état sauvegardé compte
+        pass
+    sl = store.load(position.position_id).stop_loss
+    assert (sl.trigger, sl.resolved_price, sl.status) == (SLTrigger.TOUCH, 83000.0, SLStatus.REPLACING)
+
+
+def test_a_backup_under_binance_minimums_is_never_sent_and_noted_once(candles, rules):  # noqa: F811
+    from binance_spot_manager.position_engine import recompute_position
+
+    automation, fake, _ = candles
+    position = backup_position(rules)
+    entry = position.entries[0]
+    entry.executed_qty = entry.net_qty = entry.binance_qty = 0.00006           # ≈ 4,69 USDT au niveau de secours
+    entry.quote_spent = 0.00006 * 84000.0
+    entry.commissions = []
+    recompute_position(position)
+    fake.klines = [kline(T0, 81000)]
+    first = automation.run_cycle(position, 81500)
+    second = automation.run_cycle(position, 81500)
+    assert not [o for o in fake.created if o["type"] == "STOP_LOSS_LIMIT"]
+    assert not first.errors and not second.errors
+    assert sum("Stop de secours impossible" in a for a in first.actions + second.actions) == 1
+    assert fake.kline_calls                                                    # la clôture reste surveillée
+
+
+def test_a_backup_cancelled_outside_the_bot_keeps_the_candle_watch(candles, rules):  # noqa: F811
+    automation, fake, clock = candles
+    position = backup_position(rules)
+    order = placed(automation, fake, position)
+    order["status"] = "CANCELED"                                               # annulé à la main chez Binance
+    result = automation.run_cycle(position, 81500)
+    sl = position.stop_loss
+    assert not position.automation.paused and not result.errors
+    assert (sl.status, sl.backup_percent, sl.order_id) == (SLStatus.PLANNED, 0.0, None)
+    fake.klines.append(kline(T0 + QUARTER, 79000))
+    clock["now"] = T0 + 2 * QUARTER + MIN
+    assert automation.run_cycle(position, 79500).candle_stop_hit.close_price == 79000
+    assert len([o for o in fake.created if o["type"] == "STOP_LOSS_LIMIT"]) == 1   # pas reposé

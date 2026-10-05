@@ -44,7 +44,10 @@ class ManualPause:
     def refusal(self) -> str:
         state = self._read(self.path)
         if isinstance(state, dict) and state.get("paused"):
-            since = time.strftime("%d/%m %H:%M UTC", time.gmtime(float(state.get("since") or 0)))
+            try:
+                since = time.strftime("%d/%m %H:%M UTC", time.gmtime(float(state.get("since") or 0)))
+            except (TypeError, ValueError, OverflowError):
+                since = "?"
             return (f"Pause manuelle depuis le {since} ({state.get('by') or 'Telegram'}) : aucune nouvelle entrée ; "
                     "/reprise pour reprendre. Les positions ouvertes restent suivies")
         return ""

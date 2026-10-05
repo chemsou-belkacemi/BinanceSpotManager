@@ -139,3 +139,35 @@ def test_settings_save_the_daily_loss_rule(monkeypatch, tmp_path):
     next(b for b in app.button if b.label == "Enregistrer la perte maximale").click().run()
     assert not app.exception
     assert store.load()["daily_loss_percent"] == 2.5 and store.load()["daily_loss_enabled"] is True
+
+
+
+def test_the_capital_counts_what_is_still_held_not_the_gross_purchase(tmp_path, rules, events, monkeypatch):  # noqa: F811
+    """Relecture du 2026-10-05 : après un TP, le produit de la vente est dans l'USDT libre ; le capital ne compte que
+    la crypto encore détenue (sinon le seuil réel serait plus lâche que 3 %)."""
+    from binance_spot_manager.models import TPStatus
+    from binance_spot_manager.position_engine import recompute_position
+    from binance_spot_manager.position_store import PositionStore
+    from scripts import bot_worker
+
+    position = make_position(rules)
+    tp1 = position.sorted_tps[0]
+    tp1.status, tp1.executed_qty, tp1.average_fill_price = TPStatus.EXECUTED, 0.0036, 86520.0
+    tp1.quote_received = 0.0036 * 86520.0
+    position.metrics.current_price = 85000.0
+    recompute_position(position)
+    position.pnl.unrealized = -110.0
+    store = PositionStore(tmp_path / "positions")
+    store.save(position)
+    worker = bot_worker.Worker.__new__(bot_worker.Worker)
+    worker.settings = SimpleNamespace(dry_run=False, has_credentials=True, quote_asset="USDT")
+    worker.positions, worker.events = store, events
+    worker.client = SimpleNamespace(get_balances=lambda: {"USDT": {"free": 3300.0, "locked": 0.0}},
+                                    get_price=lambda symbol: None)
+    worker.daily_guard, _ = guard(tmp_path)
+    worker.auto_signal_executor = SimpleNamespace(daily_guard_reason="")
+    worker.notifications = SimpleNamespace(daily_loss=lambda kind, detail: (kind, detail), notify=lambda n: None)
+    worker._check_daily_loss()
+    held = position.metrics.net_qty * 85000.0                                       # ≈ 204 USDT encore détenus
+    state = worker.daily_guard.state()
+    assert state["capital"] == pytest.approx(3300.0 + held, rel=1e-6)               # pas + 504 de coût d'achat brut

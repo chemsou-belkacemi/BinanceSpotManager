@@ -90,9 +90,21 @@ services:
     command: ["python", "scripts/watchdog.py"]
     mem_limit: 192m
     cpus: 0.25
+    # Moindre privilège : pas de .env entier (clés Binance), seulement de quoi prévenir et la cadence du worker.
+    env_file: !reset []
     environment:
       BSM_WORKER_SUPERVISOR: docker
       BSM_HEALTHCHECK_URL: ${BSM_HEALTHCHECK_URL:-}
+      BSM_TELEGRAM_BOT_TOKEN: ${BSM_TELEGRAM_BOT_TOKEN:-}
+      BSM_TELEGRAM_CHAT_ID: ${BSM_TELEGRAM_CHAT_ID:-}
+      BSM_SMTP_HOST: ${BSM_SMTP_HOST:-}
+      BSM_SMTP_PORT: ${BSM_SMTP_PORT:-587}
+      BSM_SMTP_USER: ${BSM_SMTP_USER:-}
+      BSM_SMTP_PASSWORD: ${BSM_SMTP_PASSWORD:-}
+      BSM_SMTP_FROM: ${BSM_SMTP_FROM:-}
+      BSM_SMTP_TO: ${BSM_SMTP_TO:-}
+      BSM_HEARTBEAT_STALE_AFTER: ${BSM_HEARTBEAT_STALE_AFTER:-20}
+      BSM_WORKER_INTERVAL: ${BSM_WORKER_INTERVAL:-5}
     volumes:
       - bsm-data:/app/data:ro
       - bsm-logs:/app/logs

@@ -29,7 +29,6 @@ from .models import (
     OrderType,
     Position,
     SLStatus,
-    SLTrigger,
     TakeProfit,
     TPStatus,
     utcnow,
@@ -620,8 +619,12 @@ class ExecutionEngine:
         stop_price: float,
         quantity: float,
         attempt: int = 0,
+        keep_level: bool = False,
     ) -> OrderResult:
-        """Cree l'unique SL Binance (STOP_LOSS_LIMIT) sur la quantite restante."""
+        """Cree l'unique SL Binance (STOP_LOSS_LIMIT) sur la quantite restante.
+
+        `keep_level` : l'ordre est le stop de secours d'un SL a la cloture de bougie ; le niveau de cloture surveille
+        (resolved_price) ne change pas. Sinon, l'ordre EST le stop et son prix devient le niveau du SL."""
         if position.oco_exit is not None:
             return OrderResult(success=False, error="SL independant interdit sur une position OCO")
         if position.stop_loss.executed_qty > QTY_EPSILON:
@@ -702,7 +705,7 @@ class ExecutionEngine:
 
         # Un stop de secours (SL a la cloture de bougie) garde le niveau de cloture surveille par le worker : son
         # prix chez Binance se deduit de ce niveau (StopLoss.binance_stop_price), il ne le remplace jamais.
-        keeps_level = position.stop_loss.trigger is SLTrigger.CANDLE_CLOSE
+        keeps_level = keep_level
         if result.success:
             position.stop_loss.order_id = result.order_id
             position.stop_loss.client_order_id = client_order_id
@@ -758,8 +761,9 @@ class ExecutionEngine:
         *,
         new_stop_price: float,
         quantity: float,
+        keep_level: bool = False,
     ) -> OrderResult:
-        """Deplace le SL : annule l'ancien puis cree le nouveau (section 16).
+        """Deplace le SL : annule l'ancien puis cree le nouveau (section 16). `keep_level` : voir place_stop_loss.
 
         On annule d'abord pour ne jamais depasser MAX_NUM_ALGO_ORDERS, et
         l'echec de creation est journalise comme une fenetre non protegee.
@@ -808,6 +812,7 @@ class ExecutionEngine:
             stop_price=new_stop_price,
             quantity=quantity,
             attempt=position.stop_loss.replace_count,
+            keep_level=keep_level,
         )
 
         if result.success:

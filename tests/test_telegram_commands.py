@@ -132,3 +132,31 @@ def test_settings_save_the_telegram_commands(monkeypatch, tmp_path):
     app.text_input(key="telegram_owner_id_input").set_value("123456789")
     next(b for b in app.button if b.label == "Enregistrer les commandes").click().run()
     assert not app.exception and store.load()["telegram_owner_id"] == "123456789"
+
+
+def test_manual_reception_keeps_the_signals_the_worker_reads(tmp_path):
+    """Relecture du 2026-10-05 : relève « manuelle » + commandes actives → le worker lit le bot ; il doit garder les
+    signaux des conversations autorisées (sinon ils seraient consommés sans être enregistrés)."""
+    handler, _ = commands(tmp_path)
+    session = Session([{"update_id": 7, "message": {"message_id": 3, "date": 1000, "text": SIMPLE,
+                                                    "chat": {"id": -100123, "type": "supergroup"}}}])
+    preferences = {"signal_telegram_enabled": True, "signal_telegram_auto_enabled": False,
+                   "signal_telegram_chats": "-100123"}
+    inbox = SignalInbox(tmp_path / "s.db")
+    poller = TelegramSignalPoller("token", "demo", lambda: preferences, inbox=inbox, session=session,
+                                  commands=handler)
+    items = poller.poll_once()
+    assert len(items) == 1 and inbox.recent("demo")[0]["raw"] == SIMPLE
+
+
+def test_a_failing_command_never_blocks_the_next_messages(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    broken = SimpleNamespace(handle=lambda message, edited=False: (_ for _ in ()).throw(OSError("disque plein")))
+    session = Session([
+        {"update_id": 20, "message": private("/pause")},
+        {"update_id": 21, "message": {"message_id": 6, "date": 1000, "text": SIMPLE,
+                                      "chat": {"id": -100123, "type": "supergroup"}}},
+    ])
+    items = import_telegram("token", {-100123}, inbox, "demo", session=session, commands=broken)
+    assert len(items) == 1 and "non traitée" in session.posted[0]["text"]
+    assert inbox.offset(__import__("hashlib").sha256(b"token").hexdigest()) == 22
