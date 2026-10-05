@@ -134,6 +134,10 @@ class CsiClient:
     def sources(self) -> dict:
         return self._request("GET", "/sources")
 
+    def risk(self) -> dict:
+        """Conseil de risque à 24 h de CSI (`GET /risk`, shadow) : ampleur typique et taille relative par paire."""
+        return self._request("GET", "/risk")
+
     def recent(self, limit: int = 20) -> list[dict]:
         return list(self._request("GET", "/signals/recent", params={"limit": int(limit)}).get("signals") or [])
 
@@ -235,3 +239,46 @@ def source_label(row, preferences=None) -> str:
     except ValueError:
         names = {}
     return names.get(chat) or (f"telegram {chat}" if chat else "telegram")
+
+
+# ==========================================================================
+# Taille proposée par CSI : information seulement, jamais appliquée (docs/RISK_PROTOCOL.md de CSI)
+# ==========================================================================
+
+
+def size_advice(risk: dict | None, symbol: str, budget: float, stop_distance_pct: float | None) -> dict:
+    """Ce que CSI proposerait pour ce signal, à côté du budget retenu : budget × taille relative (à risque égal
+    entre paires, d'après la seule prévision de volatilité confirmée), et le stop du signal comparé à l'ampleur
+    typique des 24 prochaines heures. `available` False avec `reason` quand CSI ne sait pas."""
+    if not isinstance(risk, dict) or not risk.get("available"):
+        reason = (risk or {}).get("reason") if isinstance(risk, dict) else None
+        return {"available": False, "reason": reason or "aucun conseil de CSI"}
+    pair = (risk.get("pairs") or {}).get(symbol.upper())
+    if not isinstance(pair, dict):
+        return {"available": False, "reason": f"{symbol.upper()} absente de la prévision de CSI"}
+    try:
+        move = float(pair["move_24h_pct"])
+        relative = float(pair["relative_size"])
+    except (KeyError, TypeError, ValueError):
+        return {"available": False, "reason": "conseil de CSI illisible"}
+    out = {"available": True, "origin": risk.get("origin", ""), "move_24h_pct": move, "relative_size": relative,
+           "budget": float(budget), "proposed_budget": round(float(budget) * relative, 2)}
+    if stop_distance_pct is not None:
+        out["stop_distance_pct"] = float(stop_distance_pct)
+        out["stop_inside_move"] = float(stop_distance_pct) < move
+    return out
+
+
+def size_advice_text(advice: dict | None, quote_asset: str = "USDT") -> str:
+    if not advice:
+        return ""
+    if not advice.get("available"):
+        return f"CSI (information, non appliqué) : {advice.get('reason') or 'indisponible'}."
+    text = (f"CSI (information, non appliqué) : ampleur typique sur 24 h {advice['move_24h_pct']:.2f} %, taille "
+            f"relative ×{advice['relative_size']:.2f} → budget proposé {advice['proposed_budget']:.2f} {quote_asset} "
+            f"(retenu : {advice['budget']:.2f})")
+    if "stop_inside_move" in advice:
+        text += (f" ; stop à {advice['stop_distance_pct']:.2f} %, "
+                 + ("à l'intérieur du mouvement ordinaire d'une journée" if advice["stop_inside_move"]
+                    else "au-delà du mouvement ordinaire d'une journée"))
+    return text + "."

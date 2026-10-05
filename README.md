@@ -147,6 +147,18 @@ refusé au démarrage. Ne jamais placer les volumes sur un partage réseau
   le capital plus tôt : sur quelques jours, l'écart dépend surtout du marché.
 - **Par trader ou canal** (History) : nom du trader écrit en tête du signal, sinon canal ;
   voir `docs/SIGNAUX.md`, section « Trader ou canal d'origine ».
+- **Taille selon le risque** (Settings → Signaux, **désactivée par défaut**) : budget = capital ×
+  perte visée ÷ distance du stop (entrée moyenne → stop). Chaque signal perd alors le même montant
+  au stop (0,4 % du capital par défaut, hors frais), plafonné à 20 % du capital par signal et par la
+  réserve. Un signal sans stop utilisable part « à confirmer ». Proposée aussi sur la page Signaux.
+- **Trader ou canal perdant** (Settings → Signaux, **désactivé par défaut**) : au-delà d'un nombre de
+  positions terminées et d'une perte nette (frais compris) que tu choisis, ses signaux passent « à
+  confirmer » ou partent avec une taille réduite (50 % par défaut), réduction notée dans le routage.
+  Un résultat négatif sur peu de trades peut être de la malchance.
+- **Conseil de taille de CSI** (information, jamais appliqué) : pour chaque signal automatique, le
+  routage note ce que CSI proposerait (taille relative à risque égal entre paires, d'après la seule
+  prévision de volatilité confirmée de CSI, et le stop comparé à l'ampleur typique des 24 h). Affiché
+  sur la page Signaux ; protocole de mesure dans `docs/RISK_PROTOCOL.md` de CSI.
 
 ### Sécurité : surveillance, garde-fous, commandes
 

@@ -22,6 +22,8 @@ from binance_spot_manager.signal_inbox import SignalInbox
 from binance_spot_manager.signal_parser import ParsedSignal, TEMPLATES, parse_signal
 from binance_spot_manager.signal_plan import TRAIL_STOP_KEY, prepare_signal, signal_identity, signal_sl_after_tp
 from binance_spot_manager.signal_sizing import (
+    RiskSizingPolicy,
+    risk_based_budget,
     SignalSizingPolicy,
     suggest_signal_budget_from_account,
 )
@@ -146,6 +148,19 @@ elif row.get("auto_state") == "REJECTED":
     st.warning(f"Exécution automatique refusée : {row.get('auto_detail') or 'raison indisponible'}")
 elif row.get("auto_state") == "PROCESSING":
     st.info("Exécution automatique en cours de préparation par le worker.")
+route_metrics = (stored_route.metrics if stored_route else None) or (
+    ((row.get("payload") or {}).get("route") or {}).get("metrics") or {})
+if route_metrics.get("risk_sizing"):
+    sized_info = route_metrics["risk_sizing"]
+    st.caption(f"Taille selon le risque : perte visée {sized_info['risk_amount']:.2f} au stop "
+               f"({sized_info['risk_percent']:g} % du capital), stop à {sized_info['stop_distance_pct']:.2f} % → budget "
+               f"{sized_info['budget']:.2f}" + (f" (limité par le {sized_info['capped_by']})" if sized_info.get("capped_by") else ""))
+if route_metrics.get("channel_reduction"):
+    reduction = route_metrics["channel_reduction"]
+    st.caption(f"Taille réduite à {reduction['kept_percent']:g} % ({reduction['budget_before']:.2f} → "
+               f"{reduction['budget']:.2f}) : {reduction['detail']}")
+if route_metrics.get("csi_size"):
+    st.caption(csi_client.size_advice_text(route_metrics["csi_size"]))
 if row["payload"] is None and st.button("Réanalyser ce signal", help="Reprendre le texte enregistré avec les formats actuellement reconnus."):
     try:
         inbox.reanalyse(scope, selected)
@@ -275,7 +290,16 @@ try:
 except Exception as exc:
     sizing_warning = f"Budget automatique indisponible : {exc}"
 
-default_budget = sizing_suggestion.budget if sizing_suggestion else 0.0
+risk_sizing_policy = RiskSizingPolicy.from_mapping(preferences)
+risk_sized = None
+if sizing_suggestion and risk_sizing_policy.enabled:
+    # Même calcul que l'exécution automatique ; entrées du signal à parts égales (répartition de cette page).
+    risk_sized = risk_based_budget(risk_sizing_policy, entries=parsed.entries, stop=parsed.stop,
+                                   total_capital=sizing_suggestion.total_capital,
+                                   usable_quote=sizing_suggestion.usable_quote)
+    if risk_sized is None:
+        sizing_warning = "Taille selon le risque impossible pour ce signal (stop absent ou au-dessus de l'entrée)."
+default_budget = (risk_sized.budget if risk_sized else sizing_suggestion.budget) if sizing_suggestion else 0.0
 budget_key = f"budget_{selected}"
 if sizing_suggestion and st.button(
     "Recalculer le budget proposé",
@@ -303,6 +327,10 @@ if sizing_suggestion:
         f"réserve conservée : {service.risk_limits().min_reserve_percent:.1f} %. "
         "Tu peux modifier ce montant avant la simulation."
     )
+    if risk_sized:
+        st.caption(f"Taille selon le risque (Settings) : perte visée {risk_sized.risk_amount:.2f} {quote_asset} au stop, "
+                   f"stop à {risk_sized.stop_distance_pct:.2f} % de l'entrée moyenne → {risk_sized.budget:.2f} {quote_asset}"
+                   + (f", limité par le {risk_sized.capped_by}" if risk_sized.capped_by else "") + ".")
     if sizing_suggestion.capped_by_reserve:
         st.warning("Le budget proposé a été plafonné pour conserver la réserve de capital.")
 if sizing_warning:

@@ -76,8 +76,8 @@ def _finish_stuck_remainder(position, execution, price):
         return
     if not rules.below_minimums(position.metrics.net_qty, reference, market=True):
         return
-    reason = (position.manual_exits[-1].close_reason if position.manual_exits
-              else CloseReason.ALL_TP_HIT if position.hit_tps else CloseReason.MANUAL_CLOSE)
+    reason = position.closing_reason or (position.manual_exits[-1].close_reason if position.manual_exits
+                                         else CloseReason.ALL_TP_HIT if position.hit_tps else CloseReason.MANUAL_CLOSE)
     finish_remainder(position, reason, reference)
 
 
@@ -106,6 +106,7 @@ def close_market(position, execution, positions, *, reason=CloseReason.MANUAL_CL
     execution.settings.assert_write_allowed("market close")
     position.automation.paused = True
     position.status = PositionStatus.CLOSING
+    position.closing_reason = reason
     positions.save(position)
 
     targets = [(entry, "entry") for entry in position.open_entries]

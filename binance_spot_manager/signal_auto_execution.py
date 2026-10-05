@@ -9,12 +9,13 @@ réservé aux signaux que personne ne peut exécuter (contrat violé).
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 import logging
 import time
 
 from . import performance, signal_routing
-from .csi_client import CsiUnavailable, GatePolicy, source_label
+from .csi_client import CsiUnavailable, GatePolicy, size_advice, source_label
 from .fee_valuation import fee_rates
 from .trader_name import trader_of
 from .models import EventType
@@ -34,7 +35,13 @@ from .signal_routing import (
     AUTO, CONFIANCE, DONNEES, EARLY_REVIEW_CODES, KIND_CSI, REVIEW, RISQUE, Reason, RouteDecision,
     RoutingDataError, RoutingPolicy,
 )
-from .signal_sizing import SignalSizingPolicy, suggest_signal_budget_from_account
+from .signal_sizing import (
+    ChannelPolicy,
+    RiskSizingPolicy,
+    SignalSizingPolicy,
+    risk_based_budget,
+    suggest_signal_budget_from_account,
+)
 
 logger = logging.getLogger("bsm.signal_auto")
 
@@ -382,6 +389,36 @@ class AutomaticSignalExecutor:
             reasons.append(Reason("D_VALUATION", DONNEES,
                                   "Valorisation du portefeuille incomplète : " + ", ".join(missing)))
             return self._review(row, signal_routing.decide(reasons), now=now, policy=policy, label=label)
+        sizing_metrics: dict = {}
+        risk_policy = RiskSizingPolicy.from_mapping(preferences)
+        if risk_policy.enabled:
+            # Taille selon le risque (réglage, désactivé par défaut) : même perte au stop à chaque signal.
+            sized = risk_based_budget(
+                risk_policy, entries=parsed.entries, stop=parsed.stop, weights=self._entry_weights(parsed, preferences),
+                total_capital=suggestion.total_capital, usable_quote=suggestion.usable_quote,
+            )
+            if sized is None:
+                reasons.append(Reason("D_RISK_SIZING", DONNEES, "Taille selon le risque impossible : stop absent, "
+                                      "au-dessus de l'entrée moyenne, ou capital non valorisé"))
+                return self._review(row, signal_routing.decide(reasons), now=now, policy=policy, label=label)
+            suggestion = replace(suggestion, budget=sized.budget, requested_budget=sized.budget,
+                                 capped_by_reserve=sized.capped_by == "réserve")
+            sizing_metrics["risk_sizing"] = {
+                "risk_percent": risk_policy.risk_percent, "risk_amount": round(sized.risk_amount, 2),
+                "stop_distance_pct": round(sized.stop_distance_pct, 3), "average_entry": sized.average_entry,
+                "cap_budget": round(sized.cap_budget, 2), "capped_by": sized.capped_by, "budget": sized.budget,
+            }
+        channel_policy = ChannelPolicy.from_mapping(preferences)
+        channel_detail = self._channel_detail(row, preferences, channel_policy, prices)
+        channel_reasons: list[Reason] = []
+        if channel_detail and channel_policy.action == "REDUCE":
+            # Trader ou canal perdant : les signaux partent avec une part du budget, et la réduction est notée.
+            reduced = channel_policy.reduced(suggestion.budget)
+            sizing_metrics["channel_reduction"] = {"detail": channel_detail, "kept_percent": channel_policy.kept_percent,
+                                                   "budget_before": suggestion.budget, "budget": reduced}
+            suggestion = replace(suggestion, budget=reduced)
+        elif channel_detail:
+            channel_reasons = [Reason("C_CHANNEL_LOSING", CONFIANCE, channel_detail)]
         if suggestion.budget <= 0:
             reasons.append(Reason("D_NO_BUDGET", DONNEES, "Budget automatique nul après application de la réserve"))
             return self._review(row, signal_routing.decide(reasons), now=now, policy=policy, label=label)
@@ -431,7 +468,7 @@ class AutomaticSignalExecutor:
         except ValueError as exc:
             reasons.append(Reason("D_PLAN", DONNEES, f"Plan refusé à ce budget : {exc}"))
             return self._review(row, signal_routing.decide(reasons), now=now, policy=policy, label=label)
-        metrics = {"budget": suggestion.budget, "current_price": current_price}
+        metrics = {"budget": suggestion.budget, "current_price": current_price, **sizing_metrics}
         try:
             if self.positions is None:
                 raise RoutingDataError("positions locales non transmises au routage")
@@ -452,8 +489,10 @@ class AutomaticSignalExecutor:
         except RoutingDataError as exc:
             reasons.append(Reason("D_RISK", DONNEES, f"Risque non évaluable : {exc}"))
             return self._review(row, signal_routing.decide(reasons, metrics), now=now, policy=policy, label=label)
-        reasons += risk_reasons + breaker + self._channel_reasons(row, preferences, positions, prices)
+        reasons += risk_reasons + breaker + channel_reasons
         metrics |= risk_metrics | breaker_metrics
+        # Ce que CSI proposerait (information seulement, jamais appliqué : docs/RISK_PROTOCOL.md de CSI).
+        metrics["csi_size"] = self._csi_size(parsed.symbol, suggestion.budget, metrics.get("stop_distance_pct"))
         try:
             liquidity, liquidity_metrics = liquidity_reasons(self.client.get_ticker_24h(parsed.symbol), preferences)
         except Exception as exc:  # noqa: BLE001 - statistiques indisponibles : revue, jamais refus définitif
@@ -474,17 +513,53 @@ class AutomaticSignalExecutor:
         payload = self.inbox.freeze(self.scope, signal_id, payload)
         return self._enqueue(row, payload, parsed, now, label, request_key, csi_detail=csi_detail)
 
-    def _channel_reasons(self, row, preferences, positions, prices):
-        """Canal perdant (réglage, désactivé par défaut) : résultat net négatif, frais BNB valorisés
-        comme dans History, sur au moins le nombre minimal de positions terminées du canal."""
-        if not preferences.get("signal_channel_review_enabled", False):
-            return []
-        min_trades = int(_bounded_number(preferences, "signal_channel_review_min_trades", 30, 10, 500))
+    def _channel_detail(self, row, preferences, channel_policy, prices) -> str:
+        """Trader ou canal perdant (réglage, désactivé par défaut) : résultat net négatif d'au moins la perte
+        minimale, frais BNB valorisés comme dans History, sur au moins le nombre minimal de positions terminées.
+        "" si la règle est inactive, si le stockage est illisible (le contrôle du risque le dira) ou sinon."""
+        if not channel_policy.enabled or self.positions is None:
+            return ""
+        try:
+            positions = self.positions.list_all()
+            if getattr(self.positions, "read_errors", None):
+                return ""
+        except Exception:  # noqa: BLE001 - stockage indisponible : aucun jugement, le risque sera non évaluable
+            return ""
         closed = [p for p in positions if not p.is_open]
         valued = performance.valued(closed, lambda p: fee_rates(p, prices.get))
-        detail = performance.losing_channel(valued, channel_name(row, preferences), min_trades=min_trades,
-                                            key=performance.channel_resolver(self._raw_text))
-        return [Reason("C_CHANNEL_LOSING", CONFIANCE, detail)] if detail else []
+        return performance.losing_channel(valued, channel_name(row, preferences), min_trades=channel_policy.min_trades,
+                                          min_loss=channel_policy.min_loss,
+                                          key=performance.channel_resolver(self._raw_text)) or ""
+
+    @staticmethod
+    def _entry_weights(parsed, preferences):
+        """Parts des entrées (en %) telles que prepare_signal les appliquera ; None si la répartition est invalide
+        (prepare_signal refusera alors le plan : D_PLAN)."""
+        if parsed.is_csi:
+            return None
+        try:
+            return automatic_entry_allocations(
+                len(parsed.entries),
+                preferences.get("signal_auto_entry_distribution", "EQUAL"),
+                preferences.get("signal_auto_entry_custom_percentages", ""),
+            )
+        except ValueError:
+            return None
+
+    def _csi_size(self, symbol, budget, stop_distance_pct) -> dict:
+        """Conseil de taille de CSI pour ce signal, mis en cache une minute ; jamais une exception."""
+        if self.csi_client is None or not hasattr(self.csi_client, "risk"):
+            return {"available": False, "reason": "aucun client CSI configuré"}
+        cached = getattr(self, "_csi_risk_cache", None)
+        if cached is None or cached[0] <= time.monotonic():
+            try:
+                cached = (time.monotonic() + 60, self.csi_client.risk())
+            except CsiUnavailable as exc:
+                cached = (time.monotonic() + 60, {"available": False, "reason": str(exc)})
+            except Exception as exc:  # noqa: BLE001 - CSI ne doit jamais arrêter le routage
+                cached = (time.monotonic() + 60, {"available": False, "reason": f"erreur inattendue ({exc.__class__.__name__})"})
+            self._csi_risk_cache = cached
+        return size_advice(cached[1], symbol, budget, stop_distance_pct)
 
     def _raw_text(self, signal_id):
         """Texte d'une ligne de la boîte (positions ouvertes avant le suivi par canal)."""
