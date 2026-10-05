@@ -338,3 +338,29 @@ def test_the_bot_s_own_uncertain_cancel_is_not_taken_for_a_manual_one(candles, r
     assert not result.errors and not position.automation.paused
     automation.run_cycle(position, 81500)
     assert live_stops(fake) == [pytest.approx(BACKUP)]                          # secours reposé
+
+
+
+def test_a_stop_still_alive_clears_the_pending_cancel(candles, rules):  # noqa: F811
+    """Annulation du bot refusée (ordre toujours vivant) : une annulation vue plus tard est un geste manuel."""
+    automation, fake, _ = candles
+    position = backup_position(rules)
+    order = placed(automation, fake, position)
+    position.stop_loss.cancel_pending = True
+    automation.run_cycle(position, 81500)                                       # l'ordre est encore NEW
+    assert position.stop_loss.cancel_pending is False
+    order["status"] = "CANCELED"
+    automation.run_cycle(position, 81500)
+    assert position.stop_loss.backup_percent == 0.0                              # geste manuel respecté
+
+
+def test_a_creation_that_never_reached_binance_forgets_its_phantom_id(candles, rules, monkeypatch):  # noqa: F811
+    automation, fake, _ = candles
+    position = backup_position(rules)
+    sl = position.stop_loss
+    sl.status, sl.client_order_id = SLStatus.REPLACING, "BSM-FANTOME-SL"
+    monkeypatch.setattr(automation, "_fetch_uncertain_sl", lambda p: (None, True))
+    monkeypatch.setattr(automation, "_sl_intent_expired", lambda p: True)
+    fake.klines = [kline(T0, 81000)]
+    automation.run_cycle(position, 81500)
+    assert sl.status in {SLStatus.FAILED, SLStatus.ACTIVE} and sl.client_order_id != "BSM-FANTOME-SL"

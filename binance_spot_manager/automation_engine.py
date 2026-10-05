@@ -288,6 +288,9 @@ class AutomationEngine:
                 # signee avant l'inscription de l'intention, a depasse recvWindow. Le SL n'existe
                 # pas : nouvelle protection au prochain cycle, sous un nouvel identifiant.
                 sl.status = SLStatus.FAILED
+                # L'identifiant fantome est oublie : la sortie au marche (close_market) ne le cherchera pas chez
+                # Binance ; la pose suivante prend de toute facon un nouvel identifiant.
+                sl.order_id, sl.client_order_id = None, None
                 sl.replace_count += 1
                 sl.last_error = "SL jamais arrive chez Binance : nouvel identifiant"
                 result.actions.append("SL jamais arrive chez Binance : nouvelle protection au prochain cycle")
@@ -340,6 +343,10 @@ class AutomationEngine:
             if status is not None and status.executed_qty > QTY_EPSILON:
                 self._record_sl_execution(position, status, result)
                 return
+            if status is not None and status.is_open:
+                # Ordre toujours vivant : une annulation demandee par le bot a echoue ; une annulation vue plus tard
+                # sera donc un geste manuel.
+                sl.cancel_pending = False
             if status is not None and status.is_terminal_dead:
                 if sl.trigger is SLTrigger.CANDLE_CLOSE and sl.cancel_pending:
                     # Annulation demandee par le bot lui-meme, restee incertaine puis confirmee ici : le secours est

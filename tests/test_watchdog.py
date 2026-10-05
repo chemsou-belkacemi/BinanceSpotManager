@@ -66,20 +66,22 @@ def test_a_silent_worker_is_announced_with_unprotected_positions_then_its_return
 def test_a_stopped_worker_is_announced_as_stopped(tmp_path, rules):  # noqa: F811
     box = Box(tmp_path, [make_position(rules)])
     box.at(0)
-    stopped = runtime(age_seconds=1, state=WorkerState.STOPPED)
-    assert box.at(200, stopped) == [] and box.at(230, stopped) == []                 # arrêt propre : délai
-    assert box.at(380, stopped) == []                                                  # < 3 min : sauvegarde, redémarrage
-    assert box.at(420, stopped) == ["SILENT"]
+
+    def stopped_at(second):                                                            # STOPPED écrit à 170 s
+        return runtime(age_seconds=second - 170, state=WorkerState.STOPPED)
+
+    assert box.at(200, stopped_at(200)) == [] and box.at(230, stopped_at(230)) == []   # arrêt propre : délai
+    assert box.at(340, stopped_at(340)) == []                                          # < 3 min : sauvegarde, redémarrage
+    assert box.at(380, stopped_at(380)) == ["SILENT"]                                  # 3 min 30 après l'arrêt
     assert box.sent[-1][2] is True
 
 
 def test_a_short_planned_stop_is_quiet_but_a_frozen_heartbeat_is_not(tmp_path):
     box = Box(tmp_path)
     box.at(0)
-    stopped = runtime(age_seconds=1, state=WorkerState.STOPPED)
-    for second in (200, 230, 260, 290):                                               # 1 min 30 d'arrêt propre
-        assert box.at(second, stopped) == []
-    assert box.at(320, runtime()) == [] and box.sent == []                            # revenu : rien à dire
+    for second in (200, 230, 260, 290, 320):                                          # 2 min 30 d'arrêt propre
+        assert box.at(second, runtime(age_seconds=second - 170, state=WorkerState.STOPPED)) == []
+    assert box.at(330, runtime()) == [] and box.sent == []                            # revenu : rien à dire
     assert box.at(500, runtime(age_seconds=300)) == []                                 # plantage : 1er contrôle
     assert box.at(530, runtime(age_seconds=330)) == ["SILENT"]                         # pas de délai d'arrêt propre
 
