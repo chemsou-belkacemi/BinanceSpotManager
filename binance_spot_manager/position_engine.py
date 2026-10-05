@@ -271,10 +271,7 @@ class PositionEngine:
                 entry_id=entry.entry_id,
             )
 
-        if position.status is PositionStatus.PENDING_ENTRIES and position.filled_entries:
-            position.status = PositionStatus.ACTIVE
-
-        recompute_position(position)
+        recompute_position(position)          # passe la position en ACTIVE des le premier achat
         self.refresh_tp_estimates(position)
         return entry
 
@@ -486,6 +483,10 @@ def recompute_position(position: Position, *, fee_rates: Optional[dict[str, floa
     metrics = position.metrics
 
     filled = position.filled_entries
+    if position.status is PositionStatus.PENDING_ENTRIES and filled:
+        # Premier achat constate, quel que soit le chemin (worker, reconciliation, reprise) : sans cela, un
+        # achat vu d'abord par la reconciliation laissait la position en PENDING_ENTRIES (XNOUSDT, 2026-10-05).
+        position.status = PositionStatus.ACTIVE
     for entry in filled:
         entry.net_qty = max(
             entry.executed_qty - entry.commission_total(position.base_asset), 0.0

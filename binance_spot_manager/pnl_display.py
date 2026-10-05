@@ -3,6 +3,22 @@ import math
 import re
 
 
+def price_decimals(value):
+    """Decimales d'affichage d'un prix : 2 a partir de 1 000, 4 de 1 a 1 000, 5 chiffres significatifs sous 1
+    (0.37120, 0.0034120), 8 au plus. Avec 2 decimales, les petits prix se confondaient (XNO 0.37 pour 0.3712)."""
+    magnitude = abs(value)
+    if not math.isfinite(magnitude) or magnitude == 0 or magnitude >= 1000:
+        return 2
+    if magnitude >= 1:
+        return 4
+    return min(8, 4 - math.floor(math.log10(magnitude)))
+
+
+def format_price(value):
+    """Prix lisible : espace entre les milliers, decimales selon la grandeur (price_decimals)."""
+    return f"{value:,.{price_decimals(value)}f}".replace(",", " ")
+
+
 def pnl_css(value):
     try:
         # Existing formatted UI amounts use spaces as thousands separators.

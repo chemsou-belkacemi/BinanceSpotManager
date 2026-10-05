@@ -461,7 +461,7 @@ class Worker:
         """Un seul cycle par position ; aucune relance immediate en cas d'erreur."""
         from binance_spot_manager.market_close import poll_market_close
         was_open = position.is_open
-        if position.status.value == "CLOSING" and poll_market_close(position, self.execution):
+        if position.status.value == "CLOSING" and poll_market_close(position, self.execution, price):
             self.positions.save(position)
             if was_open and not position.is_open:
                 self._notify_finished(position)

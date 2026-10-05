@@ -561,7 +561,7 @@ def test_the_report_sums_today_and_the_week_and_names_the_channels(rules):
     title, body = build([loss, win, old_win, canceled, still_open], NOW, lambda p: {})
     today = loss.pnl.realized + win.pnl.realized
     assert title == f"Rapport du 05/10 — {today:+.2f} USDT aujourd'hui"
-    assert f"Aujourd'hui : {today:+.2f} USDT sur 2 position(s) terminée(s), 1 gagnante(s)" in body
+    assert f"Aujourd'hui (depuis 00:00 UTC) : {today:+.2f} USDT sur 2 position(s) terminée(s), 1 gagnante(s)" in body
     assert "7 derniers jours : " in body and "sur 3 position(s)" in body
     assert f"Risque si tous les stops sont touchés : −{abs(still_open.metrics.max_loss_at_sl):.2f} USDT" in body
     assert "Meilleur trader/canal (7 j) : Canal A" in body and "Pire trader/canal (7 j) : Canal B" in body

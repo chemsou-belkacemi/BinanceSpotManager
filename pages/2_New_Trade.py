@@ -50,6 +50,7 @@ from binance_spot_manager.strategy_engine import (  # noqa: E402
 from ui_common import (  # noqa: E402
     banner,
     error_list,
+    fmt_amount,
     fmt_percent,
     fmt_price,
     fmt_qty,
@@ -124,7 +125,7 @@ if existing_positions:
 
 quote_asset = rules.quote_asset
 available_quote = balances.get(quote_asset, 0.0)
-st.caption(f"Solde {quote_asset} disponible : {fmt_price(available_quote)}")
+st.caption(f"Solde {quote_asset} disponible : {fmt_amount(available_quote)}")
 
 # ==========================================================================
 # 2. Capital
@@ -143,8 +144,8 @@ reserve_percent = st.slider(
 )
 usable = max(available_quote * (1 - reserve_percent / 100.0), 0.0)
 st.caption(
-    f"Utilisable après réserve : {fmt_price(usable)} "
-    f"(réserve {fmt_price(available_quote - usable)})"
+    f"Utilisable après réserve : {fmt_amount(usable)} "
+    f"(réserve {fmt_amount(available_quote - usable)})"
 )
 
 capital_mode = {
@@ -166,12 +167,12 @@ if capital_mode == "FIXED":
         st.caption(
             f"{capital_amount / available_quote * 100:.1f} % du solde · "
             f"solde estimé après engagement : "
-            f"{fmt_price(available_quote - capital_amount)}"
+            f"{fmt_amount(available_quote - capital_amount)}"
         )
 elif capital_mode == "PERCENT_OF_BALANCE":
     capital_percent = st.slider("Pourcentage du solde utilisable (%)", 1, 100, 5)
     capital_amount = usable * capital_percent / 100.0
-    st.caption(f"≈ {fmt_price(capital_amount)}")
+    st.caption(f"≈ {fmt_amount(capital_amount)}")
 else:
     risk_percent = st.slider(
         "Risque portefeuille (%)", 0.1, 5.0, float(settings.max_risk_per_position_percent), 0.1
@@ -513,11 +514,11 @@ def simulation_panel():
             f"""
     **Prix actuel** : {fmt_price(price)} {quote_asset}
 
-    **Solde {quote_asset}** : {fmt_price(available_quote)}
+    **Solde {quote_asset}** : {fmt_amount(available_quote)}
 
-    **Capital** : {fmt_price(plan.capital_total)} {quote_asset}
+    **Capital** : {fmt_amount(plan.capital_total)} {quote_asset}
 
-    **Capital en réserve** : {fmt_price(plan.capital_reserved)}
+    **Capital en réserve** : {fmt_amount(plan.capital_reserved)}
     """
         )
         for entry in plan.entries:
@@ -602,7 +603,7 @@ def simulation_panel():
     cols[0].metric("Exposition", f"{risk.planned_exposure_percent:.1f} %")
     cols[1].metric("Risque de cette position", f"{risk.planned_risk_percent:.2f} %")
     cols[2].metric("Risque total projeté", f"{risk.projected_total_risk_percent:.2f} %")
-    cols[3].metric("Capital libre après", fmt_price(risk.capital_free_after))
+    cols[3].metric("Capital libre après", fmt_amount(risk.capital_free_after))
 
     for refusal in risk.refusals:
         st.error(f"❌ {refusal}")

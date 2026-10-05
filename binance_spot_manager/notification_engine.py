@@ -26,6 +26,7 @@ from typing import Any, Callable, Optional
 
 from .config import Settings, get_settings
 from .models import EventType, Position, TakeProfit
+from .pnl_display import format_price
 
 logger = logging.getLogger("bsm.notifications")
 
@@ -336,7 +337,7 @@ class NotificationEngine:
                 f"Prix moyen : {entry.average_fill_price}\n"
                 f"Quantite : {entry.executed_qty}\n"
                 f"Montant : {entry.quote_spent:.2f} {position.quote_asset}\n"
-                f"Prix moyen position : {position.metrics.average_price:.2f}\n"
+                f"Prix moyen position : {format_price(position.metrics.average_price)}\n"
                 f"Quantite nette : {position.metrics.net_qty}\n"
                 f"Prochain TP : {position.next_tp.target_price if position.next_tp else '-'}\n"
                 f"SL : {position.stop_loss.resolved_price}"

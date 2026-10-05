@@ -1,6 +1,9 @@
 """Explicit Demo liquidation: cancel, confirm, then sell only this strategy's balance.
 
 Persist the intent BEFORE posting. Recovery only queries; it never resends a sell.
+
+Reliquat sous les minimums Binance (minQty, minNotional) : rien a vendre ni a proteger ; la position est
+terminee et le reliquat reste sur le compte (meme regle qu'apres les TP), au lieu de rester en CLOSING.
 """
 
 from .execution_engine import build_client_order_id
@@ -9,6 +12,17 @@ from .models import (CloseReason, EntryStatus, EventType, ManualExit,
 from .position_engine import finish_position, recompute_position
 
 TERMINAL = {"FILLED", "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"}
+
+
+def finish_remainder(position, reason, price):
+    """Termine la position en laissant sur le compte un reliquat sous les minimums Binance ; message rendu."""
+    remaining = position.metrics.net_qty
+    value = remaining * price if price else 0.0
+    message = (f"reliquat {remaining:g} {position.base_asset} (≈ {value:.2f} {position.quote_asset}) sous les "
+               "minimums Binance, laisse sur le compte : position terminee")
+    position.log(EventType.POSITION_UPDATED, message[0].upper() + message[1:], remaining=remaining)
+    finish_position(position, reason)
+    return message
 
 
 def apply_sale(position, sale, result, rules):
@@ -21,14 +35,49 @@ def apply_sale(position, sale, result, rules):
     sale.average_fill_price = result.average_price
     sale.commissions = result.commissions
     recompute_position(position)
-    if result.status == "FILLED" and float(rules.round_qty(position.metrics.net_qty, market=True)) == 0:
+    if result.status not in TERMINAL:
+        return
+    price = result.average_price or position.metrics.current_price
+    if float(rules.round_qty(position.metrics.net_qty, market=True)) == 0:
         finish_position(position, sale.close_reason)
-    elif result.status in TERMINAL:
+    elif rules.below_minimums(position.metrics.net_qty, price, market=True):
+        finish_remainder(position, sale.close_reason, price)
+    else:
         position.status = PositionStatus.ACTIVE
         position.log(EventType.ERROR, "Cloture incomplete : position en pause, solde restant a verifier")
 
 
-def poll_market_close(position, execution):
+def _nothing_live(position):
+    """Aucun ordre de cette position ne peut encore vivre chez Binance (achat, TP, SL, OCO, vente)."""
+    def uncertain(item):
+        return bool(item.order_id or item.client_order_id)
+
+    sl = position.stop_loss
+    return (not position.open_entries
+            and not any(tp.status in {TPStatus.SUBMITTED, TPStatus.PARTIALLY_EXECUTED}
+                        or (tp.status == TPStatus.FAILED and uncertain(tp)) for tp in position.take_profits)
+            and not (sl.status in {SLStatus.ACTIVE, SLStatus.REPLACING} or (sl.status == SLStatus.FAILED
+                                                                          and uncertain(sl)))
+            and not (position.oco_exit and position.oco_exit.status not in {"CANCELED", "FILLED",
+                                                                           "PARTIAL_TERMINAL"})
+            and all(sale.status in TERMINAL for sale in position.manual_exits))
+
+
+def _finish_stuck_remainder(position, execution, price):
+    """Cloture restee en CLOSING parce que le reste etait invendable (versions precedentes de close_market) :
+    terminee des que plus rien n'est vivant chez Binance et que le reste est sous les minimums. Prix de
+    reference : celui du worker, sinon le dernier connu ou le prix moyen (seul l'ordre de grandeur compte)."""
+    if not _nothing_live(position):
+        return
+    reference = price or position.metrics.current_price or position.metrics.average_price
+    if not execution.rules(position.symbol).below_minimums(position.metrics.net_qty, reference, market=True):
+        return
+    reason = (position.manual_exits[-1].close_reason if position.manual_exits
+              else CloseReason.ALL_TP_HIT if position.hit_tps else CloseReason.MANUAL_CLOSE)
+    finish_remainder(position, reason, reference)
+
+
+def poll_market_close(position, execution, price=None):
     """Return True when normal automation must remain suspended."""
     if position.status != PositionStatus.CLOSING:
         return False
@@ -38,6 +87,8 @@ def poll_market_close(position, execution):
                                                   client_order_id=None if sale.order_id else sale.client_order_id)
             if result is not None:
                 apply_sale(position, sale, result, execution.rules(position.symbol))
+    if position.status == PositionStatus.CLOSING:
+        _finish_stuck_remainder(position, execution, price)
     return True
 
 
@@ -114,6 +165,12 @@ def close_market(position, execution, positions, *, reason=CloseReason.MANUAL_CL
     rules = execution.rules(position.symbol, refresh=True)
     qty = float(rules.round_qty(position.metrics.net_qty, market=True))
     price = execution.client.get_price(position.symbol)
+    if rules.below_minimums(position.metrics.net_qty, price, market=True):
+        message = finish_remainder(position, reason, price)
+        positions.save(position)
+        return {"message": "Ordres annules ; " + message, "quantity": 0.0,
+                "realized_pnl": position.pnl.realized, "quote_asset": position.quote_asset,
+                "remaining_qty": position.metrics.net_qty}
     errors = rules.validate_order(price, qty, market=True)
     if errors:
         raise RuntimeError("Position en pause, ordres annules, vente impossible : " + "; ".join(errors))
