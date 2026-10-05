@@ -152,6 +152,12 @@ dans le dossier du projet. `make down` les conserve ; **ne jamais lancer
 
 - `make backup` écrit une archive **non chiffrée** dans `backups/`, worker
   arrêté le temps de la copie. La conserver dans un emplacement privé.
+- **Sur un serveur, préférer `make backup-chiffre`** : même copie, chiffrée à la volée
+  avec la clé **publique** `age` du propriétaire (`deploy/sauvegarde.age.pub`, hors Git),
+  sans archive en clair sur le disque ; `backups/bsm-<date>.tar.gz.age`, 14 gardées
+  (`GARDER=<n>`). Sur le PC : `bash scripts/recuperer_sauvegardes.sh <hote-ssh>` rapatrie
+  les copies sans rien supprimer sur le serveur. La clé privée ne quitte jamais le PC.
+  Clés, planification, déchiffrement et restauration : [docs/SECURITE_VPS.md](docs/SECURITE_VPS.md).
 - `make import-data` reprend un ancien dossier `./data` créé hors Docker.
   L'import est refusé si le volume contient déjà des positions. Démarrer sur un
   volume vide alors que des positions sont ouvertes sur Demo les laisserait sans suivi.
@@ -168,7 +174,8 @@ pour les ports publiés. L'accès public passe par un proxy Caddy : HTTPS
 automatique (Let's Encrypt) et un identifiant par personne pour toutes les pages.
 
 1. Ouvrir les ports **80** et **443** du serveur (80 sert au certificat et à la
-   redirection vers HTTPS). Rien d'autre ne doit déjà les utiliser.
+   redirection vers HTTPS ; avec ufw : `sudo ufw allow 80,443/tcp`). Rien d'autre ne
+   doit déjà les utiliser.
 2. Compléter `.env` :
    ```bash
    COMPOSE_PROFILES=public
@@ -201,6 +208,19 @@ un accès qu'à des personnes de confiance. L'adresse `sslip.io` apparaît dans 
 journaux publics des certificats et sera rapidement sondée : utiliser des mots de
 passe longs et aléatoires. L'interface reste aussi joignable par tunnel SSH
 (`ssh -L 8501:127.0.0.1:8501 <serveur>`).
+
+### Sécurité du serveur (VPS)
+
+```bash
+sudo bash scripts/verifier_vps.sh   # contrôle en lecture seule : ne modifie rien
+```
+
+Une ligne par contrôle (✔ bon, ⚠ à regarder, ✘ à corriger), puis un résumé et la commande
+à taper pour chaque point : SSH par clé seulement (`sshd -T`), pare-feu `ufw`, `fail2ban`,
+mises à jour automatiques, ports publiés par Docker (qui contourne `ufw` : l'interface 8501
+doit rester sur `127.0.0.1`), droits de `.env` et `deploy/users.caddy` (relevés avec `stat`,
+jamais lus), sauvegardes chiffrées, ports en écoute. Code de sortie 0 sans ✘, 1 sinon.
+Corrections pas à pas et sauvegardes chiffrées : **[docs/SECURITE_VPS.md](docs/SECURITE_VPS.md)**.
 
 ### Location : clés du client, connexion, licence
 
@@ -430,7 +450,7 @@ Aucun test destructif n'est lancé automatiquement au démarrage de l'applicatio
 
 Dans les conteneurs, sous `/app/data` (volume `bsm-data`) et `/app/logs` (volume
 `bsm-logs`). Consultation : `make shell SERVICE=worker`, ou `make backup` pour
-une copie hors Docker.
+une copie hors Docker (`make backup-chiffre` sur un serveur).
 
 | Chemin | Contenu |
 |---|---|
@@ -448,6 +468,17 @@ une copie hors Docker.
 | `logs/events.jsonl` | journal d'événements, une ligne JSON par événement |
 | `logs/bot.log` | journal d'exécution |
 | `logs/errors.log` | erreurs applicatives |
+
+Hors des volumes :
+
+| Emplacement | Contenu |
+|---|---|
+| `backups/bsm-<date>.tar.gz` (projet) | archives **en clair** de `make backup` |
+| `backups/bsm-<date>.tar.gz.age` (projet) | sauvegardes **chiffrées** de `make backup-chiffre`, 14 gardées |
+| `deploy/sauvegarde.age.pub` (projet, hors Git) | clé **publique** `age` qui chiffre les sauvegardes |
+| volume `bsm-keys` | clé maîtresse du coffre, jamais dans les sauvegardes |
+| `~/sauvegardes-bsm/` (PC) | copies rapatriées par `scripts/recuperer_sauvegardes.sh` |
+| `~/.config/bsm-sauvegarde.key` (PC seulement) | clé **privée** qui déchiffre les sauvegardes ; jamais sur le serveur |
 
 ## 12. Résolution de problèmes
 

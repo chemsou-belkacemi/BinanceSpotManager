@@ -293,8 +293,9 @@ en lecture seule a exécuté l'accueil, le Dashboard et Settings sans erreur, en
    rafraîchissement REST à la seconde dans l'interface.
 5. **Supervision** : alertes d'exploitation (worker arrêté, stop non posé, licence bientôt
    expirée), journaux centralisés sans secret.
-6. **Sauvegardes chiffrées** par client (aujourd'hui `make backup` produit une archive non
-   chiffrée ; le coffre y est chiffré, la clé maîtresse n'y est pas).
+6. **Sauvegardes chiffrées** par client (`make backup-chiffre` chiffre déjà avec la clé
+   publique `age` du propriétaire, voir [SECURITE_VPS.md](SECURITE_VPS.md) ; reste à organiser
+   une clé et un rapatriement par client. Le coffre y est chiffré, la clé maîtresse n'y est pas).
 7. **Facturation**, **conditions générales**, mentions légales, politique de confidentialité.
 8. **Rôles** (client / opérateur), journal d'audit des actions sensibles, en-têtes de sécurité
    (CSP) côté application.

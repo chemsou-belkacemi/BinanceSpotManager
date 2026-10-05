@@ -154,6 +154,10 @@ projet mais n'ont pas encore été exécutés par GitHub.
     Les notifications navigateur dépendent toujours des permissions et du système.
 12. **Sauvegarde/restauration vérifiée.** Rotation, export externe chiffré,
     contrôle d'intégrité et exercice de restauration avec rapprochement Demo.
+    *Suivi du 5 octobre 2026 : rotation et sauvegarde chiffrée (`make backup-chiffre`),
+    rapatriement sur le PC avec contrôle de déchiffrement (`scripts/recuperer_sauvegardes.sh`),
+    restauration pas à pas avec reprise en veille ([SECURITE_VPS.md](SECURITE_VPS.md)). Reste :
+    restauration outillée, signature des sauvegardes.*
 13. **Journal exploitable.** Identifiant de corrélation par action, recherche,
     export, rotation aussi des erreurs, espace disque minimum et alerte de saturation.
 14. **Gestion des conflits dans l'UI.** Recharger proprement une position après
@@ -177,6 +181,10 @@ projet mais n'ont pas encore été exécutés par GitHub.
     clés API et absence de permission de retrait.
 20. Hébergement HTTPS, supervision externe, sauvegardes hors machine,
     continuité d'exploitation, procédure d'incident et mises à jour signées.
+    *Suivi du 5 octobre 2026 : contrôle du serveur en lecture seule
+    (`scripts/verifier_vps.sh` : SSH, ufw, fail2ban, mises à jour, ports Docker, droits) et
+    sauvegardes chiffrées hors machine. Reste : supervision externe, procédure d'incident,
+    mises à jour signées.*
 21. Revue de sécurité indépendante et tests de charge représentatifs.
 22. Analyse juridique adaptée au pays et au service vendu, conditions,
     confidentialité, suppression/export des données et limites de responsabilité.

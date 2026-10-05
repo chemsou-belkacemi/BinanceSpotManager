@@ -7,7 +7,7 @@ STAMP := $(shell date +%Y%m%d-%H%M%S)
 
 .DEFAULT_GOAL := help
 .PHONY: help init build network up down restart ps logs worker-start worker-stop worker-restart \
-        check open-orders demo-tests integration migrate-oco run test shell backup import-data \
+        check open-orders demo-tests integration migrate-oco run test shell backup backup-chiffre import-data \
         users user-add user-remove proxy-reload master-key compte
 
 help: ## Affiche cette aide
@@ -85,6 +85,11 @@ backup: ## Archive data/ et logs/ dans ./backups (worker arrete ; jamais la cle 
 	if [ $$status -eq 0 ]; then echo "Sauvegarde : backups/bsm-$(STAMP).tar.gz (non chiffree)"; \
 	else rm -f backups/bsm-$(STAMP).tar.gz; fi; \
 	exit $$status
+
+GARDER ?= 14
+
+backup-chiffre: network ## Sauvegarde CHIFFREE (age, cle publique deploy/sauvegarde.age.pub) dans ./backups, 14 gardees (GARDER=<n>)
+	@COMPOSE="$(COMPOSE)" bash scripts/sauvegarde_chiffree.sh --garder "$(GARDER)"
 
 master-key: ## Cree la cle maitresse du coffre (volume bsm-keys, hors sauvegardes) si elle manque
 	$(COMPOSE) run --rm --no-deps keytool
