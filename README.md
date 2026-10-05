@@ -150,7 +150,9 @@ refusé au démarrage. Ne jamais placer les volumes sur un partage réseau
 - **Taille selon le risque** (Settings → Signaux, **désactivée par défaut**) : budget = capital ×
   perte visée ÷ distance du stop (entrée moyenne → stop). Chaque signal perd alors le même montant
   au stop (0,4 % du capital par défaut, hors frais), plafonné à 20 % du capital par signal et par la
-  réserve. Un signal sans stop utilisable part « à confirmer ». Proposée aussi sur la page Signaux.
+  réserve. Un SL à la clôture de bougie est calculé sur son stop de secours (la vente peut se faire
+  jusque-là) ; sans stop de secours, la perte n'est pas bornée et le signal part « à confirmer ».
+  Activée, elle remplace la stratégie de budget (part réduite comprise). Proposée aussi sur la page Signaux.
 - **Trader ou canal perdant** (Settings → Signaux, **désactivé par défaut**) : au-delà d'un nombre de
   positions terminées et d'une perte nette (frais compris) que tu choisis, ses signaux passent « à
   confirmer » ou partent avec une taille réduite (50 % par défaut), réduction notée dans le routage.

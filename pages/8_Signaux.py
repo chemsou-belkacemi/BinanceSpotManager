@@ -155,7 +155,8 @@ route_metrics = (stored_route.metrics if stored_route else None) or (
 if route_metrics.get("risk_sizing"):
     sized_info = route_metrics["risk_sizing"]
     st.caption(f"Taille selon le risque : perte visée {sized_info['risk_amount']:.2f} au stop "
-               f"({sized_info['risk_percent']:g} % du capital), stop à {sized_info['stop_distance_pct']:.2f} % → budget "
+               f"({sized_info['risk_percent']:g} % du capital), perte bornée à {sized_info['stop_distance_pct']:.2f} % de "
+               f"l'entrée (stop, ou stop de secours d'un SL à la clôture) → budget "
                f"{sized_info['budget']:.2f}" + (f" (limité par le {sized_info['capped_by']})" if sized_info.get("capped_by") else ""))
 if route_metrics.get("channel_reduction"):
     reduction = route_metrics["channel_reduction"]
@@ -279,11 +280,14 @@ elif candle:
         [f"À la clôture d'une bougie {candle}, comme le signal (surveillée par le worker)",
          f"Stop au prix : dès que le prix touche {parsed.stop}"],
         key=f"stop_mode_{selected}",
+        # La taille selon le risque dépend du déclenchement : le budget proposé est recalculé.
+        on_change=lambda: st.session_state.pop(f"budget_{selected}", None),
     )
     touch, stop_ready = stop_choice.startswith("Stop au prix"), True
 else:
     touch = st.checkbox(f"Je choisis un stop au prix {parsed.stop} (clôture « {parsed.stop_timeframe} » non reconnue)",
-                        key=f"touch_{selected}")
+                        key=f"touch_{selected}",
+                        on_change=lambda: st.session_state.pop(f"budget_{selected}", None))
     stop_ready = touch
 quote_asset = "USDC" if parsed.symbol.endswith("USDC") else "USDT"
 sizing_policy = SignalSizingPolicy.from_mapping(preferences)
@@ -314,7 +318,7 @@ if sizing_suggestion and risk_sizing_policy.enabled:
     # à la clôture de bougie est dimensionné sur son stop de secours.
     risk_sized = risk_based_budget(
         risk_sizing_policy, entries=parsed.entries,
-        stop=sizing_stop(parsed.stop, candle_close=bool(parsed.stop_timeframe) and not touch,
+        stop=sizing_stop(parsed.stop, candle_close=bool(candle) and not touch,
                          backup_percent=candle_backup_percent(preferences)),
         total_capital=sizing_suggestion.total_capital, usable_quote=sizing_suggestion.usable_quote)
     if risk_sized is None:
@@ -327,8 +331,11 @@ channel_note = ""
 if sizing_suggestion and channel_rule.enabled:
     # Même règle que l'exécution automatique (losing_channel_detail).
     try:
+        page_positions = service.positions.list_all()
+        if getattr(service.positions, "read_errors", None):
+            raise ValueError("stockage des positions illisible")
         channel_note = losing_channel_detail(
-            row, preferences, channel_rule, service.positions.list_all(), sizing_prices,
+            row, preferences, channel_rule, page_positions, sizing_prices,
             lambda signal_id: str((inbox.get(scope, signal_id) or {}).get("raw") or ""))
     except Exception as exc:  # noqa: BLE001 - la page reste utilisable ; la règle est signalée
         sizing_warning = "; ".join(filter(None, [sizing_warning, f"Règle du trader perdant non évaluée : {exc}"]))
@@ -363,7 +370,8 @@ if sizing_suggestion:
     )
     if risk_sized:
         st.caption(f"Taille selon le risque (Settings) : perte visée {risk_sized.risk_amount:.2f} {quote_asset} au stop, "
-                   f"stop à {risk_sized.stop_distance_pct:.2f} % de l'entrée moyenne → {risk_sized.budget:.2f} {quote_asset}"
+                   f"perte bornée à {risk_sized.stop_distance_pct:.2f} % de l'entrée moyenne (stop, ou stop de secours "
+                   f"d'un SL à la clôture) → {risk_sized.budget:.2f} {quote_asset}"
                    + (f", limité par le {risk_sized.capped_by}" if risk_sized.capped_by else "") + ".")
     if channel_note:
         st.warning(channel_note + (f" : budget proposé réduit à {channel_rule.kept_percent:g} %."

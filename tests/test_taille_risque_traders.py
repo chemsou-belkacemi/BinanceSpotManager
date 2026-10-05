@@ -337,3 +337,59 @@ def test_the_page_sizes_a_candle_stop_on_its_backup(monkeypatch, tmp_path):
     backup = 82320 * 0.97
     budget = app.number_input(key=f"budget_{row['id']}").value
     assert budget * (84000 - backup) / 84000 == pytest.approx(4.0, abs=0.01)
+
+
+# -- relecture de contrôle --------------------------------------------------------------------------------------
+
+def test_the_risk_check_measures_a_candle_stop_at_its_backup(tmp_path):
+    """Hors réglage de taille : avec un budget fixe, le contrôle « risque au stop » (R1) d'un SL à la clôture se
+    mesure au stop de secours, là où la vente peut se faire (avant : au niveau nominal, perte sous-estimée)."""
+    folders = {}
+    for name, backup in (("secours", 3.0), ("sans", 0.0)):
+        folder = tmp_path / name
+        folder.mkdir()
+        inbox = SignalInbox(folder / "signals.db")
+        inbox.receive("demo", CANDLE, source="telegram", external_id=telegram_id(1), source_timestamp=995)
+        worker, commands = executor(folder, inbox, enabled_preferences(signal_fixed_budget=200,
+                                                                       signal_candle_backup_percent=backup))
+        folders[name] = (worker.process_pending(), inbox.recent("demo")[0])
+    outcome, saved = folders["secours"]
+    assert outcome == ["REVIEW"] and '"R1_RISK_AT_STOP"' in saved["route"]           # ≈ 1 % au secours > 0,5 %
+    assert folders["sans"][0] == ["QUEUED"]                                           # nominal 2 % : ≈ 0,4 %
+
+
+def test_the_automatic_touch_setting_sizes_on_the_nominal_stop(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    inbox.receive("demo", CANDLE, source="telegram", external_id=telegram_id(1), source_timestamp=995)
+    worker, commands = executor(tmp_path, inbox, enabled_preferences(signal_risk_sizing_enabled=True,
+                                                                     signal_auto_touch_stop=True))
+    assert worker.process_pending() == ["QUEUED"]
+    sized = commands.list_recent("demo")[0]["payload"]["route"]["metrics"]["risk_sizing"]
+    assert sized["sizing_stop"] == pytest.approx(82320)                                # stop au toucher
+
+
+def test_nested_metrics_are_cleaned_for_strict_json():
+    import json
+
+    from binance_spot_manager.signal_routing import clean_metrics
+
+    cleaned = clean_metrics({"csi_size": {"available": True, "origin": float("nan"), "inner": {"x": float("inf")}}})
+    assert cleaned["csi_size"]["origin"] is None and cleaned["csi_size"]["inner"]["x"] is None
+    json.dumps(cleaned, allow_nan=False)
+
+
+def test_flags_must_be_real_booleans_and_bad_entries_give_no_size():
+    assert not RiskSizingPolicy.from_mapping({"signal_risk_sizing_enabled": "false"}).enabled
+    assert not ChannelPolicy.from_mapping({"signal_channel_review_enabled": "true"}).enabled
+    assert average_entry_price([100.0, 0.0], [50, 50]) == 0.0
+    assert risk_based_budget(ON, entries=[100.0, float("nan")], stop=90.0, total_capital=1000, usable_quote=800) is None
+
+
+def test_the_page_recalculates_the_budget_when_the_stop_trigger_changes(monkeypatch, tmp_path):
+    app, row = _open_signals_page(monkeypatch, tmp_path, CANDLE, {"signal_risk_sizing_enabled": True})
+    on_backup = app.number_input(key=f"budget_{row['id']}").value
+    app.radio(key=f"stop_mode_{row['id']}").set_value(app.radio(key=f"stop_mode_{row['id']}").options[1]).run()
+    assert not app.exception
+    at_touch = app.number_input(key=f"budget_{row['id']}").value
+    assert at_touch > on_backup
+    assert at_touch * (84000 - 82320) / 84000 == pytest.approx(4.0, abs=0.01)         # sur le stop au toucher
