@@ -121,6 +121,29 @@ les mêmes données, y compris depuis deux conteneurs : un second worker est
 refusé au démarrage. Ne jamais placer les volumes sur un partage réseau
 (verrous et SQLite exigent un seul hôte), ni lancer plusieurs replicas du worker.
 
+### Protection marché, rapport quotidien, suivi des résultats
+
+- **Protection en cas de chute du marché** (Settings → Worker & risque, active par
+  défaut) : si BTC baisse d'au moins 3 % en 4 h (plus haut des clôtures 15 minutes
+  de la fenêtre → dernier prix), les **nouvelles entrées automatiques** sont
+  suspendues 6 h ; les signaux restent dans la boîte et ne partent ensuite que s'ils
+  sont encore assez récents. Rien n'est vendu. Option (désactivée par défaut) :
+  remonter au seuil de rentabilité, frais compris, le stop des positions en gain,
+  jamais à la baisse, jamais une position dont un achat attend encore. Début et fin
+  sont notifiés ; le Dashboard affiche la pause. Une même chute ne relance pas la
+  pause : après elle, seule une nouvelle baisse depuis le déclenchement compte.
+- **Rapport quotidien** (Settings → Notifications, 20 h UTC par défaut) : résultat
+  du jour et des 7 derniers jours (frais compris), positions ouvertes, capital
+  engagé, latent, risque si tous les stops sont touchés, meilleur et pire trader ou canal.
+  Un seul envoi par jour, même après un redémarrage.
+- **BSM face au marché** (Dashboard) : pour les achats exécutés de la période, le
+  résultat de BSM comparé à « garder les mêmes cryptos » jusqu'à maintenant et à
+  « BTC à la place » (même montant, même moment), mêmes frais d'achat, prix Binance
+  Demo. Les références gardent chaque achat jusqu'à maintenant alors que BSM libère
+  le capital plus tôt : sur quelques jours, l'écart dépend surtout du marché.
+- **Par trader ou canal** (History) : nom du trader écrit en tête du signal, sinon canal ;
+  voir `docs/SIGNAUX.md`, section « Trader ou canal d'origine ».
+
 ### Données et sauvegardes
 
 `data/` et `logs/` vivent dans les volumes Docker `bsm-data` et `bsm-logs`, pas
@@ -420,6 +443,8 @@ une copie hors Docker.
 | `data/bot_worker.lock.lease` | verrou système ; ne pas supprimer pendant l'exécution |
 | `data/settings.json` | réglages de la page Settings |
 | `data/presets.json` | presets enregistrés |
+| `data/market_guard.json` | état de la protection marché (pause en cours, déclenchement) |
+| `data/daily_report.json` | date du dernier rapport quotidien envoyé |
 | `logs/events.jsonl` | journal d'événements, une ligne JSON par événement |
 | `logs/bot.log` | journal d'exécution |
 | `logs/errors.log` | erreurs applicatives |

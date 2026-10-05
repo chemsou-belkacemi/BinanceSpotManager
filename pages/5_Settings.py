@@ -268,6 +268,45 @@ with tabs[5]:
             st.success("Suivi du SL enregistré pour les prochains signaux.")
 
     st.divider()
+    st.subheader("Achat quand le TP1 est touché avant")
+    with st.form("signal_tp1_first_preferences"):
+        cancel_tp1_first = st.toggle(
+            "Annuler l'ordre d'achat si le prix touche le TP1 avant qu'il soit exécuté",
+            value=bool(signal_preferences.get("signal_cancel_entry_if_tp1_first", False)),
+            key="signal_cancel_entry_if_tp1_first_toggle",
+            help=(
+                "Désactivé (par défaut) : l'ordre d'achat reste ouvert et peut être exécuté plus tard, après "
+                "un repli ; ces trades sont marqués et comparés aux autres dans History (« Achats exécutés "
+                "après un TP1 déjà touché »). Activé : le signal est considéré comme parti sans toi et l'achat "
+                "est annulé. Les signaux CSI annulent toujours (contrat)."
+            ),
+        )
+        if st.form_submit_button("Enregistrer le réglage d'achat"):
+            get_settings_store().update({"signal_cancel_entry_if_tp1_first": bool(cancel_tp1_first)})
+            st.success("Réglage enregistré pour les prochains signaux texte.")
+
+    st.divider()
+    st.subheader("Canal perdant")
+    with st.form("signal_channel_review_preferences"):
+        channel_review = st.toggle(
+            "Mettre « À confirmer » les signaux d'un canal dont le résultat net est négatif",
+            value=bool(signal_preferences.get("signal_channel_review_enabled", False)),
+            key="signal_channel_review_toggle",
+            help=("Le résultat net (frais compris) du canal d'origine est calculé sur ses positions terminées. "
+                  "Sous le nombre minimal de positions, aucun jugement : trop peu de trades."),
+        )
+        channel_min = st.number_input(
+            "Nombre minimal de positions terminées du canal avant de juger",
+            min_value=10, max_value=500, step=5,
+            value=int(signal_preferences.get("signal_channel_review_min_trades", 30)),
+            key="signal_channel_review_min_input",
+        )
+        if st.form_submit_button("Enregistrer la règle du canal"):
+            get_settings_store().update({"signal_channel_review_enabled": bool(channel_review),
+                                         "signal_channel_review_min_trades": int(channel_min)})
+            st.success("Réglage enregistré.")
+
+    st.divider()
     st.subheader("Exécution automatique")
     auto_was_enabled = bool(signal_preferences.get("signal_auto_execute_enabled", False))
     auto_execute = st.toggle(
@@ -1039,6 +1078,41 @@ with tabs[1]:
 """
     )
 
+with tabs[1]:
+    st.divider()
+    st.subheader("Protection en cas de chute du marché")
+    st.caption("Si BTC baisse fortement, les nouvelles entrées automatiques sont suspendues : les signaux restent "
+               "dans la boîte et ne partent ensuite que s'ils sont encore assez récents. Rien n'est vendu.")
+    guard_saved = get_settings_store().load()
+    guard_saved = guard_saved if isinstance(guard_saved, dict) else {}
+    with st.form("market_guard_preferences"):
+        guard_enabled = st.toggle("Activer la protection", value=bool(guard_saved.get("market_guard_enabled", True)),
+                                  key="market_guard_enabled_toggle")
+        guard_cols = st.columns(3)
+        guard_drop = guard_cols[0].number_input("Baisse de BTC (%)", min_value=0.5, max_value=50.0, step=0.5,
+                                                value=float(guard_saved.get("market_guard_drop_percent", 3.0)),
+                                                key="market_guard_drop_input")
+        guard_window = guard_cols[1].number_input("En combien d'heures", min_value=1.0, max_value=48.0, step=1.0,
+                                                  value=float(guard_saved.get("market_guard_window_hours", 4.0)),
+                                                  key="market_guard_window_input")
+        guard_pause = guard_cols[2].number_input("Pause des entrées (heures)", min_value=0.5, max_value=72.0,
+                                                 step=0.5, value=float(guard_saved.get("market_guard_pause_hours", 6.0)),
+                                                 key="market_guard_pause_input")
+        guard_tighten = st.toggle(
+            "Au déclenchement, remonter au seuil de rentabilité les stops des positions en gain",
+            value=bool(guard_saved.get("market_guard_tighten_stops", False)),
+            key="market_guard_tighten_toggle",
+            help="Seulement les positions dont le prix est au-dessus du seuil de rentabilité (frais compris).",
+        )
+        if st.form_submit_button("Enregistrer la protection"):
+            get_settings_store().update({
+                "market_guard_enabled": bool(guard_enabled), "market_guard_drop_percent": float(guard_drop),
+                "market_guard_window_hours": float(guard_window), "market_guard_pause_hours": float(guard_pause),
+                "market_guard_tighten_stops": bool(guard_tighten),
+            })
+            st.success("Protection enregistrée (prise en compte par le worker au prochain contrôle, ≤ 5 min).")
+
+
 # ==========================================================================
 # Presets
 # ==========================================================================
@@ -1184,6 +1258,25 @@ Erreur Binance · Worker offline · Capital insuffisant · Désynchronisation
         "Les préférences par position (quels événements notifier) se règlent "
         "dans la page Positions."
     )
+
+with tabs[3]:
+    st.divider()
+    st.subheader("Rapport quotidien")
+    report_saved = get_settings_store().load()
+    report_saved = report_saved if isinstance(report_saved, dict) else {}
+    with st.form("daily_report_preferences"):
+        report_enabled = st.toggle("Envoyer un rapport chaque jour", key="daily_report_enabled_toggle",
+                                   value=bool(report_saved.get("daily_report_enabled", True)))
+        report_hour = st.number_input("Heure d'envoi (UTC)", min_value=0, max_value=23, step=1,
+                                      value=int(report_saved.get("daily_report_hour_utc", 20)),
+                                      key="daily_report_hour_input")
+        st.caption("Résultat net du jour et des 7 derniers jours (frais compris), positions ouvertes, risque si "
+                   "tous les stops sont touchés, meilleur et pire canal.")
+        if st.form_submit_button("Enregistrer le rapport"):
+            get_settings_store().update({"daily_report_enabled": bool(report_enabled),
+                                         "daily_report_hour_utc": int(report_hour)})
+            st.success("Rapport quotidien enregistré.")
+
 
 # ==========================================================================
 # Diagnostic

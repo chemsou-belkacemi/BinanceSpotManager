@@ -49,6 +49,8 @@ NOTIFIABLE_EVENTS: dict[str, str] = {
     "WORKER_OFFLINE": "Worker offline",
     "INSUFFICIENT_CAPITAL": "Capital insuffisant",
     "DESYNC_DETECTED": "Desynchronisation",
+    "MARKET_GUARD": "Protection marche (chute de BTC)",
+    "DAILY_REPORT": "Rapport quotidien",
 }
 
 #: Evenements qui se repetent a chaque cycle tant que le probleme persiste.
@@ -516,6 +518,20 @@ class NotificationEngine:
             body=f"Dernier heartbeat : {last_heartbeat or 'jamais'}",
             level="CRITICAL",
         )
+
+    def market_guard(self, kind: str, detail: str) -> Notification:
+        """Debut (kind="STARTED") ou fin de la protection en cas de chute du marche."""
+        started = kind == "STARTED"
+        return Notification(
+            event="MARKET_GUARD",
+            title="Protection marche activee — entrees suspendues" if started
+            else "Protection marche levee — entrees a nouveau permises",
+            body=detail,
+            level="WARNING" if started else "INFO",
+        )
+
+    def daily_report(self, title: str, body: str) -> Notification:
+        return Notification(event="DAILY_REPORT", title=title, body=body)
 
     # -- envoi filtre par preferences de position -----------------------
 

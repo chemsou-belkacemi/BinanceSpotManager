@@ -209,13 +209,17 @@ def trailing_stop_rules(entries, targets, enabled=True):
 def prepare_signal(parsed: ParsedSignal, rules, *, budget, available_quote, reserve_percent,
                    current_price, signal_id, source="manual", touch_stop=False,
                    validity_confirmed=False, entry_allocations=None, tp_allocations=None,
-                   trail_stop=True, sl_after_tp=SLRuleAfterTP.NO_CHANGE, account_scope="", signal_key=""):
+                   trail_stop=True, sl_after_tp=SLRuleAfterTP.NO_CHANGE, account_scope="", signal_key="",
+                   cancel_entry_if_tp1_first=False, source_name=""):
     """Stop après TP : signal CSI → règle de sa politique de sortie (contrat) ; signal texte → stop suiveur
     (`trail_stop`, TP1 → entrée, TPk → TP(k−2)) s'il est activé, sinon la règle `sl_after_tp` appliquée à chaque TP
     sauf le dernier (par défaut NO_CHANGE : le stop ne bouge pas).
 
     `signal_key` (voir signal_identity) et `account_scope` rendent le position_id déterministe ;
-    les deux appelants (exécution automatique, page Signaux) les fournissent toujours."""
+    les deux appelants (exécution automatique, page Signaux) les fournissent toujours.
+
+    Premier TP atteint avant tout achat : un signal CSI annule son entrée (contrat) ; un signal texte la
+    garde sauf si `cancel_entry_if_tp1_first`. `source_name` : canal d'origine (suivi par canal)."""
     sl_after_tp = SLRuleAfterTP(sl_after_tp)
     if sl_after_tp not in SIGNAL_SL_AFTER_TP_RULES:
         raise ValueError("Règle de SL après TP non disponible pour les signaux.")
@@ -296,8 +300,10 @@ def prepare_signal(parsed: ParsedSignal, rules, *, budget, available_quote, rese
             for price, allocation, (rule, value) in zip(targets, allocations, stop_rules)
         ],
         stop_loss=SLSpec(mode=SLMode.FIXED_PRICE, value=stop),
-        source=SignalSource(source), source_name=f"Signal {parsed.template}",
-        cancel_remaining_entries_on_first_tp=True, tags=["signal", signal_id],
+        source=SignalSource(source), source_name=source_name or f"Signal {parsed.template}",
+        cancel_remaining_entries_on_first_tp=True,
+        keep_entry_if_tp_before_fill=not parsed.is_csi and not cancel_entry_if_tp1_first,
+        tags=["signal", signal_id],
     )
     plan = StrategyEngine(rules).build(spec)
     if not plan.is_valid:

@@ -387,6 +387,40 @@ vente peut différer de `STOP_LOSS`, et un stop déjà franchi est vendu au marc
   break-even, break-even frais inclus ou TP précédent, appliqué après chaque TP
   sauf le dernier, pour les prochains signaux manuels et automatiques de toute
   origine. Les règles demandant une valeur saisie ne sont pas proposées.
+- **Achat quand le TP1 est touché avant** (`signal_cancel_entry_if_tp1_first`) :
+  désactivé par défaut, l'ordre d'achat d'un signal texte reste ouvert si le prix
+  atteint le TP1 avant son exécution ; la position est marquée `tp1_avant_achat` et
+  History compare ces achats tardifs aux autres. Activé : l'achat est annulé (le
+  signal est parti sans toi). Un signal CSI annule toujours (contrat).
+- **Canal perdant** (`signal_channel_review_enabled`, désactivé par défaut ;
+  `signal_channel_review_min_trades`, 30 par défaut, de 10 à 500) : un signal dont le
+  trader ou canal d'origine a au moins ce nombre de positions terminées et un résultat
+  net négatif (frais BNB valorisés comme dans History) passe « À confirmer » avec le
+  motif `C_CHANNEL_LOSING`. Nom inconnu ou trop peu de positions : aucun jugement.
+
+### Trader ou canal d'origine
+
+Chaque signal garde le nom de sa source, dans cet ordre :
+
+1. le **nom du trader écrit en tête du message** (`trader_name.py`) : « 👑 HAMZAWY 👑 »,
+   « Trader/ Suhaib AlMashhadani », « Al-Afify Harmonic Indicator Ultra », « ABK SIGNAL ALERT »… Il
+   survit à un relais qui recopie le texte sans le transférer, et distingue les traders d'un même
+   canal (LEGEND TRADING en publie une vingtaine). Seules les lignes placées avant la paire ou la
+   première étiquette comptent ; les formules (« بسم الله … ») et les lignes d'événement
+   (« Harmonic Pattern Detected », « TIME-BASED TRADE DETECTED ») sont ignorées ; les préfixes
+   (« Trader/ », « Ph. ») et suffixes (« Harmonic Indicator Ultra », « SIGNAL ALERT ») sont retirés ;
+   la dernière ligne restante est le nom. Aucun nom n'est inventé. Mesure du 2026-10-05 sur les
+   exports du propriétaire : un nom pour 867 signaux lisibles sur 874 ; les 7 autres n'en portent pas ;
+2. sinon, pour un message **transféré**, le canal, le groupe ou la personne d'origine ;
+3. sinon la conversation elle-même, ou le nom déclaré pour l'identifiant du chat (« telegram <id> »
+   à défaut).
+
+Le nom suit la position (groupe de source). Les variantes d'écriture sont regroupées
+(« Suhaib Al-Mashhadani » = « SUHAIB ALMASHHADANI » ; « TRADING », « CRYPTO » et « TRADER » ignorés ;
+« VIP » reste distinct). History → **Par trader ou canal** donne positions, part de gagnantes, gain et
+perte moyens, PnL net et profit factor, frais compris ; les positions sans aucun achat exécuté ne
+comptent pas. Une position ouverte avant cette version retrouve son trader dans le texte de son signal
+(boîte des signaux) ; sans nom écrit, elle reste en « Telegram (canal inconnu) ».
 
 ### Sécurité
 

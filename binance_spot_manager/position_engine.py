@@ -152,6 +152,7 @@ class PositionEngine:
         position.automation.cancel_remaining_entries_on_first_tp = (
             plan.cancel_remaining_entries_on_first_tp
         )
+        position.automation.keep_entry_if_tp_before_fill = plan.keep_entry_if_tp_before_fill
 
         position.log(
             EventType.POSITION_CREATED,

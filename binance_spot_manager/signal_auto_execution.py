@@ -13,8 +13,10 @@ from datetime import datetime, timezone
 import logging
 import time
 
-from . import signal_routing
+from . import performance, signal_routing
 from .csi_client import CsiUnavailable, GatePolicy, source_label
+from .fee_valuation import fee_rates
+from .trader_name import trader_of
 from .models import EventType
 from .notification_engine import Notification
 from .risk_engine import RiskLimits
@@ -51,6 +53,16 @@ def _bounded_number(values, key, default, minimum, maximum):
 
 def _iso_utc(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def channel_name(row, preferences) -> str:
+    """Trader ou canal d'origine d'un signal : nom écrit en tête du texte, sinon celui relevé à la
+    réception (canal transféré ou conversation), sinon le nom déclaré pour l'identifiant du chat
+    (« telegram <id> » à défaut). Vaut aussi pour les lignes reçues avant le suivi par canal."""
+    name = trader_of(str(row.get("raw") or "")) or str(row.get("origin") or "").strip()
+    if not name and row.get("source") == "telegram":
+        name = source_label(row, preferences)
+    return name[:80]
 
 
 def entry_deviation_bps(price: float, entry_price: float) -> float:
@@ -96,6 +108,9 @@ class AutomaticSignalExecutor:
         #: Raison d'une suspension (échec sûr), vide sinon : posée par le worker tant que des ordres
         #: BSM orphelins existent chez Binance ou que leur contrôle est impossible.
         self.suspended_reason = ""
+        #: Protection marché (chute de BTC, market_guard.py) : raison posée et levée par le worker,
+        #: distincte de la suspension pour ordres orphelins (aucune des deux ne lève l'autre).
+        self.market_guard_reason = ""
         self._diagnostics = {
             "state": "DISABLED",
             "queued_total": 0,
@@ -141,6 +156,11 @@ class AutomaticSignalExecutor:
             # Les signaux reçus pendant la suspension restent dans la boîte ; à la reprise, seuls
             # ceux encore assez récents (âge maximal des réglages) partent automatiquement.
             self._update(state="SUSPENDED", last_detail=self.suspended_reason)
+            return []
+        if self.market_guard_reason:
+            # Même effet qu'une suspension : rien ne part, les signaux restent dans la boîte et ne
+            # partent après la pause que s'ils sont encore assez récents.
+            self._update(state="MARKET_GUARD", last_detail=self.market_guard_reason)
             return []
         telegram_ready = bool(preferences.get("signal_telegram_enabled", False)
                               and preferences.get("signal_telegram_auto_enabled", False))
@@ -336,6 +356,8 @@ class AutomaticSignalExecutor:
                 account_scope=self.scope,
                 signal_key=signal_identity(row),
                 sl_after_tp=signal_sl_after_tp(preferences.get("signal_sl_after_tp")),
+                cancel_entry_if_tp1_first=bool(preferences.get("signal_cancel_entry_if_tp1_first", False)),
+                source_name=channel_name(row, preferences),
                 touch_stop=bool(policy.touch_stop
                                 or signal_routing.unknown_candle_stop(parsed.stop_timeframe)),
                 trail_stop=bool(preferences.get(TRAIL_STOP_KEY, True)),
@@ -375,7 +397,7 @@ class AutomaticSignalExecutor:
         except RoutingDataError as exc:
             reasons.append(Reason("D_RISK", DONNEES, f"Risque non évaluable : {exc}"))
             return self._review(row, signal_routing.decide(reasons, metrics), now=now, policy=policy, label=label)
-        reasons += risk_reasons + breaker
+        reasons += risk_reasons + breaker + self._channel_reasons(row, preferences, positions, prices)
         metrics |= risk_metrics | breaker_metrics
         decision = signal_routing.decide(reasons, metrics)
         if decision.outcome != AUTO:
@@ -388,6 +410,23 @@ class AutomaticSignalExecutor:
             payload["signal_validation_status"] = parsed.validation_status
         payload = self.inbox.freeze(self.scope, signal_id, payload)
         return self._enqueue(row, payload, parsed, now, label, request_key, csi_detail=csi_detail)
+
+    def _channel_reasons(self, row, preferences, positions, prices):
+        """Canal perdant (réglage, désactivé par défaut) : résultat net négatif, frais BNB valorisés
+        comme dans History, sur au moins le nombre minimal de positions terminées du canal."""
+        if not preferences.get("signal_channel_review_enabled", False):
+            return []
+        min_trades = int(_bounded_number(preferences, "signal_channel_review_min_trades", 30, 10, 500))
+        closed = [p for p in positions if not p.is_open]
+        valued = performance.valued(closed, lambda p: fee_rates(p, prices.get))
+        detail = performance.losing_channel(valued, channel_name(row, preferences), min_trades=min_trades,
+                                            key=performance.channel_resolver(self._raw_text))
+        return [Reason("C_CHANNEL_LOSING", CONFIANCE, detail)] if detail else []
+
+    def _raw_text(self, signal_id):
+        """Texte d'une ligne de la boîte (positions ouvertes avant le suivi par canal)."""
+        row = self.inbox.get(self.scope, signal_id)
+        return str(row.get("raw") or "") if row else ""
 
     def _enqueue(self, row, payload, parsed, now, label, request_key, *, csi_detail=""):
         signal_id = row["id"]

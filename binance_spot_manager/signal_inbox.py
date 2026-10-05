@@ -74,6 +74,8 @@ class SignalInbox:
         ("expires_at", "REAL NOT NULL DEFAULT 0"),
         # Décision de routage (JSON : motifs, seuils, métriques) ; '' si jamais routé.
         ("route", "TEXT NOT NULL DEFAULT ''"),
+        # Canal ou auteur d'origine (Telegram) ; '' si inconnu. Suivi des résultats par canal.
+        ("origin", "TEXT NOT NULL DEFAULT ''"),
     )
     TABLES = ("signals", "telegram_offsets", "signal_origins", "signal_keys")
 
@@ -203,7 +205,8 @@ class SignalInbox:
         return None
 
     def receive(self, scope, raw, *, template="auto", source="manual", external_id="",
-                edited=False, source_timestamp=0.0, idempotency_key="", producer_signal_id=""):
+                edited=False, source_timestamp=0.0, idempotency_key="", producer_signal_id="",
+                origin=""):
         """Enregistre un texte ; les doublons retrouvent la même ligne.
 
         Un texte CSI (première ligne ``SIGNAL_VERSION=``) n'est accepté que du
@@ -249,11 +252,14 @@ class SignalInbox:
                     db.execute("UPDATE signals SET parsed=? WHERE id=?", (json.dumps(previous), original["id"]))
             db.execute("""INSERT OR IGNORE INTO signals
                 (id, scope, hash, source, external_id, received, raw, parsed, payload,
-                 source_timestamp, auto_state, auto_detail, expires_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, '', '', ?)""",
+                 source_timestamp, auto_state, auto_detail, expires_at, origin)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, '', '', ?, ?)""",
                        (uuid.uuid4().hex, scope, digest, source, external_id, time.time(),
                         raw[:20000], json.dumps(parsed, allow_nan=False), float(source_timestamp or 0),
-                        float(parsed.get("expires_at") or 0)))
+                        float(parsed.get("expires_at") or 0), str(origin or "")[:80]))
+            if origin:                                       # un renvoi peut faire connaître le canal
+                db.execute("UPDATE signals SET origin=? WHERE scope=? AND hash=? AND origin=''",
+                           (str(origin)[:80], scope, digest))
             row = db.execute("SELECT * FROM signals WHERE scope=? AND hash=?", (scope, digest)).fetchone()
             # The same text imported again after a parser upgrade must not return the old
             # analysis: refresh it like reanalyse(), never once confirmed or edited.
@@ -278,12 +284,14 @@ class SignalInbox:
                     and (source == "telegram" or row["external_id"] != external_id)
                     and not edited and not revised and row["payload"] is None
                     and (row["auto_state"] or "") in {"", "REJECTED"}):
+                # Le canal suit le message qui pourra partir (un texte identique repris par un autre canal).
                 db.execute("""UPDATE signals
                     SET source=?, external_id=?, received=?, source_timestamp=?,
-                        auto_state='', auto_detail=''
+                        auto_state='', auto_detail='', origin=CASE WHEN ?='' THEN origin ELSE ? END
                     WHERE scope=? AND id=? AND payload IS NULL
                       AND auto_state IN ('', 'REJECTED')""",
-                    (source, external_id, time.time(), float(source_timestamp), scope, row["id"]))
+                    (source, external_id, time.time(), float(source_timestamp),
+                     str(origin or "")[:80], str(origin or "")[:80], scope, row["id"]))
                 row = db.execute(
                     "SELECT * FROM signals WHERE scope=? AND id=?", (scope, row["id"]),
                 ).fetchone()

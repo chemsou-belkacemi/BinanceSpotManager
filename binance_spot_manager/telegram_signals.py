@@ -8,11 +8,49 @@ import time
 import requests
 
 from .signal_inbox import CsiChannelRefused, SignalInbox
+from .trader_name import trader_of
 
 
 logger = logging.getLogger("bsm.telegram")
 POLL_TIMEOUT_SECONDS = 20
 BACKOFF_SECONDS = (2, 5, 10, 30, 60)
+
+
+def origin_label(message) -> str:
+    """Nom du trader ou du canal d'origine d'un message Telegram, pour le suivi par canal.
+
+    D'abord le nom du trader écrit en tête du signal (trader_name.trader_of) : il survit à un relais
+    qui recopie le texte sans le transférer, et distingue les traders d'un même canal. Sinon, pour un
+    message transféré : canal, groupe ou personne d'origine (forward_origin, ou anciens champs
+    forward_from_*). Sinon : la conversation elle-même (un canal ou un groupe autorisé).
+    """
+    trader = trader_of(message.get("text") or message.get("caption") or "")
+    if trader:
+        return trader[:80]
+    origin = message.get("forward_origin") or {}
+    kind = origin.get("type")
+    name = ""
+    if kind == "channel":
+        chat = origin.get("chat") or {}
+        name = chat.get("title") or chat.get("username") or ""
+    elif kind == "chat":
+        chat = origin.get("sender_chat") or {}
+        name = chat.get("title") or chat.get("username") or ""
+    elif kind == "user":
+        user = origin.get("sender_user") or {}
+        name = " ".join(part for part in (user.get("first_name"), user.get("last_name")) if part) or user.get("username") or ""
+    elif kind == "hidden_user":
+        name = origin.get("sender_user_name") or ""
+    if not name:
+        legacy = message.get("forward_from_chat") or {}
+        name = legacy.get("title") or legacy.get("username") or message.get("forward_sender_name") or ""
+    if not name and message.get("forward_from"):
+        user = message["forward_from"]
+        name = " ".join(part for part in (user.get("first_name"), user.get("last_name")) if part) or user.get("username") or ""
+    if not name:
+        chat = message.get("chat") or {}
+        name = chat.get("title") or chat.get("username") or ""
+    return " ".join(str(name).split())[:80]
 
 
 def chat_allowlist(text):
@@ -65,7 +103,7 @@ def import_telegram(
                 received.append(inbox.receive(scope, raw, source="telegram",
                     external_id=f"{bot}:{chat}:{message['message_id']}",
                     edited="edited_message" in update or "edited_channel_post" in update,
-                    source_timestamp=source_timestamp))
+                    source_timestamp=source_timestamp, origin=origin_label(message)))
             except CsiChannelRefused:
                 # Un signal CSI ne passe que par le dépôt TXT : message ignoré, offset avancé.
                 logger.warning("Message Telegram %s ignoré : signal CSI hors dépôt TXT", message["message_id"])

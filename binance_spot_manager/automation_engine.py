@@ -37,6 +37,7 @@ from .models import (
     TakeProfit,
     utcnow,
 )
+from .performance import LATE_FILL_TAG
 from .position_engine import (
     QTY_EPSILON,
     PositionEngine,
@@ -784,7 +785,13 @@ class AutomationEngine:
         (CANCELED_BEFORE_FILL). Le TP reste en attente (declenche), sans echec ni report.
         """
         message = (f"TP {tp.sequence_number} atteint avant tout achat : aucune vente, aucun report")
-        if (tp.sequence_number == min(t.sequence_number for t in position.take_profits)
+        if position.automation.keep_entry_if_tp_before_fill:
+            # Signal texte, annulation desactivee : l'achat reste ouvert ; la position est marquee pour
+            # mesurer ces achats tardifs (History, « Achats apres TP1 deja touche »).
+            if LATE_FILL_TAG not in position.tags:
+                position.tags.append(LATE_FILL_TAG)
+            message += " ; achat garde (reglage)"
+        elif (tp.sequence_number == min(t.sequence_number for t in position.take_profits)
                 and position.automation.cancel_remaining_entries_on_first_tp and position.open_entries):
             cancels = self.execution.cancel_open_entries(position)
             failed = [c.error or c.status for c in cancels if not c.success]
@@ -974,7 +981,25 @@ class AutomationEngine:
         )
         if new_price is None:
             return
+        self._move_stop(position, new_price, result, why=f"apres TP {tp.sequence_number}", tp_id=tp.tp_id)
 
+    def raise_stop(self, position: Position, new_price: float, *, why: str) -> CycleResult:
+        """Remonte le SL d'une position ouverte (protection marche), par le meme chemin qu'apres un TP.
+        Jamais a la baisse : un prix sous le SL actuel est ignore."""
+        result = CycleResult(position_id=position.position_id, symbol=position.symbol)
+        if not position.is_open or position.automation.paused or position.oco_exit is not None:
+            return result
+        current = position.stop_loss.resolved_price or 0.0
+        if new_price <= current:
+            return result
+        self._move_stop(position, new_price, result, why=why)
+        return result
+
+    def _move_stop(
+        self, position: Position, new_price: float, result: CycleResult, *, why: str, tp_id: str = ""
+    ) -> None:
+        """Deplace le SL au prix donne (arrondi au tick, vers le bas) ; chemin commun des regles apres TP
+        et de la protection marche."""
         rules = self._rules(position)
         new_price = float(rules.round_price(new_price, mode="down"))
         if new_price <= 0:
@@ -1021,8 +1046,9 @@ class AutomationEngine:
             )
             return
 
+        log_fields = {"tp_id": tp_id} if tp_id else {}
         if position.stop_loss.trigger is SLTrigger.CANDLE_CLOSE:
-            # Le SL deplace par la regle devient un stop au prix sur Binance ; sans regle
+            # Le SL deplace devient un stop au prix sur Binance ; sans regle
             # (NO_CHANGE), il reste a la cloture de bougie et n'arrive jamais ici.
             sl = position.stop_loss
             sl.trigger, sl.candle_interval, sl.candle_checked_until = SLTrigger.TOUCH, "", None
@@ -1030,8 +1056,8 @@ class AutomationEngine:
             result.actions.append(f"SL clôture de bougie remplacé par un stop au prix {new_price}")
             position.log(
                 EventType.SL_MOVED,
-                f"SL deplace vers {new_price} apres TP {tp.sequence_number} : stop au prix sur Binance",
-                tp_id=tp.tp_id,
+                f"SL deplace vers {new_price} {why} : stop au prix sur Binance",
+                **log_fields,
             )
 
         if position.stop_loss.status is not SLStatus.ACTIVE:
@@ -1049,8 +1075,8 @@ class AutomationEngine:
             result.actions.append(f"SL deplace vers {new_price}")
             position.log(
                 EventType.SL_MOVED,
-                f"SL deplace vers {new_price} apres TP {tp.sequence_number}",
-                tp_id=tp.tp_id,
+                f"SL deplace vers {new_price} {why}",
+                **log_fields,
             )
         else:
             result.errors.append(f"SL non deplace : {order.error}")

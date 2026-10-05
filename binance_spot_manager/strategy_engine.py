@@ -92,6 +92,7 @@ class StrategySpec:
 
     tp_execution_policy: TPExecutionPolicy = TPExecutionPolicy.MARKET_ON_TRIGGER
     cancel_remaining_entries_on_first_tp: bool = False
+    keep_entry_if_tp_before_fill: bool = False
 
     source: SignalSource = SignalSource.MANUAL
     source_name: str = ""
@@ -183,6 +184,7 @@ class StrategyPlan:
 
     tp_execution_policy: TPExecutionPolicy = TPExecutionPolicy.MARKET_ON_TRIGGER
     cancel_remaining_entries_on_first_tp: bool = False
+    keep_entry_if_tp_before_fill: bool = False
     current_price: float = 0.0
 
     # -- accesseurs pratiques -------------------------------------------
@@ -426,6 +428,7 @@ class StrategyEngine:
             current_price=spec.current_price,
             tp_execution_policy=spec.tp_execution_policy,
             cancel_remaining_entries_on_first_tp=spec.cancel_remaining_entries_on_first_tp,
+            keep_entry_if_tp_before_fill=spec.keep_entry_if_tp_before_fill,
         )
 
         if not spec.entries:
