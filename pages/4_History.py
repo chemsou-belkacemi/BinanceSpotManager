@@ -16,6 +16,7 @@ from datetime import timedelta  # noqa: E402
 
 from binance_spot_manager.config import get_settings  # noqa: E402
 from binance_spot_manager.models import utcnow  # noqa: E402
+from binance_spot_manager.performance import channel_of, late_fill_split, stats_by  # noqa: E402
 from binance_spot_manager.position_engine import recompute_position  # noqa: E402
 from ui_common import (  # noqa: E402
     banner,
@@ -110,6 +111,7 @@ for position in filtered:
             "Fermée le": position.closed_at.strftime("%d/%m/%Y") if position.closed_at else "—",
             "Raison": position.close_reason.value if position.close_reason else "—",
             "Source": position.source_groups[0].source.value if position.source_groups else "—",
+            "Canal": channel_of(position),
             "Prix moyen": fmt_price(position.metrics.average_price),
             "Quantité totale": fmt_qty(position.metrics.total_bought_qty),
             "Capital": fmt_price(position.metrics.capital_committed),
@@ -201,6 +203,42 @@ with col_b:
         use_container_width=True,
         hide_index=True,
     )
+
+# ==========================================================================
+# Par canal d'origine (frais compris) et achats tardifs
+# ==========================================================================
+
+st.markdown("**Par canal** (résultat frais compris)")
+st.caption("Le canal est celui du message Telegram transféré. Les positions ouvertes avant cette version "
+           "apparaissent en « Telegram (canal inconnu) ».")
+
+
+def _stats_rows(groups):
+    return [
+        {
+            "Canal": g.name,
+            "Positions": g.positions,
+            "Gagnantes": f"{g.win_rate * 100:.0f} %" if g.win_rate is not None else "—",
+            "Gain moyen": fmt_price(g.average_gain) if g.average_gain is not None else "—",
+            "Perte moyenne": fmt_price(g.average_loss) if g.average_loss is not None else "—",
+            "PnL net": fmt_price(g.net),
+            "Profit factor": f"{g.profit_factor:.2f}" if g.profit_factor is not None else "—",
+        }
+        for g in groups
+    ]
+
+
+pnl_dataframe(pd.DataFrame(_stats_rows(stats_by(filtered))), use_container_width=True, hide_index=True)
+
+late = late_fill_split(filtered)
+if "achat apres TP1 deja touche" in late:
+    st.markdown("**Achats exécutés après un TP1 déjà touché**")
+    st.caption("Ordre d'achat gardé alors que le prix avait déjà atteint le TP1 (réglage « annuler l'achat si "
+               "le TP1 est touché avant » désactivé) : à comparer aux autres avant de changer le réglage.")
+    rows = _stats_rows(late.values())
+    for row in rows:
+        row["Canal"] = row["Canal"].replace("achat apres TP1 deja touche", "achat après TP1 déjà touché")
+    pnl_dataframe(pd.DataFrame(rows).rename(columns={"Canal": "Achats"}), use_container_width=True, hide_index=True)
 
 # ==========================================================================
 # Détail + duplication (section 50)

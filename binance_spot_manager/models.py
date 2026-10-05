@@ -204,6 +204,9 @@ class EventType(str, Enum):
     SIGNAL_REVIEW_REQUIRED = "SIGNAL_REVIEW_REQUIRED"
     SIGNAL_MANUAL_CONFIRMED = "SIGNAL_MANUAL_CONFIRMED"
     SIGNAL_ROUTING_CHANGED = "SIGNAL_ROUTING_CHANGED"
+    MARKET_GUARD_STARTED = "MARKET_GUARD_STARTED"
+    MARKET_GUARD_ENDED = "MARKET_GUARD_ENDED"
+    DAILY_REPORT_SENT = "DAILY_REPORT_SENT"
 
 
 class WorkerState(str, Enum):
@@ -493,6 +496,10 @@ class AutomationSettings(BSMModel):
     tp_execution_policy: TPExecutionPolicy = TPExecutionPolicy.MARKET_ON_TRIGGER
     maintain_single_sl: bool = True
     cancel_remaining_entries_on_first_tp: bool = False
+    #: Premier TP atteint AVANT tout achat : garder l'ordre d'achat ouvert (signaux texte, réglage
+    #: « signal_cancel_entry_if_tp1_first » désactivé) au lieu de l'annuler ; la position est marquée
+    #: « tp1_avant_achat » pour mesurer ces achats tardifs dans History.
+    keep_entry_if_tp_before_fill: bool = False
     #: Tranche de TP sous les minimums Binance reportée sur le TP suivant (politiques CSI).
     merge_below_minimum_tp: bool = False
     paused: bool = False

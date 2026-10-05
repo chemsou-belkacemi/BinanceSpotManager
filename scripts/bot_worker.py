@@ -60,6 +60,8 @@ from binance_spot_manager.position_engine import PositionEngine, finish_position
 from binance_spot_manager.position_store import PositionStore, RuntimeStore, get_settings_store  # noqa: E402
 from binance_spot_manager.reconciliation_engine import ReconciliationEngine, find_orphan_bot_orders  # noqa: E402
 from binance_spot_manager.csi_client import CsiClient  # noqa: E402
+from binance_spot_manager.daily_report import DailyReport  # noqa: E402
+from binance_spot_manager.market_guard import MarketGuard  # noqa: E402
 from binance_spot_manager.licence import LicenceGate  # noqa: E402
 from binance_spot_manager.signal_auto_execution import AutomaticSignalExecutor  # noqa: E402
 from binance_spot_manager.signal_drop import SignalDropImporter  # noqa: E402
@@ -181,6 +183,11 @@ class Worker:
             csi_client=CsiClient.from_env(),
             entry_gate=self.licence_gate.refusal,
         )
+        # Chute de BTC : nouvelles entrées automatiques suspendues (et stops en gain remontés si demandé).
+        self.market_guard = MarketGuard(
+            self.client.get_klines, self.client.get_price, lambda: get_settings_store().load(),
+        )
+        self.daily_report = DailyReport(lambda: get_settings_store().load())
 
         self._running = True
         self._loop = 0
@@ -388,6 +395,9 @@ class Worker:
             self.fee_token_monitor.check()
         if hasattr(self, "signal_drop"):
             self.signal_drop.import_pending()
+        if hasattr(self, "market_guard"):
+            # Avant le routage : une chute constatée retient les signaux de ce même tour.
+            self._check_market_guard()
         if hasattr(self, "auto_signal_executor"):
             # Toujours AVANT une mise en file automatique : au demarrage, aucun signal ne part
             # tant que les ordres ouverts du compte n'ont pas ete compares aux positions locales.
@@ -440,6 +450,8 @@ class Worker:
         # Retour d'execution des signaux V2 : d'apres l'etat sauvegarde de ce cycle.
         if hasattr(self, "signal_feedback"):
             self.signal_feedback.sync(processed)
+        if hasattr(self, "daily_report"):
+            self._send_daily_report()
 
         if errors:
             raise RuntimeError("Erreur de suivi : " + " ; ".join(errors))
@@ -489,6 +501,89 @@ class Worker:
             self._exit_on_crossed_stop(position, outcome.stop_crossed_at)
         if outcome.errors:
             raise RuntimeError(" ; ".join(outcome.errors))
+
+    def _check_market_guard(self) -> None:
+        """Protection en cas de chute de BTC : jamais bloquante pour le suivi des positions."""
+        log = logging.getLogger("bsm.worker")
+        try:
+            changes = self.market_guard.check()
+            reason = self.market_guard.active_reason()
+        except Exception:  # noqa: BLE001 - etat illisible : la protection ne bloque rien
+            log.exception("Protection marché : contrôle interrompu")
+            return
+        if hasattr(self, "auto_signal_executor"):
+            self.auto_signal_executor.market_guard_reason = reason
+        for kind, detail in changes:
+            started = kind == "STARTED"
+            self.events.append(
+                EventType.MARKET_GUARD_STARTED if started else EventType.MARKET_GUARD_ENDED, detail,
+                level="WARNING" if started else "INFO",
+            )
+            self.notifications.notify(self.notifications.market_guard(kind, detail))
+            if started and self.market_guard.state().get("tighten_stops"):
+                self._tighten_stops()
+
+    def _tighten_stops(self) -> None:
+        """Protection marche : stop des positions en gain remonte a leur seuil de rentabilite (frais
+        compris). Jamais a la baisse, jamais une position dont un achat attend encore son execution."""
+        log = logging.getLogger("bsm.worker")
+        positions = [p for p in self.positions.list_open()
+                     if p.metrics.net_qty > 0 and not p.open_entries and p.metrics.break_even_with_fees > 0]
+        if not positions:
+            return
+        try:
+            prices = self.client.get_prices([p.symbol for p in positions])
+        except Exception as exc:  # noqa: BLE001 - sans prix, aucun stop n'est touche
+            log.warning("Protection marché : prix indisponibles, stops inchangés (%s)", exc)
+            return
+        for position in positions:
+            break_even = position.metrics.break_even_with_fees
+            price = prices.get(position.symbol)
+            old_stop = position.stop_loss.resolved_price or 0.0
+            if price is None or price <= break_even or old_stop >= break_even:
+                continue
+            try:
+                outcome = self.automation.raise_stop(position, break_even, why="(protection marché)")
+            except Exception:  # noqa: BLE001 - une position en echec n'empeche pas les autres
+                log.exception("Protection marché : stop non remonté pour %s", position.symbol)
+                continue
+            self.positions.save(position)
+            if outcome.sl_moved_to is not None and position.notifications.on_sl_moved:
+                self.notifications.notify_position_event(
+                    position, self.notifications.sl_moved(position, old_stop, outcome.sl_moved_to)
+                )
+            for error in outcome.errors:
+                self.events.append(EventType.ERROR, f"Protection marché, {position.symbol} : {error}",
+                                   position_id=position.position_id, symbol=position.symbol, level="ERROR")
+
+    def _send_daily_report(self) -> None:
+        """Rapport quotidien (Settings → Notifications) ; un echec est reessaye 10 minutes plus tard."""
+        from binance_spot_manager.daily_report import build
+        from binance_spot_manager.fee_valuation import fee_rates
+
+        if time.time() < getattr(self, "_daily_report_retry_at", 0.0):
+            return
+        try:
+            moment = self.daily_report.due()
+            if moment is None:
+                return
+            prices: dict[str, Optional[float]] = {}
+
+            def price_of(symbol: str) -> Optional[float]:
+                if symbol not in prices:
+                    try:
+                        prices[symbol] = self.client.get_price(symbol)
+                    except Exception:  # noqa: BLE001 - frais BNB alors non valorises
+                        prices[symbol] = None
+                return prices[symbol]
+
+            title, body = build(self.positions.list_all(), moment, lambda p: fee_rates(p, price_of))
+            self.notifications.notify(self.notifications.daily_report(title, body))
+            self.events.append(EventType.DAILY_REPORT_SENT, title, level="INFO")
+            self.daily_report.mark_sent(moment)
+        except Exception:  # noqa: BLE001 - le rapport ne bloque jamais le suivi
+            self._daily_report_retry_at = time.time() + 600
+            logging.getLogger("bsm.worker").exception("Rapport quotidien non envoyé")
 
     def _notify_finished(self, position) -> None:
         """Fin de position (gain ou perte) avec le PnL frais compris de la page History."""

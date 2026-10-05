@@ -17,6 +17,7 @@ from binance_spot_manager.command_store import account_scope
 from binance_spot_manager.config import get_settings
 from binance_spot_manager.models import EventType
 from binance_spot_manager.risk_engine import RiskLimits
+from binance_spot_manager.signal_auto_execution import channel_name
 from binance_spot_manager.signal_inbox import SignalInbox
 from binance_spot_manager.signal_parser import ParsedSignal, TEMPLATES, parse_signal
 from binance_spot_manager.signal_plan import TRAIL_STOP_KEY, prepare_signal, signal_identity, signal_sl_after_tp
@@ -121,7 +122,8 @@ selected = st.session_state.get("selected_signal")
 ids = list(by_id)
 selected = st.selectbox("Signal à examiner", ids, index=ids.index(selected) if selected in ids else 0,
     format_func=lambda key: (f"{signal_routing.row_state_label(by_id[key], now=now)} · "
-                             f"{by_id[key]['parsed']['symbol'] or 'Non reconnu'} · {by_id[key]['source']} · {key[:8]}"))
+                             f"{by_id[key]['parsed']['symbol'] or 'Non reconnu'} · "
+                             f"{channel_name(by_id[key], preferences) or by_id[key]['source']} · {key[:8]}"))
 row = by_id[selected]
 stored_route = signal_routing.decision_from_json(row.get("route") or "")
 if row.get("auto_state") == "REVIEW" and row["payload"] is None:
@@ -159,7 +161,7 @@ with st.expander("Texte original"):
 st.write(f"Modèle : {TEMPLATES.get(parsed.template, parsed.template)} · Direction : {parsed.direction or 'inconnue'} · Plateforme : {parsed.exchange or 'non précisée'}")
 st.write({"Paire": parsed.symbol, "Entrées": parsed.entries, "TP": parsed.targets,
           "SL": parsed.stop, "Mention SL": parsed.stop_timeframe or "aucune",
-          source_date_label: source_date})
+          "Canal": channel_name(row, preferences) or row["source"], source_date_label: source_date})
 if parsed.is_csi:
     # Contrat CSI : la fenêtre et l'écart sont recontrôlés par le worker avant l'achat.
     def _utc(stamp):
@@ -332,7 +334,9 @@ if st.button("Vérifier sur Binance Demo et simuler", disabled=not (budget > 0 a
             reserve_percent=service.risk_limits().min_reserve_percent,
             current_price=current_price or 0, signal_id=selected, source=row["source"],
             touch_stop=touch, validity_confirmed=validity, trail_stop=trail_stop,
-            sl_after_tp=sl_after_tp, account_scope=scope, signal_key=signal_identity(row))
+            sl_after_tp=sl_after_tp, account_scope=scope, signal_key=signal_identity(row),
+            cancel_entry_if_tp1_first=bool(preferences.get("signal_cancel_entry_if_tp1_first", False)),
+            source_name=channel_name(row, preferences))
         # Même lecture du risque que le routage automatique (et que le worker pour les limites dures).
         try:
             limits = service.risk_limits()

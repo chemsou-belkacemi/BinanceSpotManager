@@ -67,6 +67,14 @@ def _cancel_order(order, confirmed: bool) -> None:
 
 st.subheader("Worker")
 
+from binance_spot_manager.market_guard import active_status  # noqa: E402
+
+guard = active_status()
+if guard is not None:
+    st.warning(f"Protection marché active — {guard[0]} : nouvelles entrées automatiques suspendues jusqu'au "
+               f"{time.strftime('%d/%m %H:%M UTC', time.gmtime(guard[1]))}. Les positions restent suivies "
+               "(Settings → Worker & risque).")
+
 @st.fragment(run_every="1s")
 def worker_panel() -> None:
     """Actualise l'etat du worker sans exiger un second clic sur Arreter."""
@@ -259,6 +267,90 @@ def live_wallet():
 
 
 live_wallet()
+
+st.divider()
+
+# ==========================================================================
+# BSM face au marché
+# ==========================================================================
+
+st.subheader("BSM face au marché")
+st.caption(
+    "Même argent, mêmes moments, autre gestion : pour chaque achat exécuté (paires en USDT), le résultat "
+    "de BSM (frais compris) est comparé à « garder les mêmes cryptos » jusqu'à maintenant et à « BTC à la "
+    "place » (même montant acheté en BTC au moment du premier achat). Prix Binance Demo."
+)
+
+
+@st.cache_data(ttl=300, show_spinner="Comparaison au marché…")
+def market_comparison(days: int):
+    from datetime import timedelta
+
+    from binance_spot_manager.fee_valuation import fee_rates
+    from binance_spot_manager.market_comparison import btc_opens, compare, first_fill_time, price_at
+    from binance_spot_manager.models import utcnow
+
+    now = utcnow()
+    start = now - timedelta(days=days) if days else None
+    positions = []
+    for position in service.positions.list_all():
+        bought_at = first_fill_time(position)
+        if bought_at is not None and (start is None or bought_at >= start):
+            positions.append(position)
+    if not positions:
+        return None
+    opens = btc_opens(service.client.get_klines, min(first_fill_time(p) for p in positions), now)
+    prices: dict = {}
+
+    def price_now(symbol):
+        if symbol not in prices:
+            prices[symbol] = service.current_price(symbol)
+        return prices[symbol]
+
+    return compare(positions, price_now=price_now, fee_rates_for=lambda p: fee_rates(p, price_now),
+                   btc_at=lambda moment: price_at(opens, moment))
+
+
+comparison_periods = {"7 jours": 7, "30 jours": 30, "Depuis le début": 0}
+comparison_period = st.radio("Achats des", list(comparison_periods), horizontal=True,
+                             key="market_comparison_period")
+try:
+    comparison = market_comparison(comparison_periods[comparison_period])
+except Exception as exc:  # lecture seulement ; ne masque pas le reste du Dashboard
+    st.warning(f"Comparaison indisponible : {exc}")
+else:
+    if comparison is None or not comparison.rows:
+        st.info("Aucun achat exécuté sur cette période.")
+    else:
+        cols = st.columns(4)
+        cols[0].metric("Montant acheté", f"{comparison.invested:,.2f}", f"{comparison.positions} position(s)",
+                       delta_color="off")
+        pnl_metric(cols[1], "BSM (frais compris)", comparison.bsm)
+        pnl_metric(cols[2], "Garder les mêmes cryptos", comparison.hold)
+        pnl_metric(cols[3], "BTC à la place", comparison.btc)
+        st.caption(
+            "Les deux références gardent chaque achat jusqu'à maintenant, alors que BSM libère le capital "
+            "plus tôt. Sur quelques jours, l'écart dépend surtout du marché du moment : ce n'est pas une "
+            "preuve qu'une méthode est meilleure. Actualisé toutes les 5 minutes."
+        )
+        if comparison.skipped:
+            st.caption("Non comparées : " + ", ".join(comparison.skipped))
+        with st.expander("Détail par position"):
+            pnl_dataframe(
+                pd.DataFrame([
+                    {
+                        "Paire": row.symbol,
+                        "Premier achat (UTC)": row.bought_at.strftime("%d/%m %H:%M"),
+                        "Montant acheté": f"{row.invested:,.2f}",
+                        "PnL BSM": f"{row.bsm:+.2f}",
+                        "PnL garder": f"{row.hold:+.2f}" if row.hold is not None else "—",
+                        "PnL BTC": f"{row.btc:+.2f}" if row.btc is not None else "—",
+                        "État": "ouverte" if row.is_open else "terminée",
+                    }
+                    for row in comparison.rows
+                ]),
+                width="stretch", hide_index=True,
+            )
 
 st.divider()
 

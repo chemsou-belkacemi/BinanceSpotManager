@@ -387,6 +387,28 @@ vente peut différer de `STOP_LOSS`, et un stop déjà franchi est vendu au marc
   break-even, break-even frais inclus ou TP précédent, appliqué après chaque TP
   sauf le dernier, pour les prochains signaux manuels et automatiques de toute
   origine. Les règles demandant une valeur saisie ne sont pas proposées.
+- **Achat quand le TP1 est touché avant** (`signal_cancel_entry_if_tp1_first`) :
+  désactivé par défaut, l'ordre d'achat d'un signal texte reste ouvert si le prix
+  atteint le TP1 avant son exécution ; la position est marquée `tp1_avant_achat` et
+  History compare ces achats tardifs aux autres. Activé : l'achat est annulé (le
+  signal est parti sans toi). Un signal CSI annule toujours (contrat).
+- **Canal perdant** (`signal_channel_review_enabled`, désactivé par défaut ;
+  `signal_channel_review_min_trades`, 30 par défaut, de 10 à 500) : un signal dont le
+  canal d'origine a au moins ce nombre de positions terminées et un résultat net
+  négatif (frais BNB valorisés comme dans History) passe « À confirmer » avec le
+  motif `C_CHANNEL_LOSING`. Canal inconnu ou trop peu de positions : aucun jugement.
+
+### Canal d'origine
+
+Chaque message Telegram garde le nom de son canal : le canal, le groupe ou la
+personne d'origine d'un message **transféré**, sinon la conversation elle-même.
+Un texte recopié par un relais sans transfert ne porte que le nom du relais. À
+défaut de nom, le nom déclaré pour l'identifiant du chat (réglage des groupes CSI)
+ou « telegram <id> » est utilisé. Le canal suit la position (groupe de source) :
+History → **Par canal** donne positions, part de gagnantes, gain et perte moyens,
+PnL net et profit factor, frais compris ; les positions sans aucun achat exécuté
+ne comptent pas. Les positions ouvertes avant cette version apparaissent en
+« Telegram (canal inconnu) ».
 
 ### Sécurité
 
