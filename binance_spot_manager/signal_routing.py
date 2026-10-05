@@ -155,11 +155,13 @@ def _finite(value: Any) -> Any:
 
 
 def clean_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
-    """Métriques sérialisables en JSON strict (aucun NaN ni infini)."""
+    """Métriques sérialisables en JSON strict (aucun NaN ni infini), y compris dans les dicts imbriqués."""
     cleaned: dict[str, Any] = {}
     for key, value in metrics.items():
         if isinstance(value, float):
             cleaned[key] = _finite(value)
+        elif isinstance(value, Mapping):
+            cleaned[key] = clean_metrics(value)
         elif isinstance(value, (list, tuple)):
             cleaned[key] = [_finite(item) for item in value]
         else:

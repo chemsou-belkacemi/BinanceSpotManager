@@ -17,13 +17,15 @@ from binance_spot_manager.command_store import account_scope
 from binance_spot_manager.config import get_settings
 from binance_spot_manager.models import EventType
 from binance_spot_manager.risk_engine import RiskLimits
-from binance_spot_manager.signal_auto_execution import candle_backup_percent, channel_name
+from binance_spot_manager.signal_auto_execution import candle_backup_percent, channel_name, losing_channel_detail
 from binance_spot_manager.signal_inbox import SignalInbox
 from binance_spot_manager.signal_parser import ParsedSignal, TEMPLATES, parse_signal
 from binance_spot_manager.signal_plan import TRAIL_STOP_KEY, prepare_signal, signal_identity, signal_sl_after_tp
 from binance_spot_manager.signal_sizing import (
+    ChannelPolicy,
     RiskSizingPolicy,
     risk_based_budget,
+    sizing_stop,
     SignalSizingPolicy,
     suggest_signal_budget_from_account,
 )
@@ -268,6 +270,21 @@ if parsed.is_csi:
 else:
     st.caption("Entrées LIMIT : budget réparti également, expiration après 24 h. TP répartis également sur la position, dernier TP à 100 % du restant. Les entrées encore ouvertes sont annulées après TP1. Les TP sont surveillés par le worker : cette page ne crée pas un OCO par tranche.")
 st.warning("Une limite d'achat au-dessus du marché peut être exécutée immédiatement. Les fills partiels et les frais peuvent réduire les quantités réellement vendables. Le worker doit rester actif pour la stratégie.")
+candle = kline_interval(parsed.stop_timeframe) if parsed.stop_timeframe else None
+if not parsed.stop_timeframe:
+    touch, stop_ready = True, True
+elif candle:
+    stop_choice = st.radio(
+        "Déclenchement du SL",
+        [f"À la clôture d'une bougie {candle}, comme le signal (surveillée par le worker)",
+         f"Stop au prix : dès que le prix touche {parsed.stop}"],
+        key=f"stop_mode_{selected}",
+    )
+    touch, stop_ready = stop_choice.startswith("Stop au prix"), True
+else:
+    touch = st.checkbox(f"Je choisis un stop au prix {parsed.stop} (clôture « {parsed.stop_timeframe} » non reconnue)",
+                        key=f"touch_{selected}")
+    stop_ready = touch
 quote_asset = "USDC" if parsed.symbol.endswith("USDC") else "USDT"
 sizing_policy = SignalSizingPolicy.from_mapping(preferences)
 sizing_suggestion = None
@@ -293,13 +310,30 @@ except Exception as exc:
 risk_sizing_policy = RiskSizingPolicy.from_mapping(preferences)
 risk_sized = None
 if sizing_suggestion and risk_sizing_policy.enabled:
-    # Même calcul que l'exécution automatique ; entrées du signal à parts égales (répartition de cette page).
-    risk_sized = risk_based_budget(risk_sizing_policy, entries=parsed.entries, stop=parsed.stop,
-                                   total_capital=sizing_suggestion.total_capital,
-                                   usable_quote=sizing_suggestion.usable_quote)
+    # Même calcul que l'exécution automatique ; entrées du signal à parts égales (répartition de cette page) ; un SL
+    # à la clôture de bougie est dimensionné sur son stop de secours.
+    risk_sized = risk_based_budget(
+        risk_sizing_policy, entries=parsed.entries,
+        stop=sizing_stop(parsed.stop, candle_close=bool(parsed.stop_timeframe) and not touch,
+                         backup_percent=candle_backup_percent(preferences)),
+        total_capital=sizing_suggestion.total_capital, usable_quote=sizing_suggestion.usable_quote)
     if risk_sized is None:
-        sizing_warning = "Taille selon le risque impossible pour ce signal (stop absent ou au-dessus de l'entrée)."
+        sizing_warning = "; ".join(filter(None, [sizing_warning, (
+            "Taille selon le risque impossible pour ce signal (stop absent ou au-dessus de l'entrée, ou SL à la "
+            "clôture sans stop de secours) : budget de la stratégie proposé")]))
 default_budget = (risk_sized.budget if risk_sized else sizing_suggestion.budget) if sizing_suggestion else 0.0
+channel_rule = ChannelPolicy.from_mapping(preferences)
+channel_note = ""
+if sizing_suggestion and channel_rule.enabled:
+    # Même règle que l'exécution automatique (losing_channel_detail).
+    try:
+        channel_note = losing_channel_detail(
+            row, preferences, channel_rule, service.positions.list_all(), sizing_prices,
+            lambda signal_id: str((inbox.get(scope, signal_id) or {}).get("raw") or ""))
+    except Exception as exc:  # noqa: BLE001 - la page reste utilisable ; la règle est signalée
+        sizing_warning = "; ".join(filter(None, [sizing_warning, f"Règle du trader perdant non évaluée : {exc}"]))
+    if channel_note and channel_rule.action == "REDUCE":
+        default_budget = channel_rule.reduced(default_budget)
 budget_key = f"budget_{selected}"
 if sizing_suggestion and st.button(
     "Recalculer le budget proposé",
@@ -331,26 +365,14 @@ if sizing_suggestion:
         st.caption(f"Taille selon le risque (Settings) : perte visée {risk_sized.risk_amount:.2f} {quote_asset} au stop, "
                    f"stop à {risk_sized.stop_distance_pct:.2f} % de l'entrée moyenne → {risk_sized.budget:.2f} {quote_asset}"
                    + (f", limité par le {risk_sized.capped_by}" if risk_sized.capped_by else "") + ".")
+    if channel_note:
+        st.warning(channel_note + (f" : budget proposé réduit à {channel_rule.kept_percent:g} %."
+                                   if channel_rule.action == "REDUCE" else "."))
     if sizing_suggestion.capped_by_reserve:
         st.warning("Le budget proposé a été plafonné pour conserver la réserve de capital.")
 if sizing_warning:
     st.warning(sizing_warning)
 validity = st.checkbox("J'ai vérifié la date source et ce signal est encore valable maintenant", key=f"valid_{selected}")
-candle = kline_interval(parsed.stop_timeframe) if parsed.stop_timeframe else None
-if not parsed.stop_timeframe:
-    touch, stop_ready = True, True
-elif candle:
-    stop_choice = st.radio(
-        "Déclenchement du SL",
-        [f"À la clôture d'une bougie {candle}, comme le signal (surveillée par le worker)",
-         f"Stop au prix : dès que le prix touche {parsed.stop}"],
-        key=f"stop_mode_{selected}",
-    )
-    touch, stop_ready = stop_choice.startswith("Stop au prix"), True
-else:
-    touch = st.checkbox(f"Je choisis un stop au prix {parsed.stop} (clôture « {parsed.stop_timeframe} » non reconnue)",
-                        key=f"touch_{selected}")
-    stop_ready = touch
 trail_stop = bool(preferences.get(TRAIL_STOP_KEY, True))
 sl_after_tp = signal_sl_after_tp(preferences.get("signal_sl_after_tp"))
 signature = (scope, selected, budget, validity, touch, trail_stop, sl_after_tp)
@@ -390,7 +412,7 @@ if st.button("Vérifier sur Binance Demo et simuler", disabled=not (budget > 0 a
             live_reasons = [signal_routing.Reason("D_RISK", signal_routing.DONNEES, f"Risque non évaluable : {exc}")]
             live_metrics = {}
         st.session_state["signal_preview"] = (signature, plan, payload, live_reasons, live_metrics,
-                                              sizing_suggestion.budget if sizing_suggestion else None)
+                                              default_budget if sizing_suggestion else None)
     except Exception as exc:
         st.error(f"Simulation refusée : {exc}")
 preview = st.session_state.get("signal_preview")

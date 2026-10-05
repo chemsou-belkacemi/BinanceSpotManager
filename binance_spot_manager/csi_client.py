@@ -13,6 +13,7 @@ Configuration (variables d'environnement, jamais dans le code) :
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -253,14 +254,19 @@ def size_advice(risk: dict | None, symbol: str, budget: float, stop_distance_pct
     if not isinstance(risk, dict) or not risk.get("available"):
         reason = (risk or {}).get("reason") if isinstance(risk, dict) else None
         return {"available": False, "reason": reason or "aucun conseil de CSI"}
-    pair = (risk.get("pairs") or {}).get(symbol.upper())
+    pairs = risk.get("pairs")
+    pair = pairs.get(str(symbol).upper()) if isinstance(pairs, dict) else None
     if not isinstance(pair, dict):
-        return {"available": False, "reason": f"{symbol.upper()} absente de la prévision de CSI"}
+        return {"available": False, "reason": f"{str(symbol).upper()} absente de la prévision de CSI"}
     try:
         move = float(pair["move_24h_pct"])
         relative = float(pair["relative_size"])
     except (KeyError, TypeError, ValueError):
         return {"available": False, "reason": "conseil de CSI illisible"}
+    if not (math.isfinite(move) and math.isfinite(relative) and move > 0 and relative > 0):
+        return {"available": False, "reason": "conseil de CSI illisible"}
+    if stop_distance_pct is not None and not math.isfinite(float(stop_distance_pct)):
+        stop_distance_pct = None
     out = {"available": True, "origin": risk.get("origin", ""), "move_24h_pct": move, "relative_size": relative,
            "budget": float(budget), "proposed_budget": round(float(budget) * relative, 2)}
     if stop_distance_pct is not None:

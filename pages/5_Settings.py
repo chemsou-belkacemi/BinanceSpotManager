@@ -267,7 +267,11 @@ with tabs[5]:
             help="Un stop très proche demanderait un budget énorme : ce plafond l'arrête. La réserve reste prioritaire.",
         )
         st.caption("Exemple : capital 10 000, perte visée 0,4 % = 40 USDT ; stop à 2 % → budget 2 000 ; stop à 8 % → "
-                   "budget 500. S'applique aux prochains signaux, manuels (proposition) et automatiques.")
+                   "budget 500. Un SL à la clôture de bougie est calculé sur son stop de secours (sans secours : « à "
+                   "confirmer »). Activée, elle remplace la stratégie de budget ci-dessus, part réduite comprise. "
+                   "Perte visée hors frais : garde-la sous le seuil « risque au stop » (0,5 % frais compris par défaut), "
+                   "sinon les stops proches partent « à confirmer ». S'applique aux prochains signaux, manuels "
+                   "(proposition) et automatiques.")
         if st.form_submit_button("Enregistrer la taille selon le risque"):
             get_settings_store().update({"signal_risk_sizing_enabled": bool(risk_enabled),
                                          "signal_risk_percent": float(risk_percent),

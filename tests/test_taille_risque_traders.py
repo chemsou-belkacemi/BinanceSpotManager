@@ -92,12 +92,47 @@ def test_automatic_signals_use_the_risk_size_only_when_enabled(tmp_path):
     assert spent == pytest.approx(84.0, abs=0.1)
 
 
-def test_a_signal_without_stop_is_held_when_risk_sizing_is_on(tmp_path):
+CANDLE = "PAIR: BTC/USDT\nENTRY 1: 84000\nT1: 90000\nSL: 82320 (4h)"
+
+
+def test_a_candle_close_stop_is_sized_on_its_backup_stop(tmp_path):
+    """Relecture : un SL à la clôture peut vendre jusqu'au stop de secours (3 % plus bas par défaut) ; dimensionné
+    sur le niveau nominal, la perte au secours valait 2,5 fois la cible."""
     inbox = SignalInbox(tmp_path / "signals.db")
-    inbox.receive("demo", "PAIR: BTC/USDT\nENTRY 1: 84000\nT1: 90000", source="telegram",
-                  external_id=telegram_id(1), source_timestamp=995)
+    inbox.receive("demo", CANDLE, source="telegram", external_id=telegram_id(1), source_timestamp=995)
     worker, commands = executor(tmp_path, inbox, enabled_preferences(signal_risk_sizing_enabled=True))
-    assert worker.process_pending() != ["QUEUED"] and commands.list_recent("demo") == []
+    assert worker.process_pending() == ["QUEUED"]
+    payload = commands.list_recent("demo")[0]["payload"]
+    sized = payload["route"]["metrics"]["risk_sizing"]
+    backup = 82320 * 0.97
+    assert sized["sizing_stop"] == pytest.approx(backup)
+    budget = sized["budget"]
+    assert budget * (84000 - backup) / 84000 == pytest.approx(4.0, abs=0.01)       # 0,4 % de 1 000 au secours
+
+
+def test_a_candle_close_stop_without_backup_is_held(tmp_path):
+    """Sans stop de secours, la perte d'un SL à la clôture n'a pas de borne : aucune taille, revue."""
+    inbox = SignalInbox(tmp_path / "signals.db")
+    inbox.receive("demo", CANDLE, source="telegram", external_id=telegram_id(1), source_timestamp=995)
+    preferences = enabled_preferences(signal_risk_sizing_enabled=True, signal_candle_backup_percent=0)
+    worker, commands = executor(tmp_path, inbox, preferences)
+    assert worker.process_pending() == ["REVIEW"] and commands.list_recent("demo") == []
+    assert '"D_RISK_SIZING"' in inbox.recent("demo")[0]["route"]
+
+
+def test_risk_size_follows_the_entry_split_actually_applied(tmp_path):
+    two = "PAIR: BTC/USDT\nENTRY 1: 84000\nENTRY 2: 82000\nT1: 90000\nSL: 80000"
+    inbox = SignalInbox(tmp_path / "signals.db")
+    inbox.receive("demo", two, source="telegram", external_id=telegram_id(1), source_timestamp=995)
+    preferences = enabled_preferences(signal_risk_sizing_enabled=True, signal_auto_entry_count=2,
+                                      signal_auto_entry_distribution="CUSTOM",
+                                      signal_auto_entry_custom_percentages="20;80")
+    worker, commands = executor(tmp_path, inbox, preferences)
+    assert worker.process_pending() == ["QUEUED"]
+    payload = commands.list_recent("demo")[0]["payload"]
+    entries = payload["position"]["entries"]
+    loss = sum(e["quote_amount"] / e["resolved_price"] * (e["resolved_price"] - 80000) for e in entries)
+    assert loss == pytest.approx(4.0, abs=0.05)                                       # parts 20/80 réellement suivies
 
 
 @pytest.mark.parametrize("action,min_loss,expected_budget", [
@@ -116,6 +151,22 @@ def test_a_losing_trader_can_get_a_smaller_size(tmp_path, rules, action, min_los
     assert bool(reduction) == (expected_budget < 90)
     if reduction:
         assert "« Canal A » perdant" in reduction["detail"]
+
+
+def test_the_reduction_applies_after_the_risk_size(tmp_path, rules):  # noqa: F811
+    losers = [labelled(losing_position(rules), "Canal A") for _ in range(10)]
+    preferences = enabled_preferences(signal_risk_sizing_enabled=True, signal_channel_review_enabled=True,
+                                      signal_channel_review_min_trades=10, signal_channel_action="REDUCE")
+    outcome, payload = _queued_metrics(tmp_path, preferences, positions=positions_stub(losers), origin="Canal A")
+    metrics = payload["route"]["metrics"]
+    assert outcome == ["QUEUED"] and metrics["risk_sizing"]["budget"] == pytest.approx(84.0)
+    assert metrics["budget"] == pytest.approx(42.0)
+
+
+def test_unreadable_positions_still_hold_the_signal(tmp_path):
+    outcome, saved = _queued_metrics(tmp_path, enabled_preferences(signal_channel_review_enabled=True),
+                                     positions=positions_stub(read_errors=["illisible"]))
+    assert outcome == ["REVIEW"] and '"D_RISK"' in saved["route"]
 
 
 def test_the_review_action_still_holds_a_losing_trader(tmp_path, rules):  # noqa: F811
@@ -155,9 +206,28 @@ def test_csi_size_advice_is_shown_never_applied(tmp_path):
     assert "non appliqué" in size_advice_text(advice)
 
 
-def test_an_unavailable_csi_never_blocks_a_signal(tmp_path):
-    outcome, payload = _queued_metrics(tmp_path, enabled_preferences(), csi_client=RiskCsi(fail=True))
+@pytest.mark.parametrize("risk", [
+    None, {"available": True, "pairs": ["BTCUSDT"]},
+    {"available": True, "pairs": {"BTCUSDT": {"move_24h_pct": float("nan"), "relative_size": 1.2}}},
+    {"available": True, "pairs": {"BTCUSDT": {"move_24h_pct": "x", "relative_size": 1.2}}},
+], ids=["vide", "paires-en-liste", "nan", "texte"])
+def test_a_malformed_csi_answer_never_holds_a_signal(tmp_path, risk):
+    outcome, payload = _queued_metrics(tmp_path, enabled_preferences(), csi_client=RiskCsi(risk))
     assert outcome == ["QUEUED"] and payload["route"]["metrics"]["csi_size"]["available"] is False
+
+
+def test_an_unavailable_csi_never_blocks_a_signal_and_is_asked_once_a_minute(tmp_path):
+    csi = RiskCsi(fail=True)
+    inbox = SignalInbox(tmp_path / "signals.db")
+    for message in (1, 2):
+        inbox.receive("demo", SIMPLE.replace("84000", str(84000 - message)), source="telegram",
+                      external_id=telegram_id(message), source_timestamp=995)
+    worker, commands = executor(tmp_path, inbox, enabled_preferences(signal_risk_sizing_enabled=False),
+                                csi_client=csi)
+    assert worker.process_pending() == ["QUEUED"]                        # une panne de CSI ne retient rien
+    worker.process_pending()                                             # second signal, même minute
+    assert csi.risk_calls == 1                                           # conseil mis en cache une minute
+    assert commands.list_recent("demo")[-1]["payload"]["route"]["metrics"]["csi_size"]["available"] is False
 
 
 def test_size_advice_reads_only_known_pairs():
@@ -218,3 +288,52 @@ def test_settings_save_the_risk_size_and_the_trader_rule(monkeypatch, tmp_path):
     saved = store.load()
     assert saved["signal_risk_sizing_enabled"] is True and saved["signal_risk_percent"] == 0.5
     assert saved["signal_channel_action"] == "REDUCE" and saved["signal_channel_min_loss"] == 20.0
+
+
+# -- page Signaux : même calcul que l'exécution automatique ------------------------------------------------------
+
+def _open_signals_page(monkeypatch, tmp_path, text, preferences, positions=()):
+    from types import SimpleNamespace
+
+    from streamlit.testing.v1 import AppTest
+
+    import binance_spot_manager.config as config
+    import binance_spot_manager.position_store as position_store
+    import binance_spot_manager.signal_inbox as signal_inbox
+    import ui_common
+    from binance_spot_manager.command_store import CommandStore, account_scope
+    from binance_spot_manager.config import RunMode, Settings
+    from test_signals_ui import PAGE, RULES, page_service
+
+    settings = Settings(run_mode=RunMode.DEMO_MANUAL, demo_api_key="test", demo_api_secret="test")
+    scope = account_scope(settings)
+    inbox = SignalInbox(tmp_path / "inbox.db")
+    row = inbox.receive(scope, text, source="telegram", external_id=f"{'ab' * 32}:-100:1", source_timestamp=995,
+                        origin="Canal A")
+    service = page_service(scope, CommandStore(tmp_path / "commands.db"), tmp_path)
+    service.positions = SimpleNamespace(list_all=lambda: list(positions), read_errors=[])
+    monkeypatch.setattr(config, "get_settings", lambda: settings)
+    monkeypatch.setattr(signal_inbox, "SignalInbox", lambda: inbox)
+    monkeypatch.setattr(ui_common, "get_service", lambda: service)
+    monkeypatch.setattr(ui_common, "load_rules", lambda symbol: (RULES, ""))
+    monkeypatch.setattr(ui_common, "sidebar_status", lambda settings: None)
+    monkeypatch.setattr(position_store, "get_settings_store", lambda: SimpleNamespace(load=lambda: preferences))
+    app = AppTest.from_file(str(PAGE)).run()
+    assert not app.exception
+    return app, row
+
+
+def test_the_page_proposes_the_risk_size_reduced_for_a_losing_trader(monkeypatch, tmp_path, rules):  # noqa: F811
+    losers = [labelled(losing_position(rules), "Canal A") for _ in range(10)]
+    preferences = {"signal_risk_sizing_enabled": True, "signal_channel_review_enabled": True,
+                   "signal_channel_review_min_trades": 10, "signal_channel_action": "REDUCE"}
+    app, row = _open_signals_page(monkeypatch, tmp_path, SIMPLE, preferences, losers)
+    assert app.number_input(key=f"budget_{row['id']}").value == pytest.approx(42.0)     # 84 réduit de moitié
+    assert any("« Canal A » perdant" in w.value for w in app.warning)
+
+
+def test_the_page_sizes_a_candle_stop_on_its_backup(monkeypatch, tmp_path):
+    app, row = _open_signals_page(monkeypatch, tmp_path, CANDLE, {"signal_risk_sizing_enabled": True})
+    backup = 82320 * 0.97
+    budget = app.number_input(key=f"budget_{row['id']}").value
+    assert budget * (84000 - backup) / 84000 == pytest.approx(4.0, abs=0.01)
