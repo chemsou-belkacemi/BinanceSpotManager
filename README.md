@@ -144,6 +144,29 @@ refusé au démarrage. Ne jamais placer les volumes sur un partage réseau
 - **Par trader ou canal** (History) : nom du trader écrit en tête du signal, sinon canal ;
   voir `docs/SIGNAUX.md`, section « Trader ou canal d'origine ».
 
+### Sécurité : surveillance, garde-fous, commandes
+
+- **Alerte « bot muet »** (service `watchdog`, lancé par `make up`) : un service séparé, données en lecture
+  seule, prévient sur Telegram si le worker se tait depuis 2 minutes ou s'arrête, avec les positions dont le
+  stop n'est pas posé chez Binance ; rappel toutes les 30 min ; retour annoncé ; veille avec positions ouvertes
+  annoncée. **Si le VPS entier tombe**, ce service tombe aussi : pour être prévenu quand même, créer un contrôle
+  gratuit sur un service externe (par exemple healthchecks.io : période 5 min, délai de grâce 10 min, alerte par
+  e-mail ou Telegram), puis mettre son adresse `https://…` dans `.env` (`BSM_HEALTHCHECK_URL=…`) et lancer
+  `make up`. Le service n'envoie qu'une requête vide, seulement quand le worker vit.
+- **Perte maximale du jour** (Settings → Worker & risque, active, 3 %) : si le résultat du jour (réalisé depuis
+  00:00 UTC, frais compris, + latent) descend à −3 % du capital, plus aucune nouvelle entrée, manuelle ou
+  automatique, jusqu'à 00:00 UTC. Les positions restent suivies, rien n'est vendu.
+- **Commandes Telegram**, dans ta conversation privée avec le bot et depuis ton compte uniquement : `/pause`
+  (plus aucune nouvelle entrée jusqu'à `/reprise`), `/reprise`, `/statut`. Réglage : Settings → Notifications.
+- **Alertes de connexion** (Settings → Notifications, interrupteur pour les couper) : un message à chaque
+  connexion à l'interface et quand un compte est bloqué après 5 échecs.
+- **Filtre de liquidité** (Settings → Signaux) : un signal automatique sur une paire à moins de 500 000 USDT de
+  volume sur 24 h, ou à plus de 0,5 % d'écart achat/vente, passe « À confirmer ».
+- **Stop de secours chez Binance** (Settings → Signaux, 3 % par défaut, 0 = aucun) : un SL « à la clôture de
+  bougie » n'est surveillé que par le worker ; un vrai ordre stop est posé chez Binance 3 % sous le niveau de
+  clôture, et protège la position même si le bot est arrêté. Il ne part que sur une chute franche (une mèche
+  sous ce niveau suffit). S'applique aux prochains signaux.
+
 ### Données et sauvegardes
 
 `data/` et `logs/` vivent dans les volumes Docker `bsm-data` et `bsm-logs`, pas
@@ -465,6 +488,8 @@ une copie hors Docker (`make backup-chiffre` sur un serveur).
 | `data/presets.json` | presets enregistrés |
 | `data/market_guard.json` | état de la protection marché (pause en cours, déclenchement) |
 | `data/daily_report.json` | date du dernier rapport quotidien envoyé |
+| `data/daily_guard.json` | perte maximale du jour : blocage en cours (jour, montant, seuil) |
+| `data/pause_manuelle.json` | pause manuelle des nouvelles entrées (commande Telegram `/pause`) |
 | `logs/events.jsonl` | journal d'événements, une ligne JSON par événement |
 | `logs/bot.log` | journal d'exécution |
 | `logs/errors.log` | erreurs applicatives |

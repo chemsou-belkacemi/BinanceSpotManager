@@ -31,7 +31,7 @@ from .signal_plan import (
     signal_sl_after_tp,
 )
 from .signal_routing import (
-    AUTO, CONFIANCE, DONNEES, EARLY_REVIEW_CODES, KIND_CSI, REVIEW, Reason, RouteDecision,
+    AUTO, CONFIANCE, DONNEES, EARLY_REVIEW_CODES, KIND_CSI, REVIEW, RISQUE, Reason, RouteDecision,
     RoutingDataError, RoutingPolicy,
 )
 from .signal_sizing import SignalSizingPolicy, suggest_signal_budget_from_account
@@ -63,6 +63,48 @@ def channel_name(row, preferences) -> str:
     if not name and row.get("source") == "telegram":
         name = source_label(row, preferences)
     return name[:80]
+
+
+#: Stop de secours chez Binance pour un SL à la clôture de bougie (Settings → Signaux), en % sous le niveau.
+CANDLE_BACKUP_PERCENT = 3.0
+
+
+def candle_backup_percent(preferences) -> float:
+    """Écart du stop de secours réglé (0 : aucun ordre Binance pour un SL à la clôture), borné à 0-20 %."""
+    return float(_bounded_number(preferences, "signal_candle_backup_percent", CANDLE_BACKUP_PERCENT, 0, 20))
+
+
+#: Filtre de liquidité (Settings → Signaux) : réglages par défaut. Sur 24 paires des signaux du propriétaire
+#: (2026-10-05), le volume 24 h va de 0,2 à 108 M USDT et l'écart achat/vente reste sous 0,3 %.
+LIQUIDITY_MIN_VOLUME_USDT = 500_000.0
+LIQUIDITY_MAX_SPREAD_PERCENT = 0.5
+
+
+def liquidity_reasons(ticker, preferences):
+    """Motifs de revue d'une paire peu liquide (volume 24 h en USDT trop bas, écart achat/vente trop large) :
+    protection contre les pump & dump et le glissement. (motifs, métriques)."""
+    if not preferences.get("signal_liquidity_enabled", True):
+        return [], {}
+    min_volume = _bounded_number(preferences, "signal_min_volume_usdt", LIQUIDITY_MIN_VOLUME_USDT, 0, 1e10)
+    max_spread = _bounded_number(preferences, "signal_max_spread_percent", LIQUIDITY_MAX_SPREAD_PERCENT, 0.01, 20)
+    try:
+        volume = float(ticker["quoteVolume"])
+        bid, ask = float(ticker["bidPrice"]), float(ticker["askPrice"])
+    except (KeyError, TypeError, ValueError):
+        return [Reason("D_LIQUIDITY", DONNEES, "Liquidité non vérifiable : statistiques 24 h illisibles")], {}
+    middle = (bid + ask) / 2
+    spread = (ask - bid) / middle * 100.0 if bid > 0 and ask >= bid else float("inf")
+    reasons = []
+    if volume < min_volume:
+        reasons.append(Reason("R_LIQUIDITY", RISQUE,
+                              f"Paire peu liquide : volume 24 h {volume:,.0f} USDT < {min_volume:,.0f} USDT "
+                              "(risque de pump & dump et de glissement)".replace(",", " "),
+                              value=volume, threshold=min_volume))
+    if spread > max_spread:
+        reasons.append(Reason("R_SPREAD", RISQUE,
+                              f"Écart achat/vente {spread:.2f} % > {max_spread:.2f} %",
+                              value=spread if spread != float("inf") else None, threshold=max_spread))
+    return reasons, {"volume_24h_usdt": volume, "spread_percent": spread if spread != float("inf") else None}
 
 
 def entry_deviation_bps(price: float, entry_price: float) -> float:
@@ -111,6 +153,10 @@ class AutomaticSignalExecutor:
         #: Protection marché (chute de BTC, market_guard.py) : raison posée et levée par le worker,
         #: distincte de la suspension pour ordres orphelins (aucune des deux ne lève l'autre).
         self.market_guard_reason = ""
+        #: Perte maximale du jour (daily_guard.py) : raison posée et levée par le worker.
+        self.daily_guard_reason = ""
+        #: Pause manuelle (commande Telegram /pause) : raison posée et levée par le worker.
+        self.manual_pause_reason = ""
         self._diagnostics = {
             "state": "DISABLED",
             "queued_total": 0,
@@ -156,6 +202,14 @@ class AutomaticSignalExecutor:
             # Les signaux reçus pendant la suspension restent dans la boîte ; à la reprise, seuls
             # ceux encore assez récents (âge maximal des réglages) partent automatiquement.
             self._update(state="SUSPENDED", last_detail=self.suspended_reason)
+            return []
+        if self.manual_pause_reason:
+            # Pause demandée par le propriétaire : rien ne part, les signaux restent dans la boîte.
+            self._update(state="PAUSE_MANUELLE", last_detail=self.manual_pause_reason)
+            return []
+        if self.daily_guard_reason:
+            # Plus aucune nouvelle entrée aujourd'hui : rien ne part, les signaux restent dans la boîte.
+            self._update(state="PERTE_DU_JOUR", last_detail=self.daily_guard_reason)
             return []
         if self.market_guard_reason:
             # Même effet qu'une suspension : rien ne part, les signaux restent dans la boîte et ne
@@ -358,6 +412,7 @@ class AutomaticSignalExecutor:
                 sl_after_tp=signal_sl_after_tp(preferences.get("signal_sl_after_tp")),
                 cancel_entry_if_tp1_first=bool(preferences.get("signal_cancel_entry_if_tp1_first", False)),
                 source_name=channel_name(row, preferences),
+                candle_backup_percent=candle_backup_percent(preferences),
                 touch_stop=bool(policy.touch_stop
                                 or signal_routing.unknown_candle_stop(parsed.stop_timeframe)),
                 trail_stop=bool(preferences.get(TRAIL_STOP_KEY, True)),
@@ -399,6 +454,14 @@ class AutomaticSignalExecutor:
             return self._review(row, signal_routing.decide(reasons, metrics), now=now, policy=policy, label=label)
         reasons += risk_reasons + breaker + self._channel_reasons(row, preferences, positions, prices)
         metrics |= risk_metrics | breaker_metrics
+        try:
+            liquidity, liquidity_metrics = liquidity_reasons(self.client.get_ticker_24h(parsed.symbol), preferences)
+        except Exception as exc:  # noqa: BLE001 - statistiques indisponibles : revue, jamais refus définitif
+            liquidity = ([Reason("D_LIQUIDITY", DONNEES, f"Liquidité non vérifiable : {exc}")]
+                         if preferences.get("signal_liquidity_enabled", True) else [])
+            liquidity_metrics = {}
+        reasons += liquidity
+        metrics |= liquidity_metrics
         decision = signal_routing.decide(reasons, metrics)
         if decision.outcome != AUTO:
             return self._review(row, decision, now=now, policy=policy, label=label)

@@ -29,6 +29,7 @@ from .models import (
     OrderType,
     Position,
     SLStatus,
+    SLTrigger,
     TakeProfit,
     TPStatus,
     utcnow,
@@ -699,10 +700,14 @@ class ExecutionEngine:
                     stop_would_trigger=exc.is_stop_would_trigger,
                 )
 
+        # Un stop de secours (SL a la cloture de bougie) garde le niveau de cloture surveille par le worker : son
+        # prix chez Binance se deduit de ce niveau (StopLoss.binance_stop_price), il ne le remplace jamais.
+        keeps_level = position.stop_loss.trigger is SLTrigger.CANDLE_CLOSE
         if result.success:
             position.stop_loss.order_id = result.order_id
             position.stop_loss.client_order_id = client_order_id
-            position.stop_loss.resolved_price = stop
+            if not keeps_level:
+                position.stop_loss.resolved_price = stop
             position.stop_loss.quantity = qty
             position.stop_loss.status = SLStatus.ACTIVE
             position.stop_loss.created_at = position.stop_loss.created_at or utcnow()
@@ -718,7 +723,8 @@ class ExecutionEngine:
         elif result.status == "UNKNOWN":
             position.stop_loss.order_id = None
             position.stop_loss.client_order_id = client_order_id
-            position.stop_loss.resolved_price = stop
+            if not keeps_level:
+                position.stop_loss.resolved_price = stop
             position.stop_loss.quantity = qty
             position.stop_loss.status = SLStatus.REPLACING
             position.stop_loss.last_error = result.error

@@ -207,6 +207,8 @@ class EventType(str, Enum):
     MARKET_GUARD_STARTED = "MARKET_GUARD_STARTED"
     MARKET_GUARD_ENDED = "MARKET_GUARD_ENDED"
     DAILY_REPORT_SENT = "DAILY_REPORT_SENT"
+    DAILY_LOSS_STARTED = "DAILY_LOSS_STARTED"
+    DAILY_LOSS_ENDED = "DAILY_LOSS_ENDED"
 
 
 class WorkerState(str, Enum):
@@ -399,6 +401,9 @@ class StopLoss(BSMModel):
     trigger: SLTrigger = SLTrigger.TOUCH
     #: intervalle Binance de la bougie surveillee (15m, 1h, 4h...) en mode CANDLE_CLOSE
     candle_interval: str = ""
+    #: Stop de secours chez Binance pour un SL a la cloture de bougie : ordre stop pose X % sous le niveau de
+    #: cloture, qui protege meme si le worker s'arrete (0 : aucun ordre Binance, surveillance par le worker seul).
+    backup_percent: float = 0.0
     #: closeTime (ms) de la derniere bougie cloturee deja evaluee
     candle_checked_until: Optional[int] = None
 
@@ -416,6 +421,17 @@ class StopLoss(BSMModel):
     @property
     def is_active(self) -> bool:
         return self.status == SLStatus.ACTIVE
+
+    def binance_stop_price(self) -> Optional[float]:
+        """Prix de l'ordre stop pose chez Binance : le SL lui-meme au toucher ; pour un SL a la cloture de
+        bougie, le stop de secours (backup_percent sous le niveau de cloture), sinon aucun (None)."""
+        if not self.resolved_price:
+            return None
+        if self.trigger is SLTrigger.CANDLE_CLOSE:
+            if self.backup_percent <= 0:
+                return None
+            return self.resolved_price * (1.0 - min(self.backup_percent, 50.0) / 100.0)
+        return self.resolved_price
 
     def commission_total(self, asset: str = "") -> float:
         return sum(c.amount for c in self.commissions if not asset or c.asset == asset)

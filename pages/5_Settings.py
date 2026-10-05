@@ -307,6 +307,44 @@ with tabs[5]:
             st.success("Réglage enregistré.")
 
     st.divider()
+    st.subheader("Stop de secours chez Binance (SL à la clôture de bougie)")
+    with st.form("signal_candle_backup_preferences"):
+        backup_value = st.number_input(
+            "Écart du stop de secours sous le niveau de clôture (%) — 0 : aucun",
+            min_value=0.0, max_value=20.0, step=0.5, key="signal_candle_backup_input",
+            value=float(signal_preferences.get("signal_candle_backup_percent", 3.0)),
+            help="Un SL « à la clôture de bougie » n'est surveillé que par le worker : s'il s'arrête, rien ne protège "
+                 "la position. Le stop de secours est un vrai ordre stop chez Binance, plus bas que le niveau de "
+                 "clôture : il ne part que sur une chute franche (une mèche sous ce niveau suffit), même bot arrêté. "
+                 "S'applique aux prochains signaux ; les positions ouvertes gardent leur réglage.",
+        )
+        if st.form_submit_button("Enregistrer le stop de secours"):
+            get_settings_store().update({"signal_candle_backup_percent": float(backup_value)})
+            st.success("Stop de secours enregistré pour les prochains signaux.")
+
+    st.divider()
+    st.subheader("Liquidité de la paire")
+    with st.form("signal_liquidity_preferences"):
+        liquidity_on = st.toggle(
+            "Mettre « À confirmer » les signaux automatiques sur une paire peu liquide",
+            value=bool(signal_preferences.get("signal_liquidity_enabled", True)), key="signal_liquidity_toggle",
+            help="Volume des dernières 24 h trop bas ou écart achat/vente trop large : risque de pump & dump et de "
+                 "glissement. Rien n'est refusé : le signal attend ta confirmation.",
+        )
+        liquidity_cols = st.columns(2)
+        min_volume = liquidity_cols[0].number_input(
+            "Volume 24 h minimum (USDT)", min_value=0, max_value=1_000_000_000, step=100_000,
+            value=int(signal_preferences.get("signal_min_volume_usdt", 500_000)), key="signal_min_volume_input")
+        max_spread = liquidity_cols[1].number_input(
+            "Écart achat/vente maximum (%)", min_value=0.01, max_value=20.0, step=0.05,
+            value=float(signal_preferences.get("signal_max_spread_percent", 0.5)), key="signal_max_spread_input")
+        if st.form_submit_button("Enregistrer le filtre de liquidité"):
+            get_settings_store().update({"signal_liquidity_enabled": bool(liquidity_on),
+                                         "signal_min_volume_usdt": float(min_volume),
+                                         "signal_max_spread_percent": float(max_spread)})
+            st.success("Filtre de liquidité enregistré.")
+
+    st.divider()
     st.subheader("Exécution automatique")
     auto_was_enabled = bool(signal_preferences.get("signal_auto_execute_enabled", False))
     auto_execute = st.toggle(
@@ -1112,6 +1150,24 @@ with tabs[1]:
             })
             st.success("Protection enregistrée (prise en compte par le worker au prochain contrôle, ≤ 5 min).")
 
+    st.divider()
+    st.subheader("Perte maximale du jour")
+    st.caption("Résultat du jour = gains et pertes des positions terminées depuis 00:00 UTC (frais compris) + latent "
+               "des positions ouvertes. Au seuil, plus aucune nouvelle entrée (manuelle ou automatique) jusqu'à "
+               "00:00 UTC ; les positions ouvertes restent suivies. Rien n'est vendu.")
+    loss_saved = get_settings_store().load()
+    loss_saved = loss_saved if isinstance(loss_saved, dict) else {}
+    with st.form("daily_loss_preferences"):
+        loss_enabled = st.toggle("Activer la perte maximale du jour", key="daily_loss_enabled_toggle",
+                                 value=bool(loss_saved.get("daily_loss_enabled", True)))
+        loss_percent = st.number_input("Seuil (% du capital)", min_value=0.5, max_value=50.0, step=0.5,
+                                       value=float(loss_saved.get("daily_loss_percent", 3.0)),
+                                       key="daily_loss_percent_input")
+        if st.form_submit_button("Enregistrer la perte maximale"):
+            get_settings_store().update({"daily_loss_enabled": bool(loss_enabled),
+                                         "daily_loss_percent": float(loss_percent)})
+            st.success("Perte maximale du jour enregistrée (prise en compte par le worker en moins d'une minute).")
+
 
 # ==========================================================================
 # Presets
@@ -1276,6 +1332,38 @@ with tabs[3]:
             get_settings_store().update({"daily_report_enabled": bool(report_enabled),
                                          "daily_report_hour_utc": int(report_hour)})
             st.success("Rapport quotidien enregistré.")
+
+    st.divider()
+    st.subheader("Commandes Telegram")
+    st.caption("/pause (plus aucune nouvelle entrée), /reprise, /statut : acceptées seulement dans ta conversation "
+               "privée avec le bot et depuis ton compte. Les positions ouvertes restent toujours suivies. Laisser "
+               "l'identifiant vide utilise la conversation des notifications si elle est privée.")
+    commands_saved = get_settings_store().load()
+    commands_saved = commands_saved if isinstance(commands_saved, dict) else {}
+    with st.form("telegram_commands_preferences"):
+        commands_on = st.toggle("Accepter mes commandes Telegram", key="telegram_commands_toggle",
+                                value=bool(commands_saved.get("telegram_commands_enabled", True)))
+        owner_input = st.text_input("Mon identifiant Telegram (nombre)", key="telegram_owner_id_input",
+                                    value=str(commands_saved.get("telegram_owner_id") or ""))
+        if st.form_submit_button("Enregistrer les commandes"):
+            owner_text = owner_input.strip()
+            if owner_text and not owner_text.isdigit():
+                st.error("L'identifiant Telegram est un nombre positif (celui de ton compte, pas d'un groupe).")
+            else:
+                get_settings_store().update({"telegram_commands_enabled": bool(commands_on),
+                                             "telegram_owner_id": owner_text})
+                st.success("Commandes Telegram enregistrées.")
+
+    st.divider()
+    st.subheader("Alertes de connexion")
+    st.caption("Un message Telegram à chaque connexion à cette interface et quand un compte est bloqué après "
+               "5 échecs. Désactive-les ici si elles te gênent.")
+    with st.form("login_alert_preferences"):
+        login_alerts = st.toggle("Me prévenir à chaque connexion à l'interface et si un compte est bloqué",
+                                 key="login_alerts_toggle", value=bool(commands_saved.get("login_alerts_enabled", True)))
+        if st.form_submit_button("Enregistrer les alertes de connexion"):
+            get_settings_store().update({"login_alerts_enabled": bool(login_alerts)})
+            st.success("Alertes de connexion enregistrées.")
 
 
 # ==========================================================================

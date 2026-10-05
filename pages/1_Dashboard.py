@@ -69,6 +69,12 @@ st.subheader("Worker")
 
 from binance_spot_manager.market_guard import active_status  # noqa: E402
 
+from binance_spot_manager.daily_guard import DailyLossGuard  # noqa: E402
+from binance_spot_manager.position_store import get_settings_store as _settings_store  # noqa: E402
+
+daily_block = DailyLossGuard(lambda: _settings_store().load()).refusal()
+if daily_block:
+    st.error(f"Perte maximale du jour atteinte — {daily_block}. (Settings → Worker & risque)")
 guard = active_status()
 if guard is not None:
     st.warning(f"Protection marché active — {guard[0]} : nouvelles entrées automatiques suspendues jusqu'au "

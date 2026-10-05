@@ -82,6 +82,23 @@ services:
       start_period: 30s
       retries: 3
 
+  # Surveillance du worker (« bot muet ») : service separe, donnees en LECTURE SEULE, aucun port, aucune cle
+  # (ni volume bsm-keys) ; prevenir sur Telegram si le worker se tait, s'arrete ou reste en veille avec des
+  # positions ouvertes. Signal externe facultatif : BSM_HEALTHCHECK_URL dans .env.
+  watchdog:
+    <<: *app
+    command: ["python", "scripts/watchdog.py"]
+    mem_limit: 192m
+    cpus: 0.25
+    environment:
+      BSM_WORKER_SUPERVISOR: docker
+      BSM_HEALTHCHECK_URL: ${BSM_HEALTHCHECK_URL:-}
+    volumes:
+      - bsm-data:/app/data:ro
+      - bsm-logs:/app/logs
+    networks:
+      - default
+
   # Acces public (optionnel, COMPOSE_PROFILES=public dans .env) : HTTPS + mot de passe.
   # Seule entree publique : l'interface reste liee a 127.0.0.1. Aucune cle Binance ici.
   proxy:

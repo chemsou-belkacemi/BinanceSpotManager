@@ -398,6 +398,15 @@ vente peut différer de `STOP_LOSS`, et un stop déjà franchi est vendu au marc
   net négatif (frais BNB valorisés comme dans History) passe « À confirmer » avec le
   motif `C_CHANNEL_LOSING`. Nom inconnu ou trop peu de positions : aucun jugement.
 
+- **Stop de secours chez Binance** (`signal_candle_backup_percent`, 3 % par défaut, de 0 à 20 ; 0 = aucun) :
+  pour un signal dont le SL est « à la clôture de bougie » (« SL: 0.43 (1h) »), un ordre stop est aussi posé chez
+  Binance à ce pourcentage sous le niveau de clôture. La clôture reste surveillée par le worker ; le stop de
+  secours protège quand le worker est arrêté. Il est annulé avant chaque vente TP puis reposé, annulé avant la
+  sortie à la clôture, et remplacé par un stop au prix si le SL est déplacé.
+- **Filtre de liquidité** (`signal_liquidity_enabled`, activé ; `signal_min_volume_usdt`, 500 000 ;
+  `signal_max_spread_percent`, 0,5) : volume 24 h trop bas (`R_LIQUIDITY`) ou écart achat/vente trop large
+  (`R_SPREAD`) → « À confirmer » ; statistiques illisibles → `D_LIQUIDITY`, « À confirmer » aussi.
+
 ### Trader ou canal d'origine
 
 Chaque signal garde le nom de sa source, dans cet ordre :

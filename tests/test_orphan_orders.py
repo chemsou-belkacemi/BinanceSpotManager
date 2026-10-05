@@ -39,6 +39,7 @@ def worker_with_signal_waiting(tmp_path, open_orders):
     client = SimpleNamespace(
         get_symbol_info=lambda symbol: rules.raw, get_price=lambda symbol: 84500,
         get_prices=lambda: {"BTCUSDT": 84500}, get_balances=lambda: {"USDT": {"free": 1000, "locked": 0}},
+        get_ticker_24h=lambda symbol: {"quoteVolume": "1000000000", "bidPrice": "84499", "askPrice": "84500"},
     )
     inbox, commands = SignalInbox(tmp_path / "signals.db"), CommandStore(tmp_path / "commands.db")
     inbox.receive("demo", SIGNAL, source="telegram", external_id=f"{'ab' * 32}:-100:9", source_timestamp=NOW - 5)
