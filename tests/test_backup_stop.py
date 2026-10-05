@@ -131,7 +131,8 @@ def test_automatic_signals_use_the_saved_backup_setting(tmp_path):
         (tmp_path / folder).mkdir()
         inbox = SignalInbox(tmp_path / folder / "signals.db")
         row = inbox.receive("demo", text, source="telegram", external_id=telegram_id(1), source_timestamp=995)
-        worker, commands = executor(tmp_path / folder, inbox, enabled_preferences(**preferences))
+        # Budget 60 : risque mesuré au stop de secours, sous le seuil de revue de 0,5 % du capital.
+        worker, commands = executor(tmp_path / folder, inbox, enabled_preferences(signal_fixed_budget=60, **preferences))
         assert worker.process_pending() == ["QUEUED"]
         payload = commands.get_by_request_key("demo", f"signal:{row['id']}")["payload"]
         assert payload["position"]["stop_loss"]["backup_percent"] == expected

@@ -165,7 +165,8 @@ def test_timed_stop_waits_for_its_candle_close_unless_touch_is_saved(tmp_path, t
         "demo", SIMPLE.replace("SL: 80000", "SL: 80000 (1h)"),
         source="telegram", external_id=telegram_id(3), source_timestamp=995,
     )
-    worker, commands = executor(tmp_path, inbox, enabled_preferences(signal_auto_touch_stop=touch))
+    # Budget 60 : le risque d'un SL à la clôture se mesure au stop de secours (3 % plus bas), sous 0,5 % du capital.
+    worker, commands = executor(tmp_path, inbox, enabled_preferences(signal_auto_touch_stop=touch, signal_fixed_budget=60))
 
     assert worker.process_pending() == ["QUEUED"]
     stop = commands.get_by_request_key("demo", f"signal:{row['id']}")["payload"]["position"]["stop_loss"]
