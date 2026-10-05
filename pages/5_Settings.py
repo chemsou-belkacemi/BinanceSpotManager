@@ -307,6 +307,22 @@ with tabs[5]:
             st.success("Réglage enregistré.")
 
     st.divider()
+    st.subheader("Stop de secours chez Binance (SL à la clôture de bougie)")
+    with st.form("signal_candle_backup_preferences"):
+        backup_value = st.number_input(
+            "Écart du stop de secours sous le niveau de clôture (%) — 0 : aucun",
+            min_value=0.0, max_value=20.0, step=0.5, key="signal_candle_backup_input",
+            value=float(signal_preferences.get("signal_candle_backup_percent", 3.0)),
+            help="Un SL « à la clôture de bougie » n'est surveillé que par le worker : s'il s'arrête, rien ne protège "
+                 "la position. Le stop de secours est un vrai ordre stop chez Binance, plus bas que le niveau de "
+                 "clôture : il ne part que sur une chute franche (une mèche sous ce niveau suffit), même bot arrêté. "
+                 "S'applique aux prochains signaux ; les positions ouvertes gardent leur réglage.",
+        )
+        if st.form_submit_button("Enregistrer le stop de secours"):
+            get_settings_store().update({"signal_candle_backup_percent": float(backup_value)})
+            st.success("Stop de secours enregistré pour les prochains signaux.")
+
+    st.divider()
     st.subheader("Liquidité de la paire")
     with st.form("signal_liquidity_preferences"):
         liquidity_on = st.toggle(
@@ -1338,6 +1354,10 @@ with tabs[3]:
                                              "telegram_owner_id": owner_text})
                 st.success("Commandes Telegram enregistrées.")
 
+    st.divider()
+    st.subheader("Alertes de connexion")
+    st.caption("Un message Telegram à chaque connexion à cette interface et quand un compte est bloqué après "
+               "5 échecs. Désactive-les ici si elles te gênent.")
     with st.form("login_alert_preferences"):
         login_alerts = st.toggle("Me prévenir à chaque connexion à l'interface et si un compte est bloqué",
                                  key="login_alerts_toggle", value=bool(commands_saved.get("login_alerts_enabled", True)))

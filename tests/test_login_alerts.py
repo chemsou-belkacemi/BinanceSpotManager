@@ -66,3 +66,33 @@ def test_alerts_can_be_switched_off_and_never_break_the_login(monkeypatch, tmp_p
 
     monkeypatch.setattr("binance_spot_manager.notification_engine.NotificationEngine.login_alert", broken)
     ui_common._alert_login("LOGIN", "client")                                    # aucune exception
+
+
+def test_the_settings_switch_turns_login_alerts_off(monkeypatch, tmp_path):
+    from pathlib import Path
+
+    from binance_spot_manager.position_store import JsonFileStore
+
+    store = JsonFileStore(tmp_path / "settings.json")
+    monkeypatch.setattr("binance_spot_manager.position_store.get_settings_store", lambda: store)
+    monkeypatch.setattr("binance_spot_manager.binance_client.BinanceSpotClient.get_balances",
+                        lambda self: {"BNB": {"free": 0.1, "locked": 0}})
+    monkeypatch.setattr("binance_spot_manager.binance_client.BinanceSpotClient.get_price", lambda self, symbol: 500)
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py"), default_timeout=20).run()
+    app.switch_page("pages/5_Settings.py").run()
+    app.toggle(key="login_alerts_toggle").set_value(False)
+    next(b for b in app.button if b.label == "Enregistrer les alertes de connexion").click().run()
+    assert not app.exception and store.load()["login_alerts_enabled"] is False
+
+
+def test_tests_can_never_send_a_real_message():
+    """Garde-fou des tests (conftest) : Telegram et courriel sont bloqués comme Binance."""
+    import smtplib
+    import urllib.request
+
+    import pytest
+
+    with pytest.raises(RuntimeError):
+        urllib.request.urlopen("https://api.telegram.org")
+    with pytest.raises(RuntimeError):
+        smtplib.SMTP("localhost")
