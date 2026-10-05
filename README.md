@@ -134,14 +134,15 @@ refusé au démarrage. Ne jamais placer les volumes sur un partage réseau
   pause : après elle, seule une nouvelle baisse depuis le déclenchement compte.
 - **Rapport quotidien** (Settings → Notifications, 20 h UTC par défaut) : résultat
   du jour et des 7 derniers jours (frais compris), positions ouvertes, capital
-  engagé, latent, risque si tous les stops sont touchés, meilleur et pire canal.
+  engagé, latent, risque si tous les stops sont touchés, meilleur et pire trader ou canal.
   Un seul envoi par jour, même après un redémarrage.
 - **BSM face au marché** (Dashboard) : pour les achats exécutés de la période, le
   résultat de BSM comparé à « garder les mêmes cryptos » jusqu'à maintenant et à
   « BTC à la place » (même montant, même moment), mêmes frais d'achat, prix Binance
   Demo. Les références gardent chaque achat jusqu'à maintenant alors que BSM libère
   le capital plus tôt : sur quelques jours, l'écart dépend surtout du marché.
-- **Par canal** (History) : voir `docs/SIGNAUX.md`, section « Canal d'origine ».
+- **Par trader ou canal** (History) : nom du trader écrit en tête du signal, sinon canal ;
+  voir `docs/SIGNAUX.md`, section « Trader ou canal d'origine ».
 
 ### Données et sauvegardes
 

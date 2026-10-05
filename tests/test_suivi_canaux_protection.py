@@ -249,7 +249,7 @@ def test_late_fills_are_compared_to_the_others(rules):
 def test_a_channel_is_judged_losing_only_with_enough_closed_trades(rules):
     losers = [labelled(losing_position(rules), "Canal A") for _ in range(10)]
     detail = losing_channel(losers, "Canal A", min_trades=10)
-    assert detail and "Canal « Canal A » perdant" in detail and "10 positions" in detail
+    assert detail and "Trader/canal « Canal A » perdant" in detail and "10 positions" in detail
     assert losing_channel(losers, "Canal A", min_trades=11) is None              # trop peu de recul
     assert losing_channel(losers, "Canal B", min_trades=1) is None
     assert losing_channel([labelled(losing_position(rules), UNKNOWN_TELEGRAM)], UNKNOWN_TELEGRAM,
@@ -279,7 +279,7 @@ def test_a_losing_channel_sends_its_signals_to_review_only_when_enabled(tmp_path
         assert worker.process_pending() == expected
         saved = inbox.recent("demo")[0]
         if enabled:
-            assert '"C_CHANNEL_LOSING"' in saved["route"] and "Canal « Canal A » perdant" in saved["auto_detail"]
+            assert '"C_CHANNEL_LOSING"' in saved["route"] and "« Canal A » perdant" in saved["auto_detail"]
             assert commands.list_recent("demo") == []
         else:
             payload = commands.get_by_request_key("demo", f"signal:{row['id']}")["payload"]
@@ -564,7 +564,7 @@ def test_the_report_sums_today_and_the_week_and_names_the_channels(rules):
     assert f"Aujourd'hui : {today:+.2f} USDT sur 2 position(s) terminée(s), 1 gagnante(s)" in body
     assert "7 derniers jours : " in body and "sur 3 position(s)" in body
     assert f"Risque si tous les stops sont touchés : −{abs(still_open.metrics.max_loss_at_sl):.2f} USDT" in body
-    assert "Meilleur canal (7 j) : Canal A" in body and "Pire canal (7 j) : Canal B" in body
+    assert "Meilleur trader/canal (7 j) : Canal A" in body and "Pire trader/canal (7 j) : Canal B" in body
 
 
 def test_guard_and_report_notifications(settings):  # noqa: F811
@@ -734,8 +734,8 @@ def test_history_shows_results_by_channel_and_late_fills(monkeypatch, tmp_path, 
                             default_timeout=30).run()
     assert not app.exception
     tables = [frame.value for frame in app.dataframe]
-    by_channel = next(t for t in tables if "PnL net" in t.columns and "Canal" in t.columns)
-    assert list(by_channel["Canal"]) == ["Canal A", "Canal B"]
+    by_channel = next(t for t in tables if "PnL net" in t.columns and "Trader / canal" in t.columns)
+    assert list(by_channel["Trader / canal"]) == ["Canal A", "Canal B"]
     assert list(by_channel["Positions"]) == [1, 1]                  # la position sans achat ne compte pas
     late_table = next(t for t in tables if "Achats" in t.columns)
     assert "achat après TP1 déjà touché" in list(late_table["Achats"])

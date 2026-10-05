@@ -13,7 +13,7 @@ from typing import Any, Callable, Optional
 
 from .config import DATA_DIR
 from .models import Position
-from .performance import closed_between, stats_by, valued
+from .performance import channel_of, closed_between, stats_by, valued
 
 PREFIX = "daily_report_"
 REPORT_FILE = DATA_DIR / "daily_report.json"
@@ -37,8 +37,10 @@ def _line(name: str, positions: list[Position]) -> str:
     return f"{name} : {total:+.2f} USDT sur {len(positions)} position(s) terminée(s), {wins} gagnante(s)"
 
 
-def build(positions: list[Position], now: datetime, fee_rates_for: Callable[[Position], dict]) -> tuple[str, str]:
-    """(titre, corps) du rapport ; `positions` : toutes les positions (ouvertes et terminees)."""
+def build(positions: list[Position], now: datetime, fee_rates_for: Callable[[Position], dict],
+          channel: Callable[[Position], str] = channel_of) -> tuple[str, str]:
+    """(titre, corps) du rapport ; `positions` : toutes les positions (ouvertes et terminees) ;
+    `channel` : trader ou canal d'une position (performance.channel_resolver pour les anciennes)."""
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = now - timedelta(days=7)
     week = valued(closed_between(positions, week_start, now + timedelta(seconds=1)), fee_rates_for)
@@ -51,13 +53,14 @@ def build(positions: list[Position], now: datetime, fee_rates_for: Callable[[Pos
              f"Positions ouvertes : {len(open_positions)} ; capital engagé {committed:.2f} USDT ; "
              f"latent {latent:+.2f} USDT",
              f"Risque si tous les stops sont touchés : −{risk:.2f} USDT"]
-    groups = stats_by(week)
+    groups = stats_by(week, key=channel)
     if len(groups) >= 2:
         best, worst = groups[0], groups[-1]
-        lines.append(f"Meilleur canal (7 j) : {best.name} {best.net:+.2f} USDT ({best.positions} pos.)")
-        lines.append(f"Pire canal (7 j) : {worst.name} {worst.net:+.2f} USDT ({worst.positions} pos.)")
+        lines.append(f"Meilleur trader/canal (7 j) : {best.name} {best.net:+.2f} USDT ({best.positions} pos.)")
+        lines.append(f"Pire trader/canal (7 j) : {worst.name} {worst.net:+.2f} USDT ({worst.positions} pos.)")
     elif groups:
-        lines.append(f"Canal (7 j) : {groups[0].name} {groups[0].net:+.2f} USDT ({groups[0].positions} pos.)")
+        lines.append(f"Trader/canal (7 j) : {groups[0].name} {groups[0].net:+.2f} USDT "
+                     f"({groups[0].positions} pos.)")
     lines.append("Résultats frais compris (BNB au cours actuel) ; Binance Demo.")
     total_today = sum(p.pnl.realized for p in today)
     title = f"Rapport du {now.strftime('%d/%m')} — {total_today:+.2f} USDT aujourd'hui"

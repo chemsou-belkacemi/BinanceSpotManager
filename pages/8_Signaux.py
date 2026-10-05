@@ -161,7 +161,7 @@ with st.expander("Texte original"):
 st.write(f"Modèle : {TEMPLATES.get(parsed.template, parsed.template)} · Direction : {parsed.direction or 'inconnue'} · Plateforme : {parsed.exchange or 'non précisée'}")
 st.write({"Paire": parsed.symbol, "Entrées": parsed.entries, "TP": parsed.targets,
           "SL": parsed.stop, "Mention SL": parsed.stop_timeframe or "aucune",
-          "Canal": channel_name(row, preferences) or row["source"], source_date_label: source_date})
+          "Trader / canal": channel_name(row, preferences) or row["source"], source_date_label: source_date})
 if parsed.is_csi:
     # Contrat CSI : la fenêtre et l'écart sont recontrôlés par le worker avant l'achat.
     def _utc(stamp):

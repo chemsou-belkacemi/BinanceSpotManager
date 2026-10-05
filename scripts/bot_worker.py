@@ -577,13 +577,29 @@ class Worker:
                         prices[symbol] = None
                 return prices[symbol]
 
-            title, body = build(self.positions.list_all(), moment, lambda p: fee_rates(p, price_of))
+            title, body = build(self.positions.list_all(), moment, lambda p: fee_rates(p, price_of),
+                                channel=self._channel_resolver())
             self.notifications.notify(self.notifications.daily_report(title, body))
             self.events.append(EventType.DAILY_REPORT_SENT, title, level="INFO")
             self.daily_report.mark_sent(moment)
         except Exception:  # noqa: BLE001 - le rapport ne bloque jamais le suivi
             self._daily_report_retry_at = time.time() + 600
             logging.getLogger("bsm.worker").exception("Rapport quotidien non envoyé")
+
+    def _channel_resolver(self):
+        """Trader ou canal d'une position ; pour une position ouverte avant le suivi par canal, le nom
+        ecrit en tete du texte du signal (boite des signaux)."""
+        from binance_spot_manager.performance import channel_of, channel_resolver
+
+        if not hasattr(self, "signal_inbox"):
+            return channel_of
+        scope = account_scope(self.settings)
+
+        def raw_text(signal_id: str) -> str:
+            row = self.signal_inbox.get(scope, signal_id)
+            return str(row.get("raw") or "") if row else ""
+
+        return channel_resolver(raw_text)
 
     def _notify_finished(self, position) -> None:
         """Fin de position (gain ou perte) avec le PnL frais compris de la page History."""

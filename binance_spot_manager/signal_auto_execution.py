@@ -16,6 +16,7 @@ import time
 from . import performance, signal_routing
 from .csi_client import CsiUnavailable, GatePolicy, source_label
 from .fee_valuation import fee_rates
+from .trader_name import trader_of
 from .models import EventType
 from .notification_engine import Notification
 from .risk_engine import RiskLimits
@@ -55,12 +56,13 @@ def _iso_utc(timestamp: float) -> str:
 
 
 def channel_name(row, preferences) -> str:
-    """Canal d'origine d'un signal : nom relevé sur le message Telegram (canal transféré ou
-    conversation), sinon le nom déclaré pour l'identifiant du chat (« telegram <id> » à défaut)."""
-    origin = str(row.get("origin") or "").strip()
-    if not origin and row.get("source") == "telegram":
-        origin = source_label(row, preferences)
-    return origin
+    """Trader ou canal d'origine d'un signal : nom écrit en tête du texte, sinon celui relevé à la
+    réception (canal transféré ou conversation), sinon le nom déclaré pour l'identifiant du chat
+    (« telegram <id> » à défaut). Vaut aussi pour les lignes reçues avant le suivi par canal."""
+    name = trader_of(str(row.get("raw") or "")) or str(row.get("origin") or "").strip()
+    if not name and row.get("source") == "telegram":
+        name = source_label(row, preferences)
+    return name[:80]
 
 
 def entry_deviation_bps(price: float, entry_price: float) -> float:
@@ -417,8 +419,14 @@ class AutomaticSignalExecutor:
         min_trades = int(_bounded_number(preferences, "signal_channel_review_min_trades", 30, 10, 500))
         closed = [p for p in positions if not p.is_open]
         valued = performance.valued(closed, lambda p: fee_rates(p, prices.get))
-        detail = performance.losing_channel(valued, channel_name(row, preferences), min_trades=min_trades)
+        detail = performance.losing_channel(valued, channel_name(row, preferences), min_trades=min_trades,
+                                            key=performance.channel_resolver(self._raw_text))
         return [Reason("C_CHANNEL_LOSING", CONFIANCE, detail)] if detail else []
+
+    def _raw_text(self, signal_id):
+        """Texte d'une ligne de la boîte (positions ouvertes avant le suivi par canal)."""
+        row = self.inbox.get(self.scope, signal_id)
+        return str(row.get("raw") or "") if row else ""
 
     def _enqueue(self, row, payload, parsed, now, label, request_key, *, csi_detail=""):
         signal_id = row["id"]

@@ -8,6 +8,7 @@ import time
 import requests
 
 from .signal_inbox import CsiChannelRefused, SignalInbox
+from .trader_name import trader_of
 
 
 logger = logging.getLogger("bsm.telegram")
@@ -16,12 +17,16 @@ BACKOFF_SECONDS = (2, 5, 10, 30, 60)
 
 
 def origin_label(message) -> str:
-    """Nom du canal (ou de l'auteur) d'origine d'un message Telegram, pour le suivi par canal.
+    """Nom du trader ou du canal d'origine d'un message Telegram, pour le suivi par canal.
 
-    Message transféré : canal, groupe ou personne d'origine (forward_origin, ou anciens champs
-    forward_from_*). Sinon : la conversation elle-même (un canal ou un groupe autorisé). Un texte copié
-    par un relais sans transfert n'a que le nom de la conversation du relais.
+    D'abord le nom du trader écrit en tête du signal (trader_name.trader_of) : il survit à un relais
+    qui recopie le texte sans le transférer, et distingue les traders d'un même canal. Sinon, pour un
+    message transféré : canal, groupe ou personne d'origine (forward_origin, ou anciens champs
+    forward_from_*). Sinon : la conversation elle-même (un canal ou un groupe autorisé).
     """
+    trader = trader_of(message.get("text") or message.get("caption") or "")
+    if trader:
+        return trader[:80]
     origin = message.get("forward_origin") or {}
     kind = origin.get("type")
     name = ""
