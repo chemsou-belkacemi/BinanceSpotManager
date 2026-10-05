@@ -325,7 +325,7 @@ def test_oco_monitor_records_confirmed_tp_without_second_sell(price, initial_par
     worker.events = SimpleNamespace(append=lambda *args, **kwargs: emitted.append((args, kwargs)))
     worker.notifications = SimpleNamespace(
         tp_executed=lambda position, tp: "tp",
-        position_finished=lambda position: "finished",
+        position_finished=lambda position, **k: "finished",
         notify_position_event=lambda position, notice: {},
     )
 
@@ -380,7 +380,7 @@ def test_oco_monitor_records_confirmed_stop_and_sends_notice(price):
     worker.events = SimpleNamespace(append=lambda *args, **kwargs: events.append(args[0]))
     worker.notifications = SimpleNamespace(
         sl_executed=lambda current: "sl",
-        position_finished=lambda current: "finished",
+        position_finished=lambda current, **k: "finished",
         notify_position_event=lambda current, notice: notices.append(notice),
     )
 

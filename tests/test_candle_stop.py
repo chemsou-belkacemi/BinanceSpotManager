@@ -179,7 +179,7 @@ def worker_for(position, settings, rules, events, tmp_path, monkeypatch, prefere
     sent = []
     worker.notifications = SimpleNamespace(
         candle_stop_exit=lambda *a: "candle_exit", stop_crossed_paused=lambda *a: "paused",
-        tp_executed=lambda *a: "tp", position_finished=lambda *a: "finished",
+        tp_executed=lambda *a: "tp", position_finished=lambda *a, **k: "finished",
         notify_position_event=lambda position, notice: sent.append(notice),
     )
     fake.klines = [kline(T0, 81000), kline(T0 + QUARTER, 79000)]

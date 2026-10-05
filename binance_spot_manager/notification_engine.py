@@ -359,6 +359,11 @@ class NotificationEngine:
             ) / max(position.metrics.break_even_with_fees, 1e-9) < 0.001:
                 sl_label += "\nBreak-even + frais (estimation)"
 
+        # Les frais payes dans un troisieme actif (BNB) ne sont pas deduits de ce gain : le dire.
+        third_asset_fees = any(
+            fee.amount > 0 and fee.asset.upper() not in {position.base_asset.upper(), position.quote_asset.upper()}
+            for fee in tp.commissions
+        )
         return Notification(
             event="TP_EXECUTED",
             title=f"TP{tp.sequence_number} atteint — {position.symbol}",
@@ -366,6 +371,7 @@ class NotificationEngine:
                 f"Prix : {tp.average_fill_price or tp.target_price}\n"
                 f"Vendu : {tp.sell_percent:.0f} %\n"
                 f"Gain realise : {tp.gain_realized:+.2f} {position.quote_asset}"
+                f"{' (hors frais BNB)' if third_asset_fees else ''}"
                 f"{sl_label}\n"
                 f"Position restante : {remaining_percent:.0f} %"
             ),
@@ -451,17 +457,35 @@ class NotificationEngine:
             symbol=position.symbol,
         )
 
-    def position_finished(self, position: Position) -> Notification:
+    def position_finished(
+        self, position: Position, *, fee_rates: Optional[dict[str, float]] = None
+    ) -> Notification:
+        """Fin de position, gagnante OU perdante, avec le meme PnL que la page History : les frais
+        payes en BNB sont valorises au cours fourni (`fee_rates`) sur une copie de la position."""
+        from .fee_valuation import external_fee_assets
+        from .position_engine import recompute_position
+
+        shown = position
+        if fee_rates:
+            shown = position.model_copy(deep=True)
+            recompute_position(shown, fee_rates=fee_rates)
+        third = sorted(external_fee_assets(position))
+        missing = [asset for asset in third if not fee_rates or asset not in fee_rates]
+        fees_note = ""
+        if third and not missing:
+            fees_note = f" (dont {', '.join(third)} au cours actuel)"
+        elif missing:
+            fees_note = f" (hors frais {', '.join(missing)} : cours indisponible)"
+        result = shown.pnl.realized
+        label = "Gain" if result > 0 else "Perte" if result < 0 else "Resultat nul"
         return Notification(
             event="POSITION_FINISHED",
-            title=f"Position terminee — {position.symbol}",
+            title=f"Position terminee — {position.symbol} — {label} {result:+.2f} {position.quote_asset}",
             body=(
                 f"Raison : {position.close_reason.value if position.close_reason else '-'}\n"
-                f"PnL realise : {position.pnl.realized:+.2f} {position.quote_asset}\n"
-                f"Frais payes : {position.pnl.fees_paid:.2f}\n"
-                f"TP atteints : "
-                f"{len([t for t in position.take_profits if t.status.value == 'EXECUTED'])}"
-                f"/{len(position.take_profits)}"
+                f"PnL realise, frais compris : {result:+.2f} {position.quote_asset}\n"
+                f"Frais payes : {shown.pnl.fees_paid:.2f} {position.quote_asset}{fees_note}\n"
+                f"TP atteints : {len(position.hit_tps)}/{len(position.take_profits)}"
             ),
             position_id=position.position_id,
             symbol=position.symbol,

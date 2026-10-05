@@ -448,8 +448,11 @@ class Worker:
     def _process_position(self, position, price: Optional[float]) -> None:
         """Un seul cycle par position ; aucune relance immediate en cas d'erreur."""
         from binance_spot_manager.market_close import poll_market_close
+        was_open = position.is_open
         if position.status.value == "CLOSING" and poll_market_close(position, self.execution):
             self.positions.save(position)
+            if was_open and not position.is_open:
+                self._notify_finished(position)
             return
         if position.manual_exits and position.automation.paused:
             return
@@ -460,6 +463,7 @@ class Worker:
         if price is None:
             return
 
+        old_stop = position.stop_loss.resolved_price
         outcome = self.automation.run_cycle(position, price)
         self.positions.save(position)
         # Les evenements de trading partent meme si le cycle signale aussi une erreur.
@@ -475,20 +479,28 @@ class Worker:
         if outcome.sl_moved_to is not None and position.notifications.on_sl_moved:
             self.notifications.notify_position_event(
                 position,
-                self.notifications.sl_moved(
-                    position, position.stop_loss.resolved_price or 0.0, outcome.sl_moved_to
-                ),
+                self.notifications.sl_moved(position, old_stop or 0.0, outcome.sl_moved_to),
             )
         if outcome.position_finished:
-            self.notifications.notify_position_event(
-                position, self.notifications.position_finished(position)
-            )
+            self._notify_finished(position)
         if outcome.candle_stop_hit is not None and position.is_open:
             self._exit_on_candle_close(position, outcome.candle_stop_hit)
         elif outcome.stop_crossed_at is not None and position.is_open:
             self._exit_on_crossed_stop(position, outcome.stop_crossed_at)
         if outcome.errors:
             raise RuntimeError(" ; ".join(outcome.errors))
+
+    def _notify_finished(self, position) -> None:
+        """Fin de position (gain ou perte) avec le PnL frais compris de la page History."""
+        from binance_spot_manager.fee_valuation import fee_rates
+
+        try:
+            rates = fee_rates(position, self.client.get_price)
+        except Exception:  # noqa: BLE001 - message envoye quand meme, frais BNB signales non valorises
+            rates = {}
+        self.notifications.notify_position_event(
+            position, self.notifications.position_finished(position, fee_rates=rates)
+        )
 
     def _exit_on_crossed_stop(self, position, stop_price: float) -> None:
         """Binance refuse le SL car le prix a deja franchi le stop : sortir ou mettre en pause.
@@ -534,6 +546,8 @@ class Worker:
                 position, stop_price, price, result.get("message", ""),
             ),
         )
+        if not position.is_open:
+            self._notify_finished(position)
 
     def _exit_on_candle_close(self, position, breach) -> None:
         """Une bougie a cloture au SL ou dessous : vendre au marche la quantite de cette position.
@@ -571,6 +585,8 @@ class Worker:
                 position, stop_price, interval, breach.close_price, result.get("message", ""),
             ),
         )
+        if not position.is_open:
+            self._notify_finished(position)
 
     def _pause_on_crossed_stop(self, position, stop_price: float, reason: str) -> None:
         position.automation.paused = True
@@ -710,9 +726,7 @@ class Worker:
                     f"Position {position.symbol} terminée par OCO",
                     position_id=position.position_id, symbol=position.symbol,
                 )
-                self.notifications.notify_position_event(
-                    position, self.notifications.position_finished(position)
-                )
+                self._notify_finished(position)
             if oco.status == "PARTIAL_TERMINAL":
                 position.sync_status = SyncStatus.DESYNC_DETECTED
             return
@@ -737,12 +751,26 @@ class Worker:
                 continue
 
             if report.has_desync:
-                self.notifications.notify_position_event(
-                    position,
-                    self.notifications.desync(
-                        position, [f.message for f in report.findings]
-                    ),
-                )
+                # Un achat execute, constate a la relecture des ordres, est le chemin NORMAL du worker :
+                # annonce « Entry N remplie » (prix, quantite, montant, prochain TP, SL), pas
+                # « Desynchronisation ». Les autres constats restent des desynchronisations.
+                others = []
+                fills_announced = False
+                for finding in report.findings:
+                    entry = next((e for e in position.entries if e.entry_id == finding.target_id), None)
+                    if finding.kind == "FILL_APPLIED" and entry is not None:
+                        if not fills_announced:
+                            recompute_position(position)
+                            fills_announced = True
+                        self.notifications.notify_position_event(
+                            position, self.notifications.entry_filled(position, entry)
+                        )
+                    else:
+                        others.append(finding.message)
+                if others:
+                    self.notifications.notify_position_event(
+                        position, self.notifications.desync(position, others)
+                    )
             if report.has_desync or position.sync_status != previous_sync_status:
                 self.positions.save(position)
 

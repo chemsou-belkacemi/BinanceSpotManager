@@ -538,6 +538,8 @@ class AutomationEngine:
             # Une Entry non remplie n'est pas une position deja vendue.
             if position.filled_entries and not position.open_entries:
                 self._finish_if_fully_sold(position, result)
+                if not result.position_finished:
+                    self._finish_unsellable_remainder(position, result, current_price)
             return
 
         if next_tp.status is TPStatus.SUBMITTED:
@@ -620,8 +622,18 @@ class AutomationEngine:
                 tp_id=next_tp.tp_id,
             )
 
+        if position.metrics.net_qty <= QTY_EPSILON and not position.hit_tps:
+            # Prix au TP alors que l'ordre d'achat attend encore son execution : rien a vendre. Ce n'est
+            # pas une erreur (avant : TP marque FAILED et une erreur a chaque cycle, ~2 400 en 2 h sur
+            # ZKPUSDT le 2026-10-05). Le TP reste declenche ; l'achat reste ouvert sauf politique
+            # d'annulation au premier TP (signaux CSI).
+            self._tp_reached_before_fill(position, next_tp, result)
+            return
+
         quantity = self._sell_quantity(position, next_tp)
         if self._merge_below_minimum(position, next_tp, quantity, current_price, result):
+            return
+        if quantity <= 0 and self._finish_unsellable_remainder(position, result, current_price):
             return
         if quantity <= 0:
             next_tp.status = TPStatus.FAILED
@@ -845,6 +857,8 @@ class AutomationEngine:
         quantity = float(self._rules(position).round_qty(position.metrics.net_qty))
         if quantity <= 0:
             return
+        if self._finish_unsellable_remainder(position, result, position.metrics.current_price):
+            return
         if not sl.resolved_price:
             result.errors.append("SL non recree : prix de protection absent")
             return
@@ -866,6 +880,50 @@ class AutomationEngine:
                 symbol=position.symbol,
                 level="CRITICAL",
             )
+
+    def _finish_unsellable_remainder(
+        self, position: Position, result: CycleResult, price: Optional[float]
+    ) -> bool:
+        """Reliquat apres des TP, sous les minimums Binance (minQty ou minNotional) : ni vendable ni
+        protegeable par un SL. La position est terminee (ALL_TP_HIT) et le reliquat note une fois, au
+        lieu d'une erreur a chaque cycle (~70 erreurs « NOTIONAL » sur FETUSDT le 2026-10-04).
+
+        Seulement apres au moins un TP, sans achat encore ouvert et avec un prix connu.
+        """
+        if not position.is_open or not position.hit_tps or position.open_entries:
+            return False
+        reference = price or position.metrics.current_price or 0.0
+        if reference <= 0:
+            return False
+        rules = self._rules(position)
+        quantity = float(rules.round_qty(position.metrics.net_qty))
+        min_qty = float(rules.market_min_qty or rules.min_qty)
+        min_notional = float(rules.min_notional)
+        sellable = quantity > 0 and quantity >= min_qty and (min_notional <= 0 or quantity * reference >= min_notional)
+        if sellable:
+            return False
+        if position.stop_loss.status is SLStatus.ACTIVE and (
+            position.stop_loss.order_id or position.stop_loss.client_order_id
+        ):
+            self.execution.cancel_order(
+                position.symbol,
+                order_id=position.stop_loss.order_id,
+                client_order_id=position.stop_loss.client_order_id,
+            )
+        position.stop_loss.status = SLStatus.CANCELED
+        value = position.metrics.net_qty * reference
+        message = (f"Reliquat {position.metrics.net_qty:g} {position.base_asset} (≈ {value:.2f} "
+                   f"{position.quote_asset}) sous les minimums Binance : position terminee, reliquat "
+                   f"laisse sur le compte")
+        position.log(EventType.POSITION_UPDATED, message, remaining=position.metrics.net_qty)
+        self.events.append(
+            EventType.POSITION_FINISHED, f"{position.symbol} : {message}",
+            position_id=position.position_id, symbol=position.symbol,
+        )
+        finish_position(position, CloseReason.ALL_TP_HIT)
+        result.position_finished = True
+        result.actions.append(message)
+        return True
 
     def _is_triggered(self, tp: TakeProfit, current_price: float) -> bool:
         tolerance = tp.target_price * (self.config.tp_trigger_tolerance_percent / 100.0)

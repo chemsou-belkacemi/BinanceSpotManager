@@ -17,6 +17,7 @@ from .binance_client import BinanceError, BinanceSpotClient
 from .bot_process_manager import BotProcessManager, WorkerStatus
 from .config import Settings, get_settings
 from .event_store import EventStore
+from .fee_valuation import external_fee_assets, fee_rates
 from .models import (
     BotRuntime,
     Position,
@@ -388,7 +389,7 @@ class DashboardService:
                     entries_total=len(position.entries),
                     entries_filled=len(position.filled_entries),
                     tps_total=len(position.take_profits),
-                    tps_executed=len(position.executed_tps),
+                    tps_executed=len(position.hit_tps),
                     capital_committed=position.metrics.capital_committed,
                     has_desync=position.sync_status
                     not in {SyncStatus.SYNCED, SyncStatus.RECONCILED},
@@ -428,36 +429,11 @@ class DashboardService:
 
     @staticmethod
     def _external_fee_assets(position: Position) -> set[str]:
-        items = [*position.entries, *position.take_profits, position.stop_loss,
-                 *position.manual_exits]
-        return {
-            fee.asset.upper() for item in items for fee in item.commissions
-            if fee.amount > 0 and fee.asset.upper() not in {
-                position.base_asset.upper(), position.quote_asset.upper()
-            }
-        }
+        return external_fee_assets(position)
 
     def fee_rates(self, position: Position) -> dict[str, float]:
         """Current Binance rates for third-asset commissions, in position quote."""
-        quote = position.quote_asset.upper()
-        rates: dict[str, float] = {}
-        for asset in self._external_fee_assets(position):
-            try:
-                direct = self.current_price(f"{asset}{quote}")
-            except Exception as exc:  # advisory display must not break the page
-                logger.warning("Taux de frais %s/%s indisponible : %s", asset, quote, exc)
-                direct = None
-            if direct is not None and direct > 0:
-                rates[asset] = direct
-                continue
-            try:
-                inverse = self.current_price(f"{quote}{asset}")
-            except Exception as exc:
-                logger.warning("Taux de frais %s/%s indisponible : %s", quote, asset, exc)
-                inverse = None
-            if inverse is not None and inverse > 0:
-                rates[asset] = 1.0 / inverse
-        return rates
+        return fee_rates(position, self.current_price)
 
     def prices(self, symbols: list[str]) -> dict[str, float]:
         if not symbols:
