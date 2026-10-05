@@ -67,6 +67,15 @@ BODY = "\n#SOL/USDT\n📍 Entry1: 150\n🎯 TP1: 160\n🛑 Stop: 140"
     ("MOHAMED BEN - New Signal\n", "MOHAMED BEN"),
     ("AL-MAHWASHI CRYPTO - VIP\n", "AL-MAHWASHI CRYPTO - VIP"),
     ("Suhaib AlMashhadani - Shark Pattern\n", "Suhaib AlMashhadani"),
+    # Troisième vérification : durcissements facultatifs.
+    ("2 Main Traders\n", "2 Main Traders"),                                        # « Main » n'est pas « mai »
+    ("👑 HAMZAWY 👑\n(#SOL)\n1. #SOL\nt.me/legend\n", "HAMZAWY"),
+    ("👑 HAMZAWY 👑\nMonday\nOctober 5\n2PM UTC\n", "HAMZAWY"),
+    ("👑 HAMZAWY 👑\nSOL\nBTC Analysis\nMid-Term\nLong Term Hold\n", "HAMZAWY"),
+    ("HAMZAWY - Daily Chart\n", "HAMZAWY"),
+    ("SUHAIB ALMASHHADANI SIGNAL - Gartley\n", "SUHAIB ALMASHHADANI"),
+    ("Suhaib AlMashhadani: Bat Pattern\n", "Suhaib AlMashhadani"),
+    ("المحلل: حمزاوي\n", "حمزاوي"),
 ])
 def test_the_trader_is_read_from_the_header(header, expected):
     assert trader_of(header + BODY) == expected
@@ -84,6 +93,8 @@ def test_the_trader_is_read_from_the_header(header, expected):
     "CRYPTO VIP" + BODY,
     "IN CRYPTO" + BODY,
     "توصيات كريبتو" + BODY,
+    "Note: New Signal" + BODY,
+    "Good morning traders\nVIP SIGNAL" + BODY,                                   # salutation : pas un nom
 ])
 def test_no_name_is_invented(text):
     assert trader_of(text) == ""
