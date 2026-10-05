@@ -47,6 +47,35 @@ BODY = "\n#SOL/USDT\n📍 Entry1: 150\n🎯 TP1: 160\n🛑 Stop: 140"
     ("👑 ALAFIFY TP TRACKING 👑\n", "ALAFIFY"),
     ("معاينة الصفقة:\n👑 Abo yaseein 👑\n", "Abo yaseein"),
     ("Ph. Suhaib AlMashhadani\n───────────────────\n", "Suhaib AlMashhadani"),
+    # Relecture du 2026-10-05 : donnée, date ou mot-dièse entre le nom et la paire, particule détachée, prénom.
+    ("👑 HAMZAWY 👑\nType: Spot\nMarket: Spot\n", "HAMZAWY"),
+    ("👑 HAMZAWY 👑\n05/10/2026 14:00\n", "HAMZAWY"),
+    ("👑 HAMZAWY 👑\n#SOL\n", "HAMZAWY"),
+    ("👑 HAMZAWY 👑\nإشارة شراء\n", "HAMZAWY"),
+    ("👑 AL - MAHWASHI VIP 👑\n", "AL-MAHWASHI VIP"),
+    ("👑 عبد الرحمن 👑\nبسم الله الرحمن الرحيم\n", "عبد الرحمن"),
+    ("Trader: Abdallah Al-Abyed\n", "Abdallah Al-Abyed"),
+    # Deuxième relecture : formule vocalisée, « NOM : événement », autres séparateurs, dates, $SOL, descriptions.
+    ("👑 HAMZAWY 👑\nبسم اللّه\n", "HAMZAWY"),
+    ("👑 HAMZAWY 👑\nتوكّلت على الله\n", "HAMZAWY"),
+    ("👑 HAMZAWY 👑\nبسـم الله\n", "HAMZAWY"),
+    ("LEGEND TRADING: NEW SIGNAL\n", "LEGEND TRADING"),
+    ("ALAFIFY : Spot Trade\n", "ALAFIFY"),
+    ("👑 HAMZAWY 👑\nType = Spot\nType | Spot\nType → Spot\nRisk Level - High\n", "HAMZAWY"),
+    ("👑 HAMZAWY 👑\n05-10\n5/10\n14.00\n14h00\n5 Oct 2026\n", "HAMZAWY"),
+    ("👑 HAMZAWY 👑\n$SOL\n*#SOL*\n• #SOL\n", "HAMZAWY"),
+    ("MOHAMED BEN - New Signal\n", "MOHAMED BEN"),
+    ("AL-MAHWASHI CRYPTO - VIP\n", "AL-MAHWASHI CRYPTO - VIP"),
+    ("Suhaib AlMashhadani - Shark Pattern\n", "Suhaib AlMashhadani"),
+    # Troisième vérification : durcissements facultatifs.
+    ("2 Main Traders\n", "2 Main Traders"),                                        # « Main » n'est pas « mai »
+    ("👑 HAMZAWY 👑\n(#SOL)\n1. #SOL\nt.me/legend\n", "HAMZAWY"),
+    ("👑 HAMZAWY 👑\nMonday\nOctober 5\n2PM UTC\n", "HAMZAWY"),
+    ("👑 HAMZAWY 👑\nSOL\nBTC Analysis\nMid-Term\nLong Term Hold\n", "HAMZAWY"),
+    ("HAMZAWY - Daily Chart\n", "HAMZAWY"),
+    ("SUHAIB ALMASHHADANI SIGNAL - Gartley\n", "SUHAIB ALMASHHADANI"),
+    ("Suhaib AlMashhadani: Bat Pattern\n", "Suhaib AlMashhadani"),
+    ("المحلل: حمزاوي\n", "حمزاوي"),
 ])
 def test_the_trader_is_read_from_the_header(header, expected):
     assert trader_of(header + BODY) == expected
@@ -60,18 +89,25 @@ def test_the_trader_is_read_from_the_header(header, expected):
     "✨ بسم الله توكلت على الله ✨" + BODY,
     "Nous avons une très belle opportunité aujourd'hui sur le marché, regardez bien ce graphique" + BODY,
     "",
+    "🚨 VIP SIGNAL 🚨" + BODY,                                                  # mots banals seuls : personne
+    "CRYPTO VIP" + BODY,
+    "IN CRYPTO" + BODY,
+    "توصيات كريبتو" + BODY,
+    "Note: New Signal" + BODY,
+    "Good morning traders\nVIP SIGNAL" + BODY,                                   # salutation : pas un nom
 ])
 def test_no_name_is_invented(text):
     assert trader_of(text) == ""
 
 
 def test_spelling_variants_share_one_key():
-    assert len({name_key(n) for n in ("Suhaib AlMashhadani", "SUHAIB ALMASHHADANI", "Suhaib Al-Mashhadani",
-                                      "Trader/ Suhaib AlMashhadani")}) == 1
+    assert len({name_key(n) for n in ("Suhaib AlMashhadani", "SUHAIB ALMASHHADANI", "Suhaib Al-Mashhadani")}) == 1
     assert len({name_key(n) for n in ("Abo yaseein", "ABO YASEEIN", "Aboyaseein")}) == 1
-    assert name_key("AL-MAHWASHI CRYPTO TRADING") == name_key("AL-MAHWASHI CRYPTO") == name_key("AL- MAHWASHI")
+    assert name_key("AL-MAHWASHI CRYPTO TRADING") == name_key("AL-MAHWASHI CRYPTO") == "ALMAHWASHI CRYPTO"  # alias
     assert name_key("AL-MAHWASHI VIP") != name_key("AL-MAHWASHI CRYPTO")           # VIP reste distinct
     assert name_key("Légende") == name_key("LEGENDE")
+    # forme stricte : aucun mot retiré, deux canaux qui partagent un mot restent distincts
+    assert len({name_key(n) for n in ("CRYPTO LEGEND", "LEGEND TRADING", "Legend Trader")}) == 3
 
 
 def test_the_written_trader_wins_over_the_forwarded_channel_and_the_relay():
