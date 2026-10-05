@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
-from .models import BotRuntime, Position, SLStatus, SLTrigger, WorkerState
+from .models import BotRuntime, Position, SLStatus, WorkerState
 
 logger = logging.getLogger("bsm.watchdog")
 
@@ -44,9 +44,10 @@ class Exposure:
 
 
 def stop_on_binance(position: Position) -> bool:
-    """Stop au toucher, actif, avec un ordre chez Binance : il protège même si le worker est arrêté."""
+    """Ordre stop actif chez Binance (SL au toucher, ou stop de secours d'un SL à la clôture) : il protège même si
+    le worker est arrêté."""
     sl = position.stop_loss
-    return sl.trigger is SLTrigger.TOUCH and sl.status is SLStatus.ACTIVE and bool(sl.order_id)
+    return sl.status is SLStatus.ACTIVE and bool(sl.order_id)
 
 
 def exposure(positions: Iterable[Position]) -> Exposure:

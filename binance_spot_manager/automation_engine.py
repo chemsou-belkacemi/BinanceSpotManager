@@ -241,10 +241,15 @@ class AutomationEngine:
         if sl.status is SLStatus.NONE:
             return
 
-        # SL a la cloture de bougie : aucun ordre stop Binance (il partirait au toucher).
-        if sl.trigger is SLTrigger.CANDLE_CLOSE and not sl.order_id and not sl.client_order_id:
+        # SL a la cloture de bougie : surveille par le worker. Sans stop de secours, aucun ordre stop Binance (il
+        # partirait au toucher). Avec un stop de secours (backup_percent), un ordre Binance plus large protege aussi
+        # quand le worker est arrete : la suite de cette fonction le pose et le verifie comme un SL ordinaire.
+        if sl.trigger is SLTrigger.CANDLE_CLOSE:
             self._check_candle_close(position, result)
-            return
+            if result.candle_stop_hit is not None:
+                return
+            if sl.backup_percent <= 0 and not sl.order_id and not sl.client_order_id:
+                return
 
         if sl.status is SLStatus.CANCELED and any(
             tp.status is TPStatus.SUBMITTED for tp in position.take_profits
@@ -328,21 +333,22 @@ class AutomationEngine:
                 next_tp and next_tp.target_price
                 and self._is_triggered(next_tp, current_price)
             )
-            if status is not None and sl.resolved_price and not tp_due:
+            stop_price = sl.binance_stop_price()
+            if status is not None and stop_price and not tp_due:
                 rules = self._rules(position)
                 desired_qty = float(rules.round_qty(remaining))
                 active_qty = float(status.raw.get("origQty") or sl.quantity or 0)
                 if desired_qty >= float(rules.min_qty) and abs(active_qty - desired_qty) >= float(rules.step_size) / 2:
                     adjusted = self.execution.move_stop_loss(
                         position,
-                        new_stop_price=sl.resolved_price,
+                        new_stop_price=stop_price,
                         quantity=desired_qty,
                     )
                     if adjusted.success:
                         result.actions.append(f"SL ajuste a {desired_qty} {position.base_asset}")
                     else:
                         result.errors.append(f"SL non ajuste : {adjusted.error}")
-                        self._note_crossed_stop(result, adjusted, sl.resolved_price)
+                        self._note_crossed_stop(result, adjusted, stop_price)
                     return
             # L'ordre vit toujours et n'est pas rempli : la protection est en
             # place. On sort ici — sans ce retour, le bloc suivant recreerait un
@@ -373,22 +379,25 @@ class AutomationEngine:
         # 4. Protection manquante alors qu'il reste de la quantite : on recree
         #    — mais jamais sous minQty, ou l'ordre serait refuse par Binance.
         min_qty = float(self._rules(position).min_qty)
+        stop_price = sl.binance_stop_price()
         if (
             remaining >= min_qty
             and sl.status in {SLStatus.PLANNED, SLStatus.FAILED, SLStatus.CANCELED}
-            and sl.resolved_price
+            and stop_price
         ):
             created = self.execution.place_stop_loss(
                 position,
-                stop_price=sl.resolved_price,
+                stop_price=stop_price,
                 quantity=remaining,
                 attempt=sl.replace_count,
             )
             if created.success:
-                result.actions.append(f"SL recree @ {sl.resolved_price}")
+                result.actions.append(f"SL recree @ {stop_price}" if sl.trigger is SLTrigger.TOUCH
+                                      else f"Stop de secours pose @ {stop_price} (cloture {sl.candle_interval} "
+                                           f"surveillee a {sl.resolved_price})")
             else:
                 result.errors.append(f"SL non recree : {created.error}")
-                self._note_crossed_stop(result, created, sl.resolved_price)
+                self._note_crossed_stop(result, created, stop_price)
 
     def _check_candle_close(self, position: Position, result: CycleResult) -> None:
         """Lit les bougies cloturees depuis la derniere lecture ; une cloture au SL ou dessous
@@ -866,12 +875,13 @@ class AutomationEngine:
             return
         if self._finish_unsellable_remainder(position, result, position.metrics.current_price):
             return
-        if not sl.resolved_price:
+        stop_price = sl.binance_stop_price()
+        if not stop_price:
             result.errors.append("SL non recree : prix de protection absent")
             return
         restored = self.execution.place_stop_loss(
             position,
-            stop_price=sl.resolved_price,
+            stop_price=stop_price,
             quantity=quantity,
             attempt=sl.replace_count,
         )
@@ -879,7 +889,7 @@ class AutomationEngine:
             result.actions.append("SL restaure apres tentative de TP")
         else:
             result.errors.append(f"SL non restaure apres TP : {restored.error}")
-            self._note_crossed_stop(result, restored, sl.resolved_price)
+            self._note_crossed_stop(result, restored, stop_price)
             self.events.append(
                 EventType.ERROR,
                 f"SL non restaure apres TP {position.symbol} : {restored.error}",
@@ -1051,8 +1061,12 @@ class AutomationEngine:
             # Le SL deplace devient un stop au prix sur Binance ; sans regle
             # (NO_CHANGE), il reste a la cloture de bougie et n'arrive jamais ici.
             sl = position.stop_loss
+            backup_live = sl.status is SLStatus.ACTIVE and bool(sl.order_id or sl.client_order_id)
             sl.trigger, sl.candle_interval, sl.candle_checked_until = SLTrigger.TOUCH, "", None
-            sl.status = SLStatus.CANCELED  # _restore_stop_loss le pose aussitot
+            if not backup_live:
+                sl.status = SLStatus.CANCELED  # _restore_stop_loss le pose aussitot
+            # Sinon le stop de secours encore actif chez Binance est REMPLACE plus bas (move_stop_loss : annulation
+            # confirmee puis nouvel ordre) : jamais deux ordres stop pour la meme quantite.
             result.actions.append(f"SL clôture de bougie remplacé par un stop au prix {new_price}")
             position.log(
                 EventType.SL_MOVED,

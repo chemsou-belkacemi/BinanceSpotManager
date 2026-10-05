@@ -65,6 +65,15 @@ def channel_name(row, preferences) -> str:
     return name[:80]
 
 
+#: Stop de secours chez Binance pour un SL à la clôture de bougie (Settings → Signaux), en % sous le niveau.
+CANDLE_BACKUP_PERCENT = 3.0
+
+
+def candle_backup_percent(preferences) -> float:
+    """Écart du stop de secours réglé (0 : aucun ordre Binance pour un SL à la clôture), borné à 0-20 %."""
+    return float(_bounded_number(preferences, "signal_candle_backup_percent", CANDLE_BACKUP_PERCENT, 0, 20))
+
+
 #: Filtre de liquidité (Settings → Signaux) : réglages par défaut. Sur 24 paires des signaux du propriétaire
 #: (2026-10-05), le volume 24 h va de 0,2 à 108 M USDT et l'écart achat/vente reste sous 0,3 %.
 LIQUIDITY_MIN_VOLUME_USDT = 500_000.0
@@ -403,6 +412,7 @@ class AutomaticSignalExecutor:
                 sl_after_tp=signal_sl_after_tp(preferences.get("signal_sl_after_tp")),
                 cancel_entry_if_tp1_first=bool(preferences.get("signal_cancel_entry_if_tp1_first", False)),
                 source_name=channel_name(row, preferences),
+                candle_backup_percent=candle_backup_percent(preferences),
                 touch_stop=bool(policy.touch_stop
                                 or signal_routing.unknown_candle_stop(parsed.stop_timeframe)),
                 trail_stop=bool(preferences.get(TRAIL_STOP_KEY, True)),
