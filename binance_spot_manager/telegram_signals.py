@@ -60,11 +60,22 @@ def chat_allowlist(text):
     return {int(value) for value in values}
 
 
+def send_reply(session, token, chat_id, text):
+    """Réponse à une commande du propriétaire ; une panne est journalisée sans le jeton, jamais levée."""
+    try:
+        (session or requests).post(f"https://api.telegram.org/bot{token}/sendMessage",
+                                   data={"chat_id": chat_id, "text": text[:3500]}, timeout=10)
+    except requests.RequestException:
+        logger.warning("Réponse Telegram non envoyée (détails sensibles masqués)")
+
+
 def import_telegram(
     token, allowed_chats, inbox, scope, *, session=None, poll_timeout=0,
-    request_timeout=None,
+    request_timeout=None, commands=None,
 ):
-    if not token or not allowed_chats:
+    """Relève les messages : signaux des conversations autorisées, et commandes du propriétaire si `commands`
+    (telegram_commands.TelegramCommands) est fourni ; une commande n'est jamais enregistrée comme signal."""
+    if not token or (not allowed_chats and commands is None):
         raise ValueError("Token et conversations autorisées requis ; réception désactivée.")
     poll_timeout = max(0, min(int(poll_timeout), 50))
     request_timeout = request_timeout or (3, max(5, poll_timeout + 5))
@@ -94,6 +105,12 @@ def import_telegram(
     received = []
     for update in sorted(updates, key=lambda item: item["update_id"]):
         message = next((update[k] for k in ("message", "channel_post", "edited_message", "edited_channel_post") if k in update), {})
+        if commands is not None and message:
+            reply = commands.handle(message, edited="edited_message" in update or "edited_channel_post" in update)
+            if reply:
+                send_reply(session, token, message["chat"]["id"], reply)
+                inbox.advance(bot, int(update["update_id"]) + 1)
+                continue
         chat = message.get("chat", {}).get("id")
         raw = message.get("text") or message.get("caption")
         if chat in allowed_chats and raw:
@@ -117,9 +134,11 @@ class TelegramSignalPoller:
 
     def __init__(
         self, token, scope, preferences_loader, *, inbox=None, session=None,
-        poll_timeout=POLL_TIMEOUT_SECONDS, pause_requested=None, clock=time.time,
+        poll_timeout=POLL_TIMEOUT_SECONDS, pause_requested=None, clock=time.time, commands=None,
     ):
         self.token = token
+        #: Commandes du propriétaire (/pause, /reprise, /statut), lues par ce même lecteur getUpdates.
+        self.commands = commands
         self.scope = scope
         self.preferences_loader = preferences_loader
         self.inbox = inbox or SignalInbox()
@@ -173,20 +192,22 @@ class TelegramSignalPoller:
         preferences = preferences if isinstance(preferences, dict) else {}
         enabled = bool(preferences.get("signal_telegram_enabled", False))
         automatic = bool(preferences.get("signal_telegram_auto_enabled", False))
-        if not enabled:
+        commands = self.commands if self.commands is not None and self.commands.owner() is not None else None
+        if not enabled and commands is None:
             self._update(state="DISABLED", last_error="")
             return []
-        if not automatic:
+        if not automatic and commands is None:
             self._update(state="MANUAL", last_error="")
             return []
         if not self.token:
             raise ValueError("Token Telegram absent de la configuration actuelle.")
-        chats = chat_allowlist(preferences.get("signal_telegram_chats", ""))
+        # Signaux seulement en relève automatique ; sinon, ce lecteur ne sert qu'aux commandes du propriétaire.
+        chats = chat_allowlist(preferences.get("signal_telegram_chats", "")) if enabled and automatic else set()
         self._update(state="POLLING", running=True)
         items = import_telegram(
             self.token, chats, self.inbox, self.scope, session=self.session,
             poll_timeout=self.poll_timeout,
-            request_timeout=(3, self.poll_timeout + 5),
+            request_timeout=(3, self.poll_timeout + 5), commands=commands,
         )
         now = self.clock()
         update = {

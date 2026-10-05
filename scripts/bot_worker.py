@@ -70,6 +70,7 @@ from binance_spot_manager.signal_drop import SignalDropImporter  # noqa: E402
 from binance_spot_manager.signal_feedback import SignalFeedbackWriter  # noqa: E402
 from binance_spot_manager.signal_inbox import SignalInbox  # noqa: E402
 from binance_spot_manager.symbol_rules import SymbolRulesCache  # noqa: E402
+from binance_spot_manager.telegram_commands import ManualPause, TelegramCommands  # noqa: E402
 from binance_spot_manager.telegram_signals import TelegramSignalPoller  # noqa: E402
 from binance_spot_manager.command_store import CommandStore, account_scope
 from binance_spot_manager.command_processor import CommandProcessor
@@ -150,6 +151,8 @@ class Worker:
         self.licence_gate = LicenceGate()
         # Perte maximale du jour : même effet que la licence (nouvelles entrées refusées jusqu'à 00:00 UTC).
         self.daily_guard = DailyLossGuard(lambda: get_settings_store().load())
+        # Pause manuelle (commande Telegram /pause) : nouvelles entrées refusées jusqu'à /reprise.
+        self.manual_pause = ManualPause()
         self.command_processor = CommandProcessor(
             self.commands, self.positions, self.execution, risk_service.risk_limits,
             entry_gate=self._entry_refusal,
@@ -163,6 +166,8 @@ class Worker:
             lambda: get_settings_store().load(),
             inbox=self.signal_inbox,
             pause_requested=self._stop_requested,
+            commands=TelegramCommands(lambda: get_settings_store().load(), self.settings.telegram_chat_id,
+                                      self.manual_pause, self._status_text),
         )
         # Retour d'execution des signaux V2 (data/signal_drop/outgoing/), hors DRY_RUN :
         # sans ordre reel, aucun evenement ne doit pretendre a une execution.
@@ -404,6 +409,8 @@ class Worker:
             self._check_market_guard()
         if hasattr(self, "daily_guard"):
             self._check_daily_loss()
+        if hasattr(self, "manual_pause") and hasattr(self, "auto_signal_executor"):
+            self.auto_signal_executor.manual_pause_reason = self.manual_pause.refusal()
         if hasattr(self, "auto_signal_executor"):
             # Toujours AVANT une mise en file automatique : au demarrage, aucun signal ne part
             # tant que les ordres ouverts du compte n'ont pas ete compares aux positions locales.
@@ -511,9 +518,29 @@ class Worker:
     def _entry_refusal(self) -> str:
         """Raison de refuser une NOUVELLE entrée (licence, perte maximale du jour), sinon « »."""
         refusal = self.licence_gate.refusal() if hasattr(self, "licence_gate") else ""
+        if not refusal and hasattr(self, "manual_pause"):
+            refusal = self.manual_pause.refusal()
         if not refusal and hasattr(self, "daily_guard"):
             refusal = self.daily_guard.refusal()
         return refusal
+
+    def _status_text(self) -> str:
+        """Réponse à /statut : état du worker, positions ouvertes, blocages en cours."""
+        positions = self.positions.list_open()
+        committed = sum(p.metrics.capital_committed for p in positions)
+        latent = sum(p.pnl.unrealized for p in positions)
+        blocks = [reason for reason in (
+            self.licence_gate.refusal() if hasattr(self, "licence_gate") else "",
+            self.manual_pause.refusal() if hasattr(self, "manual_pause") else "",
+            self.daily_guard.refusal() if hasattr(self, "daily_guard") else "",
+            self.market_guard.active_reason() if hasattr(self, "market_guard") else "",
+        ) if reason]
+        lines = ["BinanceSpotManager (Binance Demo)",
+                 f"Worker : {'en veille' if getattr(self, '_in_standby', False) else 'actif'}",
+                 f"Positions ouvertes : {len(positions)} ; capital engagé {committed:.2f} USDT ; "
+                 f"latent {latent:+.2f} USDT"]
+        lines += [f"Blocage : {reason}" for reason in blocks] or ["Blocages : aucun (nouvelles entrées permises)"]
+        return "\n".join(lines)
 
     def _check_daily_loss(self) -> None:
         """Perte maximale du jour (au plus une mesure par minute) ; jamais bloquant pour le suivi."""

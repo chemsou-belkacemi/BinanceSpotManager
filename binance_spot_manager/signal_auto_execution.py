@@ -146,6 +146,8 @@ class AutomaticSignalExecutor:
         self.market_guard_reason = ""
         #: Perte maximale du jour (daily_guard.py) : raison posée et levée par le worker.
         self.daily_guard_reason = ""
+        #: Pause manuelle (commande Telegram /pause) : raison posée et levée par le worker.
+        self.manual_pause_reason = ""
         self._diagnostics = {
             "state": "DISABLED",
             "queued_total": 0,
@@ -191,6 +193,10 @@ class AutomaticSignalExecutor:
             # Les signaux reçus pendant la suspension restent dans la boîte ; à la reprise, seuls
             # ceux encore assez récents (âge maximal des réglages) partent automatiquement.
             self._update(state="SUSPENDED", last_detail=self.suspended_reason)
+            return []
+        if self.manual_pause_reason:
+            # Pause demandée par le propriétaire : rien ne part, les signaux restent dans la boîte.
+            self._update(state="PAUSE_MANUELLE", last_detail=self.manual_pause_reason)
             return []
         if self.daily_guard_reason:
             # Plus aucune nouvelle entrée aujourd'hui : rien ne part, les signaux restent dans la boîte.

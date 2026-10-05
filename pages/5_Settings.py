@@ -1317,6 +1317,27 @@ with tabs[3]:
                                          "daily_report_hour_utc": int(report_hour)})
             st.success("Rapport quotidien enregistré.")
 
+    st.divider()
+    st.subheader("Commandes Telegram")
+    st.caption("/pause (plus aucune nouvelle entrée), /reprise, /statut : acceptées seulement dans ta conversation "
+               "privée avec le bot et depuis ton compte. Les positions ouvertes restent toujours suivies. Laisser "
+               "l'identifiant vide utilise la conversation des notifications si elle est privée.")
+    commands_saved = get_settings_store().load()
+    commands_saved = commands_saved if isinstance(commands_saved, dict) else {}
+    with st.form("telegram_commands_preferences"):
+        commands_on = st.toggle("Accepter mes commandes Telegram", key="telegram_commands_toggle",
+                                value=bool(commands_saved.get("telegram_commands_enabled", True)))
+        owner_input = st.text_input("Mon identifiant Telegram (nombre)", key="telegram_owner_id_input",
+                                    value=str(commands_saved.get("telegram_owner_id") or ""))
+        if st.form_submit_button("Enregistrer les commandes"):
+            owner_text = owner_input.strip()
+            if owner_text and not owner_text.isdigit():
+                st.error("L'identifiant Telegram est un nombre positif (celui de ton compte, pas d'un groupe).")
+            else:
+                get_settings_store().update({"telegram_commands_enabled": bool(commands_on),
+                                             "telegram_owner_id": owner_text})
+                st.success("Commandes Telegram enregistrées.")
+
 
 # ==========================================================================
 # Diagnostic
