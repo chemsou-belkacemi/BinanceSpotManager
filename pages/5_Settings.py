@@ -1112,6 +1112,24 @@ with tabs[1]:
             })
             st.success("Protection enregistrée (prise en compte par le worker au prochain contrôle, ≤ 5 min).")
 
+    st.divider()
+    st.subheader("Perte maximale du jour")
+    st.caption("Résultat du jour = gains et pertes des positions terminées depuis 00:00 UTC (frais compris) + latent "
+               "des positions ouvertes. Au seuil, plus aucune nouvelle entrée (manuelle ou automatique) jusqu'à "
+               "00:00 UTC ; les positions ouvertes restent suivies. Rien n'est vendu.")
+    loss_saved = get_settings_store().load()
+    loss_saved = loss_saved if isinstance(loss_saved, dict) else {}
+    with st.form("daily_loss_preferences"):
+        loss_enabled = st.toggle("Activer la perte maximale du jour", key="daily_loss_enabled_toggle",
+                                 value=bool(loss_saved.get("daily_loss_enabled", True)))
+        loss_percent = st.number_input("Seuil (% du capital)", min_value=0.5, max_value=50.0, step=0.5,
+                                       value=float(loss_saved.get("daily_loss_percent", 3.0)),
+                                       key="daily_loss_percent_input")
+        if st.form_submit_button("Enregistrer la perte maximale"):
+            get_settings_store().update({"daily_loss_enabled": bool(loss_enabled),
+                                         "daily_loss_percent": float(loss_percent)})
+            st.success("Perte maximale du jour enregistrée (prise en compte par le worker en moins d'une minute).")
+
 
 # ==========================================================================
 # Presets

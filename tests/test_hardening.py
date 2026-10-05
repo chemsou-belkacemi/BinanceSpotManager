@@ -133,6 +133,7 @@ ALLOWED_NETWORK_IMPORTS = {
     "csi_client.py": {"requests"},                  # API locale de CSI
     "telegram_signals.py": {"requests"},            # api.telegram.org
     "notification_engine.py": {"urllib.request", "ssl"},  # Telegram et SMTP
+    "watchdog.py": {"urllib.request"},              # signal de vie externe facultatif (https, aucune donnée)
 }
 BINANCE_HOST = re.compile(r"binance\.(com|vision|us)|binanceapi|/api/v3/|/sapi/", re.IGNORECASE)
 #: Seuls ces fichiers peuvent nommer un hôte ou une route Binance (texte d'aide compris).

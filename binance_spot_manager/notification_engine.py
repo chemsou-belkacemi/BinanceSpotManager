@@ -51,6 +51,7 @@ NOTIFIABLE_EVENTS: dict[str, str] = {
     "DESYNC_DETECTED": "Desynchronisation",
     "MARKET_GUARD": "Protection marche (chute de BTC)",
     "DAILY_REPORT": "Rapport quotidien",
+    "DAILY_LOSS": "Perte maximale du jour",
 }
 
 #: Evenements qui se repetent a chaque cycle tant que le probleme persiste.
@@ -566,6 +567,17 @@ class NotificationEngine:
             else "Protection marche levee — entrees a nouveau permises",
             body=detail,
             level="WARNING" if started else "INFO",
+        )
+
+    def daily_loss(self, kind: str, detail: str) -> Notification:
+        """Perte maximale du jour atteinte (kind="STARTED") ou blocage leve."""
+        started = kind == "STARTED"
+        return Notification(
+            event="DAILY_LOSS",
+            title="Perte maximale du jour atteinte — nouvelles entrees bloquees" if started
+            else "Perte maximale du jour levee — nouvelles entrees permises",
+            body=detail,
+            level="CRITICAL" if started else "INFO",
         )
 
     def daily_report(self, title: str, body: str) -> Notification:

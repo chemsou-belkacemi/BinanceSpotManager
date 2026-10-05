@@ -111,6 +111,8 @@ class AutomaticSignalExecutor:
         #: Protection marché (chute de BTC, market_guard.py) : raison posée et levée par le worker,
         #: distincte de la suspension pour ordres orphelins (aucune des deux ne lève l'autre).
         self.market_guard_reason = ""
+        #: Perte maximale du jour (daily_guard.py) : raison posée et levée par le worker.
+        self.daily_guard_reason = ""
         self._diagnostics = {
             "state": "DISABLED",
             "queued_total": 0,
@@ -156,6 +158,10 @@ class AutomaticSignalExecutor:
             # Les signaux reçus pendant la suspension restent dans la boîte ; à la reprise, seuls
             # ceux encore assez récents (âge maximal des réglages) partent automatiquement.
             self._update(state="SUSPENDED", last_detail=self.suspended_reason)
+            return []
+        if self.daily_guard_reason:
+            # Plus aucune nouvelle entrée aujourd'hui : rien ne part, les signaux restent dans la boîte.
+            self._update(state="PERTE_DU_JOUR", last_detail=self.daily_guard_reason)
             return []
         if self.market_guard_reason:
             # Même effet qu'une suspension : rien ne part, les signaux restent dans la boîte et ne

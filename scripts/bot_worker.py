@@ -60,6 +60,8 @@ from binance_spot_manager.position_engine import PositionEngine, finish_position
 from binance_spot_manager.position_store import PositionStore, RuntimeStore, get_settings_store  # noqa: E402
 from binance_spot_manager.reconciliation_engine import ReconciliationEngine, find_orphan_bot_orders  # noqa: E402
 from binance_spot_manager.csi_client import CsiClient  # noqa: E402
+from binance_spot_manager.daily_guard import CHECK_EVERY_SECONDS as DAILY_LOSS_CHECK_SECONDS  # noqa: E402
+from binance_spot_manager.daily_guard import DailyLossGuard, day_result  # noqa: E402
 from binance_spot_manager.daily_report import DailyReport  # noqa: E402
 from binance_spot_manager.market_guard import MarketGuard  # noqa: E402
 from binance_spot_manager.licence import LicenceGate  # noqa: E402
@@ -146,9 +148,11 @@ class Worker:
         risk_service = DashboardService(self.settings, position_store=self.positions, client=self.client, events=self.events)
         # Licence de location : ne bloque que les NOUVELLES entrées, jamais le suivi des positions.
         self.licence_gate = LicenceGate()
+        # Perte maximale du jour : même effet que la licence (nouvelles entrées refusées jusqu'à 00:00 UTC).
+        self.daily_guard = DailyLossGuard(lambda: get_settings_store().load())
         self.command_processor = CommandProcessor(
             self.commands, self.positions, self.execution, risk_service.risk_limits,
-            entry_gate=self.licence_gate.refusal,
+            entry_gate=self._entry_refusal,
         )
         self.fee_token_monitor = FeeTokenMonitor(
             self.client, self.events, lambda: get_settings_store().load(), interval_seconds=60,
@@ -398,6 +402,8 @@ class Worker:
         if hasattr(self, "market_guard"):
             # Avant le routage : une chute constatée retient les signaux de ce même tour.
             self._check_market_guard()
+        if hasattr(self, "daily_guard"):
+            self._check_daily_loss()
         if hasattr(self, "auto_signal_executor"):
             # Toujours AVANT une mise en file automatique : au demarrage, aucun signal ne part
             # tant que les ordres ouverts du compte n'ont pas ete compares aux positions locales.
@@ -501,6 +507,55 @@ class Worker:
             self._exit_on_crossed_stop(position, outcome.stop_crossed_at)
         if outcome.errors:
             raise RuntimeError(" ; ".join(outcome.errors))
+
+    def _entry_refusal(self) -> str:
+        """Raison de refuser une NOUVELLE entrée (licence, perte maximale du jour), sinon « »."""
+        refusal = self.licence_gate.refusal() if hasattr(self, "licence_gate") else ""
+        if not refusal and hasattr(self, "daily_guard"):
+            refusal = self.daily_guard.refusal()
+        return refusal
+
+    def _check_daily_loss(self) -> None:
+        """Perte maximale du jour (au plus une mesure par minute) ; jamais bloquant pour le suivi."""
+        from binance_spot_manager.fee_valuation import fee_rates
+        from binance_spot_manager.models import utcnow
+
+        log = logging.getLogger("bsm.worker")
+        now = time.time()
+        if now < getattr(self, "_next_daily_loss_check", 0.0):
+            return
+        self._next_daily_loss_check = now + DAILY_LOSS_CHECK_SECONDS
+        events = []
+        try:
+            if not self.settings.dry_run and self.settings.has_credentials:
+                balances = self.client.get_balances()
+                quote = balances.get(self.settings.quote_asset, {})
+                positions = self.positions.list_all()
+                capital = float(quote.get("free") or 0) + float(quote.get("locked") or 0) + sum(
+                    p.metrics.capital_committed for p in positions if p.is_open)
+                prices: dict = {}
+
+                def price_of(symbol):
+                    if symbol not in prices:
+                        try:
+                            prices[symbol] = self.client.get_price(symbol)
+                        except Exception:  # noqa: BLE001 - frais BNB alors non valorises
+                            prices[symbol] = None
+                    return prices[symbol]
+
+                result = day_result(positions, utcnow(), lambda p: fee_rates(p, price_of))
+                events = self.daily_guard.check(result, capital)
+            else:
+                events = self.daily_guard.check(0.0, 0.0)          # seulement la fin d'un blocage
+        except Exception:  # noqa: BLE001 - mesure impossible : aucun blocage nouveau, aucun leve
+            log.exception("Perte maximale du jour : mesure interrompue")
+        if hasattr(self, "auto_signal_executor"):
+            self.auto_signal_executor.daily_guard_reason = self.daily_guard.refusal()
+        for kind, detail in events:
+            started = kind == "STARTED"
+            self.events.append(EventType.DAILY_LOSS_STARTED if started else EventType.DAILY_LOSS_ENDED, detail,
+                               level="CRITICAL" if started else "INFO")
+            self.notifications.notify(self.notifications.daily_loss(kind, detail))
 
     def _check_market_guard(self) -> None:
         """Protection en cas de chute de BTC : jamais bloquante pour le suivi des positions."""
