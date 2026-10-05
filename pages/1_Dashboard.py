@@ -20,6 +20,7 @@ from binance_spot_manager.position_engine import recompute_position  # noqa: E40
 from binance_spot_manager.protection_status import protection_alerts  # noqa: E402
 from ui_common import (  # noqa: E402
     banner,
+    fmt_amount,
     fmt_percent,
     fmt_price,
     fmt_qty,
@@ -198,17 +199,23 @@ def live_portfolio_summary():
     st.caption(f"Source des soldes : {view.source}")
 
     cols = st.columns(6)
-    cols[0].metric(f"{settings.quote_asset} libre", fmt_price(view.quote_free))
-    cols[1].metric("Capital engagé", fmt_price(view.capital_committed))
-    cols[2].metric("Capital en attente", fmt_price(view.capital_pending))
+    cols[0].metric(f"{settings.quote_asset} libre", fmt_amount(view.quote_free))
+    cols[1].metric("Capital engagé", fmt_amount(view.capital_committed))
+    cols[2].metric("Capital en attente", fmt_amount(view.capital_pending))
     pnl_metric(cols[3], "PnL latent", view.unrealized_pnl)
-    pnl_metric(cols[4], "PnL réalisé", view.realized_pnl)
-    pnl_metric(cols[5], "PnL total", view.total_pnl)
+    pnl_metric(cols[4], "PnL réalisé (depuis le début)", view.realized_pnl)
+    pnl_metric(cols[5], "PnL total (depuis le début)", view.total_pnl)
+    st.caption(
+        f"Positions terminées aujourd'hui (depuis 00:00 UTC) : {view.realized_today:+.2f} {settings.quote_asset} "
+        f"({view.closed_today}) · 7 derniers jours : {view.realized_week:+.2f} ({view.closed_week}) : les "
+        "chiffres du rapport Telegram. Le PnL réalisé ci-dessus compte tout depuis le début, dont "
+        f"{view.realized_on_open:+.2f} déjà encaissés par des TP sur les positions encore ouvertes."
+    )
 
     cols = st.columns(4)
-    cols[0].metric("Risque total", fmt_price(view.total_risk_quote), f"{view.total_risk_percent:.2f} %")
+    cols[0].metric("Risque total", fmt_amount(view.total_risk_quote), f"{view.total_risk_percent:.2f} %")
     cols[1].metric("Exposition", f"{view.exposure_percent:.1f} %")
-    cols[2].metric("Réserve estimée", fmt_price(view.capital_reserved))
+    cols[2].metric("Réserve estimée", fmt_amount(view.capital_reserved))
     cols[3].metric("Positions ouvertes", view.open_positions)
 
 
@@ -381,7 +388,7 @@ def live_open_positions():
                     "Prix moyen": fmt_price(r.average_price),
                     "Prix actuel": fmt_price(r.current_price),
                     "Quantité nette": fmt_qty(r.net_qty),
-                    "PnL": fmt_price(r.pnl_total),
+                    "PnL": fmt_amount(r.pnl_total),
                     "PnL %": fmt_percent(r.pnl_percent),
                     "SL": fmt_price(r.sl_price),
                     "Prochain TP": (

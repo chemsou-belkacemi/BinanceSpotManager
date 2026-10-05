@@ -16,6 +16,7 @@ from typing import Any, Optional
 from .binance_client import BinanceError, BinanceSpotClient
 from .bot_process_manager import BotProcessManager, WorkerStatus
 from .config import Settings, get_settings
+from .daily_report import results
 from .event_store import EventStore
 from .fee_valuation import external_fee_assets, fee_rates
 from .models import (
@@ -53,8 +54,14 @@ class PortfolioView:
     capital_total: float = 0.0
 
     unrealized_pnl: float = 0.0
-    realized_pnl: float = 0.0
+    realized_pnl: float = 0.0          # depuis le debut, TP deja vendus des positions ouvertes compris
     total_pnl: float = 0.0
+    #: memes chiffres que le rapport Telegram (daily_report.results) : positions terminees dans la periode
+    realized_today: float = 0.0
+    closed_today: int = 0
+    realized_week: float = 0.0
+    closed_week: int = 0
+    realized_on_open: float = 0.0      # TP deja vendus sur les positions encore ouvertes
 
     open_positions: int = 0
     total_risk_quote: float = 0.0
@@ -272,6 +279,15 @@ class DashboardService:
             p.pnl.realized * rates.get(p.quote_asset, 0.0) for p in positions
         )
         view.total_pnl = view.unrealized_pnl + view.realized_pnl
+        def rate(p: Position) -> float:
+            return rates.get(p.quote_asset, 0.0)
+
+        figures = results(positions, utcnow(), rate)
+        view.realized_today = sum(p.pnl.realized * rate(p) for p in figures.today)
+        view.closed_today = len(figures.today)
+        view.realized_week = sum(p.pnl.realized * rate(p) for p in figures.week)
+        view.closed_week = len(figures.week)
+        view.realized_on_open = figures.realized_open
         view.total_risk_quote = sum(
             abs(p.metrics.max_loss_at_sl) * rates.get(p.quote_asset, 0.0)
             for p in open_positions

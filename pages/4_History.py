@@ -20,6 +20,7 @@ from binance_spot_manager.performance import channel_resolver, late_fill_split, 
 from binance_spot_manager.position_engine import recompute_position  # noqa: E402
 from ui_common import (  # noqa: E402
     banner,
+    fmt_amount,
     fmt_percent,
     fmt_price,
     fmt_qty,
@@ -130,9 +131,9 @@ for position in filtered:
             "Trader / canal": channel_of(position),
             "Prix moyen": fmt_price(position.metrics.average_price),
             "Quantité totale": fmt_qty(position.metrics.total_bought_qty),
-            "Capital": fmt_price(position.metrics.capital_committed),
-            "PnL réalisé": fmt_price(position.pnl.realized),
-            "Frais": fmt_price(position.pnl.fees_paid),
+            "Capital": fmt_amount(position.metrics.capital_committed),
+            "PnL réalisé": fmt_amount(position.pnl.realized),
+            "Frais": fmt_amount(position.pnl.fees_paid),
             "TP atteints": f"{len(position.hit_tps)}/{len(position.take_profits)}",
             "Entries": len(position.entries),
             "SL final": fmt_price(position.stop_loss.resolved_price),
@@ -163,7 +164,7 @@ cols[1].metric(
 pnl_metric(cols[2], "PnL réalisé total", total)
 pnl_metric(cols[3], "Gain moyen", sum(gains) / len(gains) if gains else None)
 pnl_metric(cols[4], "Perte moyenne", sum(pertes) / len(pertes) if pertes else None)
-cols[5].metric("Frais payés", fmt_price(fees))
+cols[5].metric("Frais payés", fmt_amount(fees))
 
 if gains or pertes:
     profit_factor = (sum(gains) / abs(sum(pertes))) if pertes else float("inf")
@@ -189,8 +190,8 @@ with col_a:
                 {
                     "Symbole": symbol,
                     "Positions": len(values),
-                    "PnL total": fmt_price(sum(values)),
-                    "PnL moyen": fmt_price(sum(values) / len(values)),
+                    "PnL total": fmt_amount(sum(values)),
+                    "PnL moyen": fmt_amount(sum(values) / len(values)),
                 }
                 for symbol, values in sorted(by_symbol.items())
             ]
@@ -211,7 +212,7 @@ with col_b:
                 {
                     "Source": source,
                     "Positions": len(values),
-                    "PnL total": fmt_price(sum(values)),
+                    "PnL total": fmt_amount(sum(values)),
                 }
                 for source, values in sorted(by_source.items())
             ]
@@ -236,9 +237,9 @@ def _stats_rows(groups):
             "Trader / canal": g.name,
             "Positions": g.positions,
             "Gagnantes": f"{g.win_rate * 100:.0f} %" if g.win_rate is not None else "—",
-            "Gain moyen": fmt_price(g.average_gain) if g.average_gain is not None else "—",
-            "Perte moyenne": fmt_price(g.average_loss) if g.average_loss is not None else "—",
-            "PnL net": fmt_price(g.net),
+            "Gain moyen": fmt_amount(g.average_gain) if g.average_gain is not None else "—",
+            "Perte moyenne": fmt_amount(g.average_loss) if g.average_loss is not None else "—",
+            "PnL net": fmt_amount(g.net),
             "Profit factor": f"{g.profit_factor:.2f}" if g.profit_factor is not None else "—",
         }
         for g in groups
@@ -270,12 +271,12 @@ selected_label = st.selectbox(
     "Position",
     [
         f"{p.symbol} · {p.created_at.strftime('%d/%m/%Y')} · "
-        f"{fmt_price(p.pnl.realized)}"
+        f"{fmt_amount(p.pnl.realized)}"
         for p in filtered
     ],
 )
 index = [
-    f"{p.symbol} · {p.created_at.strftime('%d/%m/%Y')} · {fmt_price(p.pnl.realized)}"
+    f"{p.symbol} · {p.created_at.strftime('%d/%m/%Y')} · {fmt_amount(p.pnl.realized)}"
     for p in filtered
 ].index(selected_label)
 position = filtered[index]
@@ -289,8 +290,8 @@ Prix moyen : {fmt_price(position.metrics.average_price)} ·
 Quantité achetée : {fmt_qty(position.metrics.total_bought_qty)} ·
 Quantité vendue : {fmt_qty(position.metrics.total_sold_qty)}
 
-Capital engagé : {fmt_price(position.metrics.capital_committed)} ·
-Commissions {position.quote_asset} : {fmt_price(position.metrics.commissions_quote)} ·
+Capital engagé : {fmt_amount(position.metrics.capital_committed)} ·
+Commissions {position.quote_asset} : {fmt_amount(position.metrics.commissions_quote)} ·
 Commissions {position.base_asset} : {fmt_qty(position.metrics.commissions_base, 8)}
 
 PnL réalisé : {colored_pnl(position.pnl.realized)} ·
@@ -324,7 +325,7 @@ Break-even avec frais : {fmt_price(position.metrics.break_even_with_fees)}
                     "Prix": fmt_price(t.target_price),
                     "Vente %": f"{t.sell_percent:.0f}",
                     "Statut": t.status.value,
-                    "Gain réalisé": fmt_price(t.gain_realized),
+                    "Gain réalisé": fmt_amount(t.gain_realized),
                 }
                 for t in position.sorted_tps
             ]

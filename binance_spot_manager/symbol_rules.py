@@ -178,6 +178,22 @@ class SymbolRules:
         errors += self.check_notional(price, qty)
         return errors
 
+    def below_minimums(self, qty: Any, price: Any, *, market: bool = False) -> bool:
+        """Reliquat trop petit pour un ordre Binance : nul une fois arrondi au stepSize, sous minQty, ou sous
+        minNotional au prix donne. Ni vendable ni protegeable par un stop. Prix inconnu (<= 0) : seules les
+        quantites comptent, jamais une supposition sur la valeur."""
+        quantity = self.round_qty(qty, market=market)
+        if quantity <= 0:
+            return True
+        min_qty = self.market_min_qty if (market and self.market_min_qty) else self.min_qty
+        if min_qty and quantity < min_qty:
+            return True
+        try:
+            price_d = _d(price) if price else Decimal("0")
+        except (ArithmeticError, ValueError):
+            price_d = Decimal("0")
+        return bool(self.min_notional > 0 and price_d > 0 and quantity * price_d < self.min_notional)
+
     # -- aides de sizing ------------------------------------------------
 
     def qty_for_quote(self, quote_amount: Any, price: Any, *, market: bool = False) -> Decimal:

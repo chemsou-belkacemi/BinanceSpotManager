@@ -23,7 +23,7 @@ from binance_spot_manager.models import (  # noqa: E402
 from binance_spot_manager.position_engine import PositionEngine  # noqa: E402
 from binance_spot_manager.risk_engine import RiskEngine  # noqa: E402
 from ui_common import (  # noqa: E402
-    banner, fmt_price, fmt_qty, get_service, load_rules,
+    banner, fmt_amount, fmt_price, fmt_qty, get_service, load_rules,
     page_header, sidebar_status, symbol_status_box,
     submit_to_worker, new_command_confirmation,
 )
@@ -98,7 +98,7 @@ if purchase_mode.startswith("Achat simple"):
         help="Achat Market par quantité, avec 2 % de marge : le montant final peut différer légèrement.",
     )
     st.caption(
-        f"Solde libre : {fmt_price(available_quote)} {rules.quote_asset} · "
+        f"Solde libre : {fmt_amount(available_quote)} {rules.quote_asset} · "
         f"réserve conservée : {reserve_percent:.0f} %"
     )
     simple = preview_simple_buy(
@@ -108,7 +108,7 @@ if purchase_mode.startswith("Achat simple"):
     st.write(
         f"Prix indicatif : {fmt_price(price)} {rules.quote_asset}/{rules.base_asset} · "
         f"quantité estimée : {fmt_qty(simple.quantity)} {rules.base_asset} · "
-        f"dépense estimée : {fmt_price(simple.estimated_spend)} {rules.quote_asset}"
+        f"dépense estimée : {fmt_amount(simple.estimated_spend)} {rules.quote_asset}"
     )
     for error in simple.errors:
         st.error(error)
@@ -182,7 +182,7 @@ capital = st.number_input(
     min_value=0.0, value=float(min(100.0, usable)), step=10.0,
     help="La quantité achetée garde une marge de 2 % pour le mouvement du prix et les frais.",
 )
-st.caption(f"Solde libre : {fmt_price(available_quote)} · réserve : {reserve_percent:.0f} %")
+st.caption(f"Solde libre : {fmt_amount(available_quote)} · réserve : {reserve_percent:.0f} %")
 
 st.subheader("2. Sortie")
 exit_mode = "TP_ONLY" if "TP seul" in purchase_mode else "SL_ONLY"
@@ -212,11 +212,11 @@ for error in preview.errors:
 st.subheader("3. Vérification")
 cols = st.columns(4)
 cols[0].metric("Achat estimé", f"{fmt_qty(preview.quantity)} {rules.base_asset}")
-cols[1].metric("Dépense estimée", f"{fmt_price(preview.estimated_spend)} {rules.quote_asset}")
+cols[1].metric("Dépense estimée", f"{fmt_amount(preview.estimated_spend)} {rules.quote_asset}")
 cols[2].metric("Sortie", f"{fmt_price(preview.exit_price)} {rules.quote_asset}")
 cols[3].metric(
     "Risque estimé" if exit_mode == "SL_ONLY" else "Capital exposé",
-    f"{fmt_price(preview.risk_quote)} {rules.quote_asset}",
+    f"{fmt_amount(preview.risk_quote)} {rules.quote_asset}",
 )
 if exit_mode == "TP_ONLY":
     st.warning("Sans SL, la totalité du capital investi peut être perdue.")

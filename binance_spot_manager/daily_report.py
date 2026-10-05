@@ -1,12 +1,18 @@
 """Rapport quotidien sur Telegram : resultat net du jour et des 7 derniers jours (frais compris, BNB au
 cours actuel), positions ouvertes, risque total si tous les stops sont touches, meilleur et pire canal.
 
+« Aujourd'hui » et « 7 derniers jours » ne comptent que les positions TERMINEES dans la periode ; le
+« PnL realise » du Dashboard compte tout depuis le debut, TP deja vendus des positions ouvertes compris.
+Le rapport donne aussi ce chiffre (ligne « Depuis le debut ») et le Dashboard ceux du rapport : `results`
+sert aux deux, pour que les memes questions aient les memes reponses.
+
 Un seul message par jour, a l'heure choisie (UTC) ; la date du dernier envoi est gardee dans un fichier
 pour ne pas renvoyer apres un redemarrage.
 """
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -29,6 +35,32 @@ def settings_from(preferences: Any) -> tuple[bool, int]:
     return enabled, min(max(hour, 0), 23)
 
 
+@dataclass(frozen=True)
+class Results:
+    """Chiffres communs au rapport Telegram et au Dashboard, sur des positions deja valorisees."""
+
+    today: list[Position]          # terminees depuis 00:00 UTC
+    week: list[Position]           # terminees sur les 7 derniers jours
+    realized_all: float            # depuis le debut : positions terminees + TP vendus des positions ouvertes
+    realized_open: float           # dont TP deja vendus sur les positions encore ouvertes
+    latent: float                  # positions ouvertes, au dernier prix connu
+
+
+def results(positions: list[Position], now: datetime,
+            rate: Callable[[Position], float] = lambda p: 1.0) -> Results:
+    """`rate` : conversion de la devise de cotation de chaque position (le Dashboard passe ses taux)."""
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week = closed_between(positions, now - timedelta(days=7), now + timedelta(seconds=1))
+    open_positions = [p for p in positions if p.is_open]
+    return Results(
+        today=[p for p in week if (p.closed_at or p.updated_at) >= midnight],
+        week=week,
+        realized_all=sum(p.pnl.realized * rate(p) for p in positions),
+        realized_open=sum(p.pnl.realized * rate(p) for p in open_positions),
+        latent=sum(p.pnl.unrealized * rate(p) for p in open_positions),
+    )
+
+
 def _line(name: str, positions: list[Position]) -> str:
     if not positions:
         return f"{name} : aucune position terminée"
@@ -41,17 +73,17 @@ def build(positions: list[Position], now: datetime, fee_rates_for: Callable[[Pos
           channel: Callable[[Position], str] = channel_of) -> tuple[str, str]:
     """(titre, corps) du rapport ; `positions` : toutes les positions (ouvertes et terminees) ;
     `channel` : trader ou canal d'une position (performance.channel_resolver pour les anciennes)."""
-    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    week_start = now - timedelta(days=7)
-    week = valued(closed_between(positions, week_start, now + timedelta(seconds=1)), fee_rates_for)
-    today = [p for p in week if (p.closed_at or p.updated_at) >= midnight]
+    figures = results(valued(positions, fee_rates_for), now)
+    week, today = figures.week, figures.today
     open_positions = [p for p in positions if p.is_open]
     risk = sum(abs(p.metrics.max_loss_at_sl) for p in open_positions)
     committed = sum(p.metrics.capital_committed for p in open_positions)
-    latent = sum(p.pnl.unrealized for p in open_positions)
-    lines = [_line("Aujourd'hui", today), _line("7 derniers jours", week),
+    lines = [_line("Aujourd'hui (depuis 00:00 UTC)", today), _line("7 derniers jours", week),
+             f"Depuis le début : réalisé {figures.realized_all:+.2f} USDT, dont {figures.realized_open:+.2f} "
+             f"déjà encaissés par des TP sur les positions encore ouvertes ; avec le latent "
+             f"{figures.realized_all + figures.latent:+.2f} USDT (« PnL réalisé » et « PnL total » du Dashboard)",
              f"Positions ouvertes : {len(open_positions)} ; capital engagé {committed:.2f} USDT ; "
-             f"latent {latent:+.2f} USDT",
+             f"latent {figures.latent:+.2f} USDT",
              f"Risque si tous les stops sont touchés : −{risk:.2f} USDT"]
     groups = stats_by(week, key=channel)
     if len(groups) >= 2:

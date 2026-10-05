@@ -18,6 +18,7 @@ from binance_spot_manager.binance_client import BinanceSpotClient
 from binance_spot_manager.browser_notifications import (
     browser_alert_preferences, notification_html,
 )
+from binance_spot_manager.pnl_display import format_price
 from binance_spot_manager.ui_alerts import unseen_alerts
 from binance_spot_manager import auth
 
@@ -288,7 +289,17 @@ def global_alerts() -> None:
         )
 
 
-def fmt_price(value: Optional[float], decimals: int = 2) -> str:
+def fmt_price(value: Optional[float], decimals: Optional[int] = None) -> str:
+    """Prix : décimales selon la grandeur (0.37120, 84 000.00), sauf nombre de décimales imposé."""
+    if value is None:
+        return "—"
+    if decimals is None:
+        return format_price(value)
+    return f"{value:,.{decimals}f}".replace(",", " ")
+
+
+def fmt_amount(value: Optional[float], decimals: int = 2) -> str:
+    """Montant en devise de cotation (solde, capital, PnL, frais, risque) : 2 décimales."""
     if value is None:
         return "—"
     return f"{value:,.{decimals}f}".replace(",", " ")
@@ -366,7 +377,7 @@ def symbol_status_box(symbol: str, rules: Optional[SymbolRules], balances: dict)
     cols[2].metric("Quote", rules.quote_asset)
     cols[3].metric(
         f"{rules.quote_asset} disponibles",
-        fmt_price(balances.get(rules.quote_asset, 0.0)),
+        fmt_amount(balances.get(rules.quote_asset, 0.0)),
     )
     st.caption(
         f"tickSize {rules.tick_size} · stepSize {rules.step_size} · "
@@ -398,7 +409,7 @@ def render_kv_table(rows: list[tuple[str, Any]]) -> None:
 def colored_pnl(value, text=None):
     if value is None:
         return "—"
-    text = text or fmt_price(value)
+    text = text or fmt_amount(value)
     color = "green" if value > 0 else "red" if value < 0 else "gray"
     return f":{color}[{text}]"
 

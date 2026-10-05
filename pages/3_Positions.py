@@ -36,6 +36,7 @@ from binance_spot_manager.reconciliation_engine import audit_open_orders  # noqa
 from binance_spot_manager.reconciliation_engine import ReconciliationEngine
 from ui_common import (  # noqa: E402
     banner,
+    fmt_amount,
     fmt_percent,
     fmt_price,
     fmt_qty,
@@ -149,12 +150,12 @@ def live_position_summary(position_id):
     head[4].metric("Quantité nette", fmt_qty(position.metrics.net_qty))
 
     head2 = st.columns(5)
-    head2[0].metric("Capital engagé", fmt_price(position.metrics.capital_committed))
-    head2[1].metric("Capital en attente", fmt_price(position.metrics.capital_pending))
+    head2[0].metric("Capital engagé", fmt_amount(position.metrics.capital_committed))
+    head2[1].metric("Capital en attente", fmt_amount(position.metrics.capital_pending))
     pnl_metric(head2[2], "PnL latent (USDT)", returns["unrealized_usdt"])
     pnl_metric(head2[3], "PnL réalisé (USDT)", returns["realized_usdt"])
     pnl_metric(head2[4], "PnL total (USDT / %)", returns["total_usdt"],
-               f"{fmt_price(returns['total_usdt'])} USDT ({fmt_percent(returns['percent'])})")
+               f"{fmt_amount(returns['total_usdt'])} USDT ({fmt_percent(returns['percent'])})")
     if not returns["complete"]:
         missing = ", ".join(returns["unpriced_fee_assets"]) or "inconnus"
         st.warning(f"PnL incomplet : frais non valorisables ({missing}) ou conversion USDT indisponible.")
@@ -749,7 +750,7 @@ def live_market_close(position_id):
     with st.expander("Clôturer la position au marché", expanded=False):
         st.warning("Annule uniquement les achats en attente, TP et SL de cette position, puis vend son solde net au marché. Le prix final dépend de l'exécution Binance Demo.")
         st.markdown("Résultat estimé avant vente : " + colored_pnl(returns["total_usdt"],
-                    f"{fmt_price(returns['total_usdt'])} USDT ({fmt_percent(returns['percent'])})"))
+                    f"{fmt_amount(returns['total_usdt'])} USDT ({fmt_percent(returns['percent'])})"))
         st.caption("Les frais de la vente et le glissement de prix peuvent modifier ce résultat. Les poussières non vendables restent dans le portefeuille.")
         new_command_confirmation(f"market_close_{position.position_id}")
         confirm_market = st.checkbox("Je confirme l'annulation des ordres et la vente au marché", key=f"confirm_market_{position.position_id}")

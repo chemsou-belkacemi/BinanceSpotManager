@@ -135,7 +135,11 @@ refusé au démarrage. Ne jamais placer les volumes sur un partage réseau
 - **Rapport quotidien** (Settings → Notifications, 20 h UTC par défaut) : résultat
   du jour et des 7 derniers jours (frais compris), positions ouvertes, capital
   engagé, latent, risque si tous les stops sont touchés, meilleur et pire trader ou canal.
-  Un seul envoi par jour, même après un redémarrage.
+  Un seul envoi par jour, même après un redémarrage. « Aujourd'hui » (depuis 00:00 UTC)
+  et « 7 derniers jours » ne comptent que les positions **terminées** dans la période ;
+  le « PnL réalisé » du Dashboard compte tout **depuis le début**, TP déjà vendus des
+  positions encore ouvertes compris. Le rapport donne aussi ce chiffre (ligne « Depuis
+  le début ») et le Dashboard ceux du rapport, calculés par la même fonction.
 - **BSM face au marché** (Dashboard) : pour les achats exécutés de la période, le
   résultat de BSM comparé à « garder les mêmes cryptos » jusqu'à maintenant et à
   « BTC à la place » (même montant, même moment), mêmes frais d'achat, prix Binance
@@ -574,8 +578,12 @@ Redémarrer le worker après la mise à jour pour activer cette commande. Le ré
 est estimé avant vente ; les exécutions confirmées alimentent le PnL réalisé.
 Les gains sont verts, les pertes rouges. Le détail de position affiche l'équivalent
 USDT et le pourcentage du capital acheté ; une conversion manquante ou des frais
-BNB non valorisés sont signalés. Les poussières non vendables restent au portefeuille.
-Après annulation des protections, un refus de vente laisse la position en pause,
+BNB non valorisés sont signalés. Les poussières non vendables restent au portefeuille :
+si, après annulation des ordres, le reste est sous les minimums Binance (minQty ou
+minNotional), rien n'est vendu et la position est terminée (reliquat noté dans son
+historique). Une position restée en CLOSING pour cette raison est terminée par le
+worker au cycle suivant, dès qu'aucun de ses ordres ne peut encore vivre chez Binance.
+Après annulation des protections, un autre refus de vente laisse la position en pause,
 sans recréer automatiquement les TP/SL : consulter **Operations** avant de réessayer.
 
 Les blocs de lecture du Dashboard et de Positions s'actualisent chaque seconde :
