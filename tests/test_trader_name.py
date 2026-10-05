@@ -47,6 +47,14 @@ BODY = "\n#SOL/USDT\n📍 Entry1: 150\n🎯 TP1: 160\n🛑 Stop: 140"
     ("👑 ALAFIFY TP TRACKING 👑\n", "ALAFIFY"),
     ("معاينة الصفقة:\n👑 Abo yaseein 👑\n", "Abo yaseein"),
     ("Ph. Suhaib AlMashhadani\n───────────────────\n", "Suhaib AlMashhadani"),
+    # Relecture du 2026-10-05 : donnée, date ou mot-dièse entre le nom et la paire, particule détachée, prénom.
+    ("👑 HAMZAWY 👑\nType: Spot\nMarket: Spot\n", "HAMZAWY"),
+    ("👑 HAMZAWY 👑\n05/10/2026 14:00\n", "HAMZAWY"),
+    ("👑 HAMZAWY 👑\n#SOL\n", "HAMZAWY"),
+    ("👑 HAMZAWY 👑\nإشارة شراء\n", "HAMZAWY"),
+    ("👑 AL - MAHWASHI VIP 👑\n", "AL-MAHWASHI VIP"),
+    ("👑 عبد الرحمن 👑\nبسم الله الرحمن الرحيم\n", "عبد الرحمن"),
+    ("Trader: Abdallah Al-Abyed\n", "Abdallah Al-Abyed"),
 ])
 def test_the_trader_is_read_from_the_header(header, expected):
     assert trader_of(header + BODY) == expected

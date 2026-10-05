@@ -24,20 +24,26 @@ import unicodedata
 
 from .signal_parser import JOINED_PAIR, LABELLED_LINE, SLASH_PAIR
 
-#: Formules religieuses ou de politesse, jamais un nom.
-FORMULAS = ("بسم", "توكل", "الرحمن", "الحمد", "سبحان", "شاء الله", "استغفر", "صلى الله",
-            "BISMILLAH", "INSHALLAH", "IN SHAA ALLAH")
+#: Formules religieuses ou de politesse, reconnues par phrase entière : « عبد الرحمن » est un prénom.
+FORMULAS = ("بسم الله", "بيم الله", "توكلت على الله", "توكلنا على الله", "الرحمن الرحيم", "الحمد لله",
+            "سبحان الله", "شاء الله", "استغفر الله", "صلى الله", "BISMILLAH", "INSHALLAH", "IN SHAA ALLAH")
 #: Mots qui décrivent le message, pas son auteur (retirés en tête et en fin de ligne).
 GENERIC = frozenset({
     "HARMONIC", "PATTERN", "PATTERNS", "DETECTED", "TRADE", "TRADES", "TIME", "BASED", "TIME-BASED", "CYCLE",
     "ANALYSIS", "INDICATOR", "INDICATORS", "ULTRA", "SIGNAL", "SIGNALS", "ALERT", "ALERTS", "NEW", "SPOT",
     "LONG", "BUY", "ICT", "PREVIEW", "SETUP", "SWING", "SCALP", "SCALPING", "TERM", "SHORT", "MID", "UPDATE",
     "SPECIAL", "TP", "TRACKING",
-    "معاينة", "الصفقة", "صفقة", "جديدة", "توصية", "اشارة", "إشارة",
+    "معاينة", "الصفقة", "صفقة", "جديدة", "توصية", "اشارة", "إشارة", "شراء", "سبوت",
 })
 #: Mots ignorés pour regrouper les variantes d'un même nom.
 KEY_NOISE = frozenset({"TRADING", "CRYPTO", "TRADER"})
 PREFIX = re.compile(r"^(?:(?:TRADER|ANALYST)\s*[/:]\s*|(?:TRADER|ANALYST|BY|FROM|PH\.?)\s+)", re.IGNORECASE)
+#: Ligne « clé : valeur » (« Type: Spot », « Market: Spot ») : une donnée, pas un nom, sauf Trader:/Analyst:.
+METADATA = re.compile(r"^(?!(?:TRADER|ANALYST)\b)[^\W\d_][^:]{0,24}:\s*\S", re.IGNORECASE)
+#: Date ou heure (« 05/10/2026 », « 2026-10-05 », « 14:00 »).
+DATE_OR_TIME = re.compile(r"\d{1,4}\s*[/.-]\s*\d{1,2}\s*[/.-]\s*\d{1,4}|\b\d{1,2}:\d{2}\b")
+#: « AL - MAHWASHI » : la particule reste collée au mot suivant (pas une coupure « nom - description »).
+PARTICLE_DASH = re.compile(r"\b(AL|EL|ABD|ABU|ABO|BEN|BIN|IBN)\s*-\s*", re.IGNORECASE)
 MAX_LENGTH = 48
 MAX_WORDS = 6
 
@@ -58,10 +64,17 @@ def _starts_the_signal(line: str) -> bool:
 
 
 def name_from_line(line: str) -> str:
-    """Nom porté par une ligne d'en-tête, ou « » (formule, ligne générique, phrase trop longue)."""
-    text = _clean(line)
-    if not text or any(formula in text.upper() for formula in FORMULAS):
+    """Nom porté par une ligne d'en-tête, ou « » (formule, mot-dièse, donnée « clé : valeur », date,
+    ligne générique, phrase trop longue)."""
+    bare = "".join(" " if unicodedata.category(ch) in ("So", "Sk") else ch
+                   for ch in unicodedata.normalize("NFKC", line)).strip()
+    if bare.startswith("#"):
         return ""
+    text = _clean(line)
+    if (not text or any(formula in text.upper() for formula in FORMULAS) or METADATA.match(text)
+            or DATE_OR_TIME.search(text)):
+        return ""
+    text = PARTICLE_DASH.sub(lambda match: match.group(1) + "-", text)
     text = PREFIX.sub("", text.split(" - ")[0].strip()).strip(" -/.:")
     words = text.split()
     while words and words[-1].upper().strip(".:") in GENERIC:
