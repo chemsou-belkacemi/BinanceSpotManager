@@ -177,6 +177,8 @@ class AuthResult:
     message: str = ""
     username: str = ""
     session_version: int = 0
+    #: Ce refus vient de bloquer le compte (MAX_FAILURES échecs) : alerte au propriétaire.
+    locked: bool = False
 
 
 @dataclass(frozen=True)
@@ -312,7 +314,8 @@ class AccountStore:
                     account["locked_until"] = now + LOCK_SECONDS
                 self._write(data)
                 if failures >= MAX_FAILURES:
-                    return AuthResult(False, f"Trop d'échecs : compte bloqué {LOCK_SECONDS // 60} minutes")
+                    return AuthResult(False, f"Trop d'échecs : compte bloqué {LOCK_SECONDS // 60} minutes",
+                                      username=username, locked=True)
                 return AuthResult(False, GENERIC_FAILURE)
             account.update(failures=0, locked_until=0, last_totp_step=step,
                            last_login_at=utcnow().isoformat())

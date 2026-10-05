@@ -17,7 +17,7 @@ from binance_spot_manager.command_store import account_scope
 from binance_spot_manager.config import get_settings
 from binance_spot_manager.models import EventType
 from binance_spot_manager.risk_engine import RiskLimits
-from binance_spot_manager.signal_auto_execution import channel_name
+from binance_spot_manager.signal_auto_execution import candle_backup_percent, channel_name
 from binance_spot_manager.signal_inbox import SignalInbox
 from binance_spot_manager.signal_parser import ParsedSignal, TEMPLATES, parse_signal
 from binance_spot_manager.signal_plan import TRAIL_STOP_KEY, prepare_signal, signal_identity, signal_sl_after_tp
@@ -73,7 +73,12 @@ if analyze:
             st.success("Analyse enregistrée. Les doublons retrouvent le même signal.")
 
 with st.expander("Recevoir depuis Telegram"):
-    automatic = bool(preferences.get("signal_telegram_auto_enabled", False))
+    from binance_spot_manager.telegram_commands import owner_id
+
+    # Le worker lit le bot dès que la relève automatique OU les commandes Telegram sont actives : un second lecteur
+    # (ce bouton) déclencherait des conflits chez Telegram (un seul lecteur par bot).
+    automatic = bool(preferences.get("signal_telegram_auto_enabled", False)) or (
+        owner_id(preferences, settings.telegram_chat_id) is not None)
     st.caption("Le bot doit avoir accès aux messages, ou les recevoir par transfert. La réception seule ne crée jamais d'ordre.")
     if automatic:
         diagnostics = getattr(service.runtime(), "telegram_diagnostics", {})
@@ -336,7 +341,8 @@ if st.button("Vérifier sur Binance Demo et simuler", disabled=not (budget > 0 a
             touch_stop=touch, validity_confirmed=validity, trail_stop=trail_stop,
             sl_after_tp=sl_after_tp, account_scope=scope, signal_key=signal_identity(row),
             cancel_entry_if_tp1_first=bool(preferences.get("signal_cancel_entry_if_tp1_first", False)),
-            source_name=channel_name(row, preferences))
+            source_name=channel_name(row, preferences),
+            candle_backup_percent=candle_backup_percent(preferences))
         # Même lecture du risque que le routage automatique (et que le worker pour les limites dures).
         try:
             limits = service.risk_limits()

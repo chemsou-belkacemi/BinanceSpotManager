@@ -52,6 +52,8 @@ NOTIFIABLE_EVENTS: dict[str, str] = {
     "DESYNC_DETECTED": "Desynchronisation",
     "MARKET_GUARD": "Protection marche (chute de BTC)",
     "DAILY_REPORT": "Rapport quotidien",
+    "DAILY_LOSS": "Perte maximale du jour",
+    "LOGIN": "Connexion a l'interface",
 }
 
 #: Evenements qui se repetent a chaque cycle tant que le probleme persiste.
@@ -520,6 +522,44 @@ class NotificationEngine:
             level="CRITICAL",
         )
 
+    def worker_silent(self, minutes: int, *, stopped: bool, last_heartbeat, exposure) -> Notification:
+        """Worker muet ou arrete (service de surveillance) : positions sans stop pose chez Binance."""
+        when = last_heartbeat.strftime("%d/%m %H:%M UTC") if last_heartbeat else "jamais"
+        lines = [f"Dernier signe de vie : {when}", f"Positions ouvertes : {exposure.open_positions}"]
+        if exposure.unprotected:
+            names = ", ".join(sorted(set(exposure.unprotected))[:8])
+            lines.append(f"Stops NON poses chez Binance : {len(exposure.unprotected)} ({names}) : rien ne les "
+                         "protege tant que le worker ne tourne pas (stops a la cloture de bougie compris)")
+        elif exposure.open_positions:
+            lines.append("Tous les stops sont poses chez Binance : ils restent actifs sans le worker "
+                         "(TP et suivi du stop, eux, sont arretes)")
+        lines.append("A faire : verifier le VPS (make ps, make logs SERVICE=worker), puis make worker-restart")
+        return Notification(
+            event="WORKER_OFFLINE",
+            title="Worker arrete" if stopped else f"Worker muet depuis {minutes} min",
+            body="\n".join(lines),
+            level="CRITICAL",
+        )
+
+    def worker_back(self, minutes: int) -> Notification:
+        return Notification(
+            event="WORKER_OFFLINE",
+            title="Worker revenu",
+            body=f"Silence d'environ {minutes} min ; le premier tour relit toutes les positions sur Binance.",
+            level="INFO",
+        )
+
+    def worker_standby(self, exposure) -> Notification:
+        names = ", ".join(sorted(set(exposure.unprotected))[:8])
+        body = (f"Positions ouvertes : {exposure.open_positions}. Rien n'est suivi en veille : ni TP, ni "
+                "deplacement du stop.")
+        if exposure.unprotected:
+            body += (f"\nStops NON poses chez Binance : {len(exposure.unprotected)} ({names}) : ils ne sont plus "
+                     "surveilles.")
+        body += "\nRelancer : Dashboard, bouton Demarrer."
+        return Notification(event="WORKER_OFFLINE", title="Worker en veille avec des positions ouvertes",
+                            body=body, level="WARNING")
+
     def market_guard(self, kind: str, detail: str) -> Notification:
         """Debut (kind="STARTED") ou fin de la protection en cas de chute du marche."""
         started = kind == "STARTED"
@@ -529,6 +569,27 @@ class NotificationEngine:
             else "Protection marche levee — entrees a nouveau permises",
             body=detail,
             level="WARNING" if started else "INFO",
+        )
+
+    def login_alert(self, kind: str, username: str, address: str) -> Notification:
+        """Connexion reussie a l'interface (kind="LOGIN") ou compte bloque apres trop d'echecs ("LOCKED")."""
+        when = time.strftime("%d/%m %H:%M UTC", time.gmtime())
+        advice = "Si ce n'est pas toi : changer le mot de passe (make compte) et verifier le VPS."
+        if kind == "LOCKED":
+            return Notification(event="LOGIN", title=f"Compte {username} bloque apres trop d'echecs",
+                                body=f"Dernier essai : {when}, adresse {address}.\n{advice}", level="CRITICAL")
+        return Notification(event="LOGIN", title=f"Connexion a l'interface : {username}",
+                            body=f"{when}, adresse {address}.\n{advice}", level="WARNING")
+
+    def daily_loss(self, kind: str, detail: str) -> Notification:
+        """Perte maximale du jour atteinte (kind="STARTED") ou blocage leve."""
+        started = kind == "STARTED"
+        return Notification(
+            event="DAILY_LOSS",
+            title="Perte maximale du jour atteinte — nouvelles entrees bloquees" if started
+            else "Perte maximale du jour levee — nouvelles entrees permises",
+            body=detail,
+            level="CRITICAL" if started else "INFO",
         )
 
     def daily_report(self, title: str, body: str) -> Notification:

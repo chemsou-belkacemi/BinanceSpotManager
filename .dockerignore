@@ -8,6 +8,7 @@ data/
 logs/
 backups/
 deploy/users.caddy*
+deploy/sauvegarde.age.pub
 
 # Environnements et caches
 .git/

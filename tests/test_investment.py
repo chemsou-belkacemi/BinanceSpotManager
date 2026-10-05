@@ -252,7 +252,7 @@ def test_worker_places_only_stop_for_sl_only(rules):
     position = _filled_position(rules, "SL_ONLY")
     sent = []
 
-    def place_stop(current, *, stop_price, quantity, attempt):
+    def place_stop(current, *, stop_price, quantity, attempt, keep_level=False):
         sent.append((stop_price, quantity))
         current.stop_loss.status = SLStatus.ACTIVE
         return OrderResult(success=True, status="NEW", order_id=77)

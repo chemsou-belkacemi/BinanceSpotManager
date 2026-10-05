@@ -619,8 +619,12 @@ class ExecutionEngine:
         stop_price: float,
         quantity: float,
         attempt: int = 0,
+        keep_level: bool = False,
     ) -> OrderResult:
-        """Cree l'unique SL Binance (STOP_LOSS_LIMIT) sur la quantite restante."""
+        """Cree l'unique SL Binance (STOP_LOSS_LIMIT) sur la quantite restante.
+
+        `keep_level` : l'ordre est le stop de secours d'un SL a la cloture de bougie ; le niveau de cloture surveille
+        (resolved_price) ne change pas. Sinon, l'ordre EST le stop et son prix devient le niveau du SL."""
         if position.oco_exit is not None:
             return OrderResult(success=False, error="SL independant interdit sur une position OCO")
         if position.stop_loss.executed_qty > QTY_EPSILON:
@@ -699,10 +703,14 @@ class ExecutionEngine:
                     stop_would_trigger=exc.is_stop_would_trigger,
                 )
 
+        # Un stop de secours (SL a la cloture de bougie) garde le niveau de cloture surveille par le worker : son
+        # prix chez Binance se deduit de ce niveau (StopLoss.binance_stop_price), il ne le remplace jamais.
+        keeps_level = keep_level
         if result.success:
             position.stop_loss.order_id = result.order_id
             position.stop_loss.client_order_id = client_order_id
-            position.stop_loss.resolved_price = stop
+            if not keeps_level:
+                position.stop_loss.resolved_price = stop
             position.stop_loss.quantity = qty
             position.stop_loss.status = SLStatus.ACTIVE
             position.stop_loss.created_at = position.stop_loss.created_at or utcnow()
@@ -718,7 +726,8 @@ class ExecutionEngine:
         elif result.status == "UNKNOWN":
             position.stop_loss.order_id = None
             position.stop_loss.client_order_id = client_order_id
-            position.stop_loss.resolved_price = stop
+            if not keeps_level:
+                position.stop_loss.resolved_price = stop
             position.stop_loss.quantity = qty
             position.stop_loss.status = SLStatus.REPLACING
             position.stop_loss.last_error = result.error
@@ -752,8 +761,9 @@ class ExecutionEngine:
         *,
         new_stop_price: float,
         quantity: float,
+        keep_level: bool = False,
     ) -> OrderResult:
-        """Deplace le SL : annule l'ancien puis cree le nouveau (section 16).
+        """Deplace le SL : annule l'ancien puis cree le nouveau (section 16). `keep_level` : voir place_stop_loss.
 
         On annule d'abord pour ne jamais depasser MAX_NUM_ALGO_ORDERS, et
         l'echec de creation est journalise comme une fenetre non protegee.
@@ -775,6 +785,7 @@ class ExecutionEngine:
             ):
                 position.stop_loss.status = SLStatus.ACTIVE
                 return OrderResult(success=False, error="Annule par l'utilisateur")
+            position.stop_loss.cancel_pending = True   # annulation par le bot : jamais prise pour un geste manuel
             cancelled = self.cancel_order(
                 position.symbol,
                 order_id=previous_order_id,
@@ -796,12 +807,14 @@ class ExecutionEngine:
                 )
                 return cancelled
 
+        position.stop_loss.cancel_pending = False
         position.stop_loss.replace_count += 1
         result = self.place_stop_loss(
             position,
             stop_price=new_stop_price,
             quantity=quantity,
             attempt=position.stop_loss.replace_count,
+            keep_level=keep_level,
         )
 
         if result.success:

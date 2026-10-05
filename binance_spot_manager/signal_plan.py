@@ -210,7 +210,7 @@ def prepare_signal(parsed: ParsedSignal, rules, *, budget, available_quote, rese
                    current_price, signal_id, source="manual", touch_stop=False,
                    validity_confirmed=False, entry_allocations=None, tp_allocations=None,
                    trail_stop=True, sl_after_tp=SLRuleAfterTP.NO_CHANGE, account_scope="", signal_key="",
-                   cancel_entry_if_tp1_first=False, source_name=""):
+                   cancel_entry_if_tp1_first=False, source_name="", candle_backup_percent=0.0):
     """Stop après TP : signal CSI → règle de sa politique de sortie (contrat) ; signal texte → stop suiveur
     (`trail_stop`, TP1 → entrée, TPk → TP(k−2)) s'il est activé, sinon la règle `sl_after_tp` appliquée à chaque TP
     sauf le dernier (par défaut NO_CHANGE : le stop ne bouge pas).
@@ -322,6 +322,8 @@ def prepare_signal(parsed: ParsedSignal, rules, *, budget, available_quote, rese
     if candle_interval:
         position.stop_loss.trigger = SLTrigger.CANDLE_CLOSE
         position.stop_loss.candle_interval = candle_interval
+        # Stop de secours chez Binance, X % sous le niveau de cloture (0 : surveillance par le worker seul).
+        position.stop_loss.backup_percent = min(max(float(candle_backup_percent or 0.0), 0.0), 20.0)
     for group in position.source_groups:
         group.signal_id = signal_id
     for entry in position.entries:

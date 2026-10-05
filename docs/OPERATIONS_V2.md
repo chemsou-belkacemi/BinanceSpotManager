@@ -50,8 +50,11 @@ durable ; la session Streamlit seule ne constitue pas une garantie de livraison.
 - **Planification et supervision** : une commande comportant plusieurs entrées
   peut prolonger un cycle du worker. Le stop-limit n'est pas une garantie de
   prix/exécution, et aucune cadence d'une seconde n'est garantie sous charge.
-- **Sauvegarde distante/chiffrement/signature** : hors de cette implémentation.
-  L'archive ne contient pas les alertes ni les journaux et doit rester privée.
+- **Sauvegarde distante/chiffrement/signature** : depuis le 5 octobre 2026, les volumes
+  `data/` et `logs/` ont une sauvegarde chiffrée (`make backup-chiffre`, clé publique `age`)
+  rapatriée sur le PC par `scripts/recuperer_sauvegardes.sh` ([SECURITE_VPS.md](SECURITE_VPS.md)).
+  L'export ZIP de cette page reste non chiffré ; aucune sauvegarde n'est signée. L'archive ZIP
+  ne contient pas les alertes ni les journaux et doit rester privée.
 
 ## Vérification et remise en service
 

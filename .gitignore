@@ -16,6 +16,9 @@ master.key
 # Identifiants de l'acces public (make user-add)
 deploy/users.caddy*
 
+# Cle PUBLIQUE age des sauvegardes chiffrees (propre a chaque serveur ; la cle privee reste sur le PC)
+deploy/sauvegarde.age.pub
+
 # Python
 .venv/
 venv/
