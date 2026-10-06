@@ -33,7 +33,7 @@ from typing import Any, Iterable, Mapping
 
 from .candle_stop import kline_interval
 from .investment_plan import InvestmentPreview, investment_risk_context
-from .models import EntryStatus, Position, SLStatus
+from .models import EntryStatus, Position, SLStatus, SLTrigger
 from .risk_engine import RiskEngine, RiskLimits
 from .signal_parser import CsiSignalFormatError, read_csi_signal
 from .wallet_valuation import conversion_rate
@@ -155,11 +155,13 @@ def _finite(value: Any) -> Any:
 
 
 def clean_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
-    """Métriques sérialisables en JSON strict (aucun NaN ni infini)."""
+    """Métriques sérialisables en JSON strict (aucun NaN ni infini), y compris dans les dicts imbriqués."""
     cleaned: dict[str, Any] = {}
     for key, value in metrics.items():
         if isinstance(value, float):
             cleaned[key] = _finite(value)
+        elif isinstance(value, Mapping):
+            cleaned[key] = clean_metrics(value)
         elif isinstance(value, (list, tuple)):
             cleaned[key] = [_finite(item) for item in value]
         else:
@@ -506,8 +508,14 @@ def assess_risk(*, kind: str, payload: Mapping[str, Any], plan_average_price: fl
     entries = [(float(e.binance_qty), float(e.resolved_price or 0))
                for e in _requested_entries(position, entry_ids)]
     stop = position.stop_loss.resolved_price if position.stop_loss.status is not SLStatus.NONE else None
+    loss_stop = stop
+    if stop and position.stop_loss.trigger is SLTrigger.CANDLE_CLOSE and position.stop_loss.binance_stop_price():
+        # SL à la clôture de bougie : la vente peut se faire jusqu'au stop de secours, plus bas ; la perte au stop (R1)
+        # se mesure là. Sans secours, le niveau nominal reste la seule référence chiffrable. La distance du stop (R6)
+        # reste celle du signal.
+        loss_stop = position.stop_loss.binance_stop_price()
     offset = float(position.stop_loss.limit_offset_percent) / 100.0
-    risk_with_costs = loss_with_costs(entries, stop, offset_fraction=offset) * quote_rate
+    risk_with_costs = loss_with_costs(entries, loss_stop, offset_fraction=offset) * quote_rate
     risk_pct = risk_with_costs / total * 100.0
     resting = sum(_position_resting_risk(p, prices) for p in positions if p.is_open)
     queued = sum(_queued_risk(command, prices) for command in active_commands)

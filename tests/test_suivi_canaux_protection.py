@@ -679,7 +679,7 @@ def test_settings_save_the_guard_the_report_and_the_signal_options(monkeypatch, 
     assert store.load()["signal_cancel_entry_if_tp1_first"] is True
 
     app.toggle(key="signal_channel_review_toggle").set_value(True)
-    next(b for b in app.button if b.label == "Enregistrer la règle du canal").click().run()
+    next(b for b in app.button if b.label == "Enregistrer la règle du trader ou canal").click().run()
     assert not app.exception
     assert store.load()["signal_channel_review_enabled"] is True
     assert store.load()["signal_channel_review_min_trades"] == 30

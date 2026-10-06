@@ -572,6 +572,8 @@ class Position(BSMModel):
     updated_at: datetime = Field(default_factory=utcnow)
     closed_at: Optional[datetime] = None
     close_reason: Optional[CloseReason] = None
+    #: raison demandee au passage en CLOSING (cloture au marche), reprise si la cloture se termine plus tard
+    closing_reason: Optional[CloseReason] = None
 
     entries: list[Entry] = Field(default_factory=list)
     take_profits: list[TakeProfit] = Field(default_factory=list)

@@ -153,16 +153,16 @@ def closed_between(positions: Iterable[Position], start: datetime, end: datetime
 
 
 def losing_channel(positions: Iterable[Position], channel: str, *, min_trades: int,
-                   key: Callable[[Position], str] = channel_of) -> Optional[str]:
+                   key: Callable[[Position], str] = channel_of, min_loss: float = 0.0) -> Optional[str]:
     """Motif de mise en revue d'un signal : son trader ou canal (`key` le donne pour chaque position)
-    a au moins `min_trades` positions terminees et un resultat net negatif, frais compris. None sinon
-    (nom inconnu, pas assez de recul, ou gagnant)."""
+    a au moins `min_trades` positions terminees et un resultat net negatif, frais compris, d'au moins
+    `min_loss` (0 : toute perte). None sinon (nom inconnu, pas assez de recul, ou gagnant)."""
     if not channel or channel in {UNKNOWN_TELEGRAM, "manuel"}:
         return None
     wanted = name_key(channel)
     closed = [p for p in positions if not p.is_open]
     stats = next((s for s in stats_by(closed, key=key) if name_key(s.name) == wanted), None)
-    if stats is None or stats.positions < min_trades or stats.net >= 0:
+    if stats is None or stats.positions < min_trades or stats.net >= 0 or -stats.net < max(float(min_loss), 0.0):
         return None
     return (f"Trader/canal « {channel} » perdant : {stats.net:+.2f} sur {stats.positions} positions "
             f"terminées ({stats.wins} gagnantes) — à confirmer")

@@ -245,6 +245,40 @@ with tabs[5]:
                 st.success("Stratégie de budget enregistrée pour les prochains signaux.")
 
     st.divider()
+    st.subheader("Taille selon le risque")
+    from binance_spot_manager.signal_sizing import ChannelPolicy, RiskSizingPolicy
+    risk_sizing = RiskSizingPolicy.from_mapping(signal_preferences)
+    with st.form("signal_risk_sizing_preferences"):
+        risk_enabled = st.toggle(
+            "Calculer le budget pour perdre le même montant à chaque stop",
+            value=risk_sizing.enabled, key="signal_risk_sizing_toggle",
+            help=("Désactivé (par défaut) : le budget vient de la stratégie ci-dessus. Activé : budget = capital × "
+                  "risque ÷ distance du stop (entrée moyenne → stop). Un stop à 2 % reçoit deux fois plus qu'un stop à "
+                  "4 % : les deux perdent la même chose au stop. Un signal sans stop part « à confirmer »."),
+        )
+        risk_percent = st.number_input(
+            "Perte visée au stop (% du capital, hors frais)", min_value=0.01, max_value=5.0, step=0.05,
+            value=float(risk_sizing.risk_percent), key="signal_risk_percent_input",
+            help="Le contrôle « risque au stop » (frais compris) s'applique toujours ensuite.",
+        )
+        risk_cap = st.number_input(
+            "Budget maximal par signal (% du capital)", min_value=1.0, max_value=100.0, step=1.0,
+            value=float(risk_sizing.max_budget_percent), key="signal_risk_cap_input",
+            help="Un stop très proche demanderait un budget énorme : ce plafond l'arrête. La réserve reste prioritaire.",
+        )
+        st.caption("Exemple : capital 10 000, perte visée 0,4 % = 40 USDT ; stop à 2 % → budget 2 000 ; stop à 8 % → "
+                   "budget 500. Un SL à la clôture de bougie est calculé sur son stop de secours (sans secours : « à "
+                   "confirmer »). Activée, elle remplace la stratégie de budget ci-dessus, part réduite comprise. "
+                   "Perte visée hors frais : garde-la sous le seuil « risque au stop » (0,5 % frais compris par défaut), "
+                   "sinon les stops proches partent « à confirmer ». S'applique aux prochains signaux, manuels "
+                   "(proposition) et automatiques.")
+        if st.form_submit_button("Enregistrer la taille selon le risque"):
+            get_settings_store().update({"signal_risk_sizing_enabled": bool(risk_enabled),
+                                         "signal_risk_percent": float(risk_percent),
+                                         "signal_risk_max_budget_percent": float(risk_cap)})
+            st.success("Taille selon le risque enregistrée.")
+
+    st.divider()
     st.subheader("Suivi du stop loss")
     with st.form("signal_trail_stop_preferences"):
         trail_stop = st.toggle(
@@ -286,24 +320,43 @@ with tabs[5]:
             st.success("Réglage enregistré pour les prochains signaux texte.")
 
     st.divider()
-    st.subheader("Canal perdant")
+    st.subheader("Trader ou canal perdant")
+    channel_policy = ChannelPolicy.from_mapping(signal_preferences)
     with st.form("signal_channel_review_preferences"):
         channel_review = st.toggle(
-            "Mettre « À confirmer » les signaux d'un canal dont le résultat net est négatif",
-            value=bool(signal_preferences.get("signal_channel_review_enabled", False)),
+            "Agir sur les signaux d'un trader ou canal dont le résultat net est négatif",
+            value=channel_policy.enabled,
             key="signal_channel_review_toggle",
-            help=("Le résultat net (frais compris) du canal d'origine est calculé sur ses positions terminées. "
-                  "Sous le nombre minimal de positions, aucun jugement : trop peu de trades."),
+            help=("Le résultat net (frais compris) du trader ou du canal est calculé sur ses positions terminées. "
+                  "Sous le nombre minimal de positions, aucun jugement : trop peu de trades. Désactivé par défaut."),
         )
         channel_min = st.number_input(
-            "Nombre minimal de positions terminées du canal avant de juger",
+            "Nombre minimal de positions terminées avant de juger",
             min_value=10, max_value=500, step=5,
-            value=int(signal_preferences.get("signal_channel_review_min_trades", 30)),
+            value=int(channel_policy.min_trades),
             key="signal_channel_review_min_input",
         )
-        if st.form_submit_button("Enregistrer la règle du canal"):
+        channel_loss = st.number_input(
+            "Perte nette minimale pour agir (devise de cotation, 0 : toute perte)",
+            min_value=0.0, max_value=1_000_000.0, step=5.0, value=float(channel_policy.min_loss),
+            key="signal_channel_min_loss_input",
+        )
+        channel_labels = {"REVIEW": "Mettre ses signaux « à confirmer »", "REDUCE": "Réduire la taille de ses signaux"}
+        channel_action = st.radio("Action", list(channel_labels), format_func=channel_labels.get,
+                                  index=list(channel_labels).index(channel_policy.action),
+                                  key="signal_channel_action_choice", horizontal=True)
+        channel_kept = st.number_input(
+            "Taille gardée si réduction (% du budget)", min_value=10.0, max_value=90.0, step=5.0,
+            value=float(channel_policy.kept_percent), key="signal_channel_kept_input",
+        )
+        st.caption("Un résultat négatif sur peu de trades peut être de la malchance : ce n'est pas une preuve qu'un "
+                   "trader est mauvais. La réduction garde ses signaux en mesure, à moindre risque.")
+        if st.form_submit_button("Enregistrer la règle du trader ou canal"):
             get_settings_store().update({"signal_channel_review_enabled": bool(channel_review),
-                                         "signal_channel_review_min_trades": int(channel_min)})
+                                         "signal_channel_review_min_trades": int(channel_min),
+                                         "signal_channel_min_loss": float(channel_loss),
+                                         "signal_channel_action": channel_action,
+                                         "signal_channel_kept_percent": float(channel_kept)})
             st.success("Réglage enregistré.")
 
     st.divider()
