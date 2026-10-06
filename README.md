@@ -147,6 +147,10 @@ refusé au démarrage. Ne jamais placer les volumes sur un partage réseau
   le capital plus tôt : sur quelques jours, l'écart dépend surtout du marché.
 - **Par trader ou canal** (History) : nom du trader écrit en tête du signal, sinon canal ;
   voir `docs/SIGNAUX.md`, section « Trader ou canal d'origine ».
+- **Exécution automatique sans listes** (Settings → Signaux, routage, **désactivés par défaut**) : « toutes les
+  conversations autorisées sont de confiance » (plus de liste de groupes) et « toutes les cryptos sont acceptées »
+  (plus de liste d'actifs). Les contrôles de risque, de liquidité, de perte du jour et l'avis de CSI restent ;
+  les activer est un élargissement (case d'autorisation).
 - **Taille selon le risque** (Settings → Signaux, **désactivée par défaut**) : budget = capital ×
   perte visée ÷ distance du stop (entrée moyenne → stop). Chaque signal perd alors le même montant
   au stop (0,4 % du capital par défaut, hors frais), plafonné à 20 % du capital par signal et par la

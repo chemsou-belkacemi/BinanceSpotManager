@@ -626,18 +626,31 @@ with tabs[5]:
             f"- Mode : `{settings.run_mode.value}`"
             + (" — tout signal demande une confirmation manuelle" if manual_mode else "") + "\n"
             f"- Autorisation datée : {'oui' if routing_prefs.get('signal_auto_execute_enabled_since') else 'non'}\n"
-            f"- Groupes Telegram de confiance : {len(current_policy.trusted_chats)}\n"
-            f"- Actifs validés pour l'automatique : {len(current_policy.base_assets)}\n"
+            f"- Groupes Telegram de confiance : "
+            f"{'toutes les conversations autorisées' if current_policy.trust_all_chats else len(current_policy.trusted_chats)}\n"
+            f"- Actifs validés pour l'automatique : "
+            f"{'tous' if current_policy.all_assets else len(current_policy.base_assets)}\n"
             f"- Coupe-circuits : {auto_24h if auto_24h is not None else '?'} ordre(s) automatique(s) sur 24 h "
             f"(maximum {current_policy.max_auto_per_24h})"
             + (f" · réarmé le {time.strftime('%Y-%m-%d %H:%M', time.gmtime(current_policy.breaker_reset_at))} UTC"
                if current_policy.breaker_reset_at else "")
         )
     if routing_prefs.get("signal_auto_execute_enabled") and (
-            not current_policy.trusted_chats or not current_policy.base_assets):
+            (not current_policy.trusted_chats and not current_policy.trust_all_chats)
+            or (not current_policy.base_assets and not current_policy.all_assets)):
         st.warning("Exécution automatique active, mais aucun groupe de confiance ou aucun actif validé : "
                    "tous les signaux Telegram passeront « À confirmer ».")
 
+    trust_all_input = st.toggle(
+        "Toutes les conversations autorisées sont de confiance (pas de liste de groupes)",
+        value=current_policy.trust_all_chats, key="signal_trust_all_chats_toggle",
+        help="Activé : tout signal reçu d'une conversation autorisée à la réception peut partir en automatique, sans "
+             "liste de groupes. Les contrôles de risque, de liquidité, de perte du jour et l'avis de CSI restent.")
+    all_assets_input = st.toggle(
+        "Toutes les cryptos sont acceptées en automatique (pas de liste d'actifs)",
+        value=current_policy.all_assets, key="signal_all_assets_toggle",
+        help="Activé : la liste d'actifs ci-dessous n'est plus appliquée. Le filtre halal de CSI, s'il est actif "
+             "(Avis CSI), retient toujours les cryptos refusées ou à décider.")
     trusted_input = st.text_input(
         "Groupes Telegram de confiance (identifiants numériques, parmi les conversations autorisées)",
         value=", ".join(str(chat) for chat in sorted(signal_routing.parse_chat_ids(
@@ -721,6 +734,8 @@ with tabs[5]:
             save_routing({
                 "signal_auto_trusted_chats": sorted(trusted),
                 "signal_auto_base_assets": list(assets),
+                "signal_auto_trust_all_chats": bool(trust_all_input),
+                "signal_auto_all_assets": bool(all_assets_input),
                 "signal_route_honor_demo_manual": bool(honor_input),
                 "signal_review_notify": bool(notify_input),
                 "signal_review_max_risk_percent": float(max_risk_input),

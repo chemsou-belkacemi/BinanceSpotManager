@@ -219,6 +219,10 @@ class RoutingPolicy:
     csi_high_volatility_review: bool = True
     trusted_chats: frozenset[int] = frozenset()
     base_assets: tuple[str, ...] = CSI_UNIVERSE_BASE_ASSETS
+    #: interrupteurs du propriétaire (désactivés par défaut) : toutes les conversations autorisées à la réception
+    #: valent groupe de confiance ; tous les actifs sont acceptés en automatique (les autres contrôles restent).
+    trust_all_chats: bool = False
+    all_assets: bool = False
     max_auto_per_24h: int = 4
     daily_loss_percent: float = 2.0
     loss_streak: int = 3
@@ -256,6 +260,8 @@ class RoutingPolicy:
             trusted_chats=parse_chat_ids(values.get("signal_auto_trusted_chats", ())) & allowed_chats,
             base_assets=(parse_assets(values["signal_auto_base_assets"])
                          if "signal_auto_base_assets" in values else CSI_UNIVERSE_BASE_ASSETS),
+            trust_all_chats=_flag(values, "signal_auto_trust_all_chats", False),
+            all_assets=_flag(values, "signal_auto_all_assets", False),
             max_auto_per_24h=int(_number(values, "signal_auto_max_per_24h", 4, 0, 100)),
             daily_loss_percent=_number(values, "signal_auto_daily_loss_percent", 2.0, 0.01, 100.0),
             loss_streak=int(_number(values, "signal_auto_loss_streak", 3, 1, 50)),
@@ -272,8 +278,12 @@ class RoutingPolicy:
         widened = []
         if not other.trusted_chats <= self.trusted_chats:
             widened.append("groupes de confiance ajoutés")
+        if other.trust_all_chats and not self.trust_all_chats:
+            widened.append("toutes les conversations autorisées de confiance")
         if not set(other.base_assets) <= set(self.base_assets):
             widened.append("actifs ajoutés")
+        if other.all_assets and not self.all_assets:
+            widened.append("tous les actifs acceptés")
         if self.honor_demo_manual and not other.honor_demo_manual:
             widened.append("DEMO_MANUAL n'impose plus la confirmation")
         for name, label, wider in (
@@ -365,14 +375,14 @@ def confidence_reasons(row: Mapping[str, Any], policy: RoutingPolicy, *, now: fl
         if chat is None:
             reasons.append(Reason("C_SOURCE_UNDECLARED", CONFIANCE,
                                   "Conversation Telegram illisible : source non déclarée"))
-        elif chat not in policy.trusted_chats:
+        elif chat not in policy.trusted_chats and not policy.trust_all_chats:
             reasons.append(Reason("C_SOURCE_UNDECLARED", CONFIANCE,
                                   "Groupe Telegram non déclaré de confiance (déclaration du propriétaire, "
                                   "pas une mesure)"))
     else:
         reasons.append(Reason("C_SOURCE_UNDECLARED", CONFIANCE,
                               "Dépôt JSON v1 : aucune source déclarée, confirmation manuelle systématique"))
-    if kind != KIND_CSI:
+    if kind != KIND_CSI and not policy.all_assets:
         asset = base_asset(parsed.get("symbol", ""))
         if not policy.base_assets:
             reasons.append(Reason("C_UNIVERSE", CONFIANCE,
