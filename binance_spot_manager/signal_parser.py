@@ -48,8 +48,8 @@ LABELLED_LINE = re.compile(
 # Several labels on one line ("BTC/USDT Buy: 60000 TP: 62000 SL: 58000"): split before each one.
 INLINE_LABEL = re.compile(r"\s(?=(?:" + "|".join(LABELS.values()) + r")(?![A-Z])\s*\d{0,2}\s*[:=])")
 QUOTES = r"USDT|USDC|FDUSD|BUSD|USD|BTC|ETH|BNB|EUR|TRY"
-SLASH_PAIR = re.compile(rf"(?<![A-Z0-9])([A-Z0-9]{{2,20}})(?:\s*/\s*|[-_])({QUOTES})(?![A-Z0-9])")
-JOINED_PAIR = re.compile(r"(?<![A-Z0-9])((?=[A-Z0-9]*[A-Z])[A-Z0-9]{2,20}?)(USDT|USDC)(?![A-Z0-9])")
+SLASH_PAIR = re.compile(rf"(?<![A-Z0-9])([A-Z0-9]{{2,20}}|[A-Z])(?:\s*/\s*|[-_])({QUOTES})(?![A-Z0-9])")
+JOINED_PAIR = re.compile(r"(?<![A-Z0-9])([A-Z]|(?=[A-Z0-9]*[A-Z])[A-Z0-9]{2,20}?)(USDT|USDC)(?![A-Z0-9])")
 TIMEFRAME = re.compile(r"(?<![\d.])(\d{1,3})\s*(MINUTES?|MINS?|M|HOURS?|HRS?|H|DAYS?|D|WEEKS?|W)(?![A-Z])")
 # Words that change the meaning of a price: never ignored, always refused. "Au marché" (with or
 # without accent) is the French "market": "ENTRY: 2500 (au marché)" must never become a limit at 2500.
@@ -233,7 +233,7 @@ def parse_signal(raw: str, template: str = "auto") -> ParsedSignal:
             index, value = labelled["index"], labelled["value"].strip()
             section = None
             if kind == "pair":
-                named = re.match(r"[#$]?\s*([A-Z0-9]{2,20})(?:\s*/\s*|[-_\s]?)([A-Z]{3,5})?(?![A-Z0-9])", value)
+                named = re.match(r"[#$]?\s*([A-Z0-9]{2,20}|[A-Z])(?:\s*/\s*|[-_\s]?)([A-Z]{3,5})?(?![A-Z0-9])", value)
                 if named:
                     pairs.add(named[1] + (named[2] or ""))
                 continue
@@ -276,7 +276,7 @@ def parse_signal(raw: str, template: str = "auto") -> ParsedSignal:
         result.errors.append("Une seule paire explicite est requise ; aucune devise n'est ajoutée automatiquement.")
     else:
         result.symbol = pairs.pop()
-        if not re.fullmatch(r"[A-Z0-9]{2,20}(?:USDT|USDC)", result.symbol):
+        if not re.fullmatch(r"(?:[A-Z0-9]{2,20}|[A-Z])(?:USDT|USDC)", result.symbol):
             result.errors.append("Seules les paires Spot USDT/USDC sont prises en charge.")
     result.exchange = platforms[0] if platforms else ""
     if any(platform != "BINANCE" for platform in platforms):
