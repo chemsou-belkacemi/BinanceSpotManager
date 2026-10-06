@@ -149,8 +149,9 @@ class CsiClient:
     # --- évaluation --------------------------------------------------------------------------
     def evaluate(self, text: str, *, source: str, record: bool = True, user_validated: bool = False) -> CsiOpinion:
         """`user_validated` : signal soumis à la main par le propriétaire. Sa validation ajoute une paire
-        inconnue à l'univers de CSI (avis EN_ATTENTE le temps du téléchargement). Le worker passe False :
-        un signal reçu automatiquement n'ajoute jamais rien."""
+        inconnue à l'univers de CSI (avis EN_ATTENTE le temps du téléchargement). Le worker passe False : cette
+        évaluation n'ajoute rien. Depuis le 2026-10-06, CSI ajoute seul les paires USDT publiées par les canaux de
+        confiance halal du propriétaire, reçues par son relais Telegram (identifiant de conversation), jamais ici."""
         text = (text or "").strip()
         source = (source or "").strip()[:MAX_SOURCE_CHARS]
         if not text or not source:
