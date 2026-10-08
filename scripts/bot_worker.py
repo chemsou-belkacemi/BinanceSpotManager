@@ -64,6 +64,7 @@ from binance_spot_manager.daily_guard import CHECK_EVERY_SECONDS as DAILY_LOSS_C
 from binance_spot_manager.daily_guard import DailyLossGuard, day_result  # noqa: E402
 from binance_spot_manager.daily_report import DailyReport  # noqa: E402
 from binance_spot_manager.market_guard import MarketGuard  # noqa: E402
+from binance_spot_manager.csi_light import CsiLightGuard  # noqa: E402
 from binance_spot_manager.licence import LicenceGate  # noqa: E402
 from binance_spot_manager.signal_auto_execution import AutomaticSignalExecutor  # noqa: E402
 from binance_spot_manager.signal_drop import SignalDropImporter  # noqa: E402
@@ -196,6 +197,8 @@ class Worker:
         self.market_guard = MarketGuard(
             self.client.get_klines, self.client.get_price, lambda: get_settings_store().load(),
         )
+        # Feu de protection CSI (GET /meteo, désactivé par défaut) : retient ou réduit les NOUVELLES entrées.
+        self.csi_light = CsiLightGuard(CsiClient.from_env(), lambda: get_settings_store().load())
         self.daily_report = DailyReport(lambda: get_settings_store().load())
 
         self._running = True
@@ -407,6 +410,9 @@ class Worker:
         if hasattr(self, "market_guard"):
             # Avant le routage : une chute constatée retient les signaux de ce même tour.
             self._check_market_guard()
+        if hasattr(self, "csi_light"):
+            # Avant le routage aussi : un feu rouge retient les signaux de ce même tour.
+            self._check_csi_light()
         if hasattr(self, "daily_guard"):
             self._check_daily_loss()
         if hasattr(self, "manual_pause") and hasattr(self, "auto_signal_executor"):
@@ -520,12 +526,15 @@ class Worker:
             raise RuntimeError(" ; ".join(outcome.errors))
 
     def _entry_refusal(self) -> str:
-        """Raison de refuser une NOUVELLE entrée (licence, perte maximale du jour), sinon « »."""
+        """Raison de refuser une NOUVELLE entrée (licence, pause, perte maximale du jour, feu CSI rouge réglé sur
+        « manuelle ou automatique »), sinon « »."""
         refusal = self.licence_gate.refusal() if hasattr(self, "licence_gate") else ""
         if not refusal and hasattr(self, "manual_pause"):
             refusal = self.manual_pause.refusal()
         if not refusal and hasattr(self, "daily_guard"):
             refusal = self.daily_guard.refusal()
+        if not refusal and hasattr(self, "csi_light"):
+            refusal = self.csi_light.manual_refusal()        # feu CSI rouge réglé sur « manuelle ou automatique »
         return refusal
 
     def _status_text(self) -> str:
@@ -538,12 +547,15 @@ class Worker:
             self.manual_pause.refusal() if hasattr(self, "manual_pause") else "",
             self.daily_guard.refusal() if hasattr(self, "daily_guard") else "",
             self.market_guard.active_reason() if hasattr(self, "market_guard") else "",
+            self.csi_light.auto_refusal() if hasattr(self, "csi_light") else "",
         ) if reason]
         lines = ["BinanceSpotManager (Binance Demo)",
                  f"Worker : {'en veille' if getattr(self, '_in_standby', False) else 'actif'}",
                  f"Positions ouvertes : {len(positions)} ; capital engagé {committed:.2f} USDT ; "
                  f"latent {latent:+.2f} USDT"]
         lines += [f"Blocage : {reason}" for reason in blocks] or ["Blocages : aucun (nouvelles entrées permises)"]
+        if hasattr(self, "csi_light"):
+            lines.append(self.csi_light.status_line())
         return "\n".join(lines)
 
     def _check_daily_loss(self) -> None:
@@ -590,6 +602,27 @@ class Worker:
             self.events.append(EventType.DAILY_LOSS_STARTED if started else EventType.DAILY_LOSS_ENDED, detail,
                                level="CRITICAL" if started else "INFO")
             self.notifications.notify(self.notifications.daily_loss(kind, detail))
+
+    def _check_csi_light(self) -> None:
+        """Feu de protection CSI : jamais bloquant pour le suivi des positions (rien n'est vendu ni annulé)."""
+        log = logging.getLogger("bsm.worker")
+        try:
+            changes = self.csi_light.check()
+            effect = self.csi_light.effect()
+        except Exception:  # noqa: BLE001 - etat illisible : le feu ne bloque rien
+            log.exception("Feu CSI : contrôle interrompu")
+            return
+        if hasattr(self, "auto_signal_executor"):
+            self.auto_signal_executor.csi_light_reason = effect.detail if effect.block_auto else ""
+            self.auto_signal_executor.csi_light_kept_percent = effect.kept_percent
+            self.auto_signal_executor.csi_light_detail = effect.detail
+        for kind, detail in changes:
+            started = kind == "STARTED"
+            self.events.append(
+                EventType.CSI_LIGHT_STARTED if started else EventType.CSI_LIGHT_ENDED, detail,
+                level="WARNING" if started else "INFO",
+            )
+            self.notifications.notify(self.notifications.csi_light(kind, detail))
 
     def _check_market_guard(self) -> None:
         """Protection en cas de chute de BTC : jamais bloquante pour le suivi des positions."""

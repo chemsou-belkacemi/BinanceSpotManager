@@ -82,6 +82,14 @@ if guard is not None:
                f"{time.strftime('%d/%m %H:%M UTC', time.gmtime(guard[1]))}. Les positions restent suivies "
                "(Settings → Worker & risque).")
 
+from binance_spot_manager.csi_light import active_status as csi_light_status  # noqa: E402
+
+csi_light = csi_light_status()
+if csi_light is not None:
+    light_text = (f"{csi_light.get('detail') or 'Feu CSI actif'} (Settings → Worker & risque). "
+                  "Outil de prudence, aucun gain démontré ; étude en cours.")
+    (st.error if csi_light.get("block_auto") else st.warning)(light_text)
+
 @st.fragment(run_every="1s")
 def worker_panel() -> None:
     """Actualise l'etat du worker sans exiger un second clic sur Arreter."""

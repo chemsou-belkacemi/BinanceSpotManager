@@ -179,6 +179,11 @@ class AutomaticSignalExecutor:
         self.daily_guard_reason = ""
         #: Pause manuelle (commande Telegram /pause) : raison posée et levée par le worker.
         self.manual_pause_reason = ""
+        #: Feu de protection CSI (csi_light.py, désactivé par défaut) : effet posé par le worker à chaque tour.
+        #: ROUGE → raison de retenir les entrées automatiques ; ORANGE → part du budget gardée (en %).
+        self.csi_light_reason = ""
+        self.csi_light_kept_percent = None
+        self.csi_light_detail = ""
         self._diagnostics = {
             "state": "DISABLED",
             "queued_total": 0,
@@ -237,6 +242,10 @@ class AutomaticSignalExecutor:
             # Même effet qu'une suspension : rien ne part, les signaux restent dans la boîte et ne
             # partent après la pause que s'ils sont encore assez récents.
             self._update(state="MARKET_GUARD", last_detail=self.market_guard_reason)
+            return []
+        if self.csi_light_reason:
+            # Feu CSI rouge : rien ne part, les signaux restent dans la boîte (comme la protection marché).
+            self._update(state="FEU_CSI", last_detail=self.csi_light_reason)
             return []
         telegram_ready = bool(preferences.get("signal_telegram_enabled", False)
                               and preferences.get("signal_telegram_auto_enabled", False))
@@ -443,6 +452,13 @@ class AutomaticSignalExecutor:
             suggestion = replace(suggestion, budget=reduced)
         elif channel_detail:
             channel_reasons = [Reason("C_CHANNEL_LOSING", CONFIANCE, channel_detail)]
+        if self.csi_light_kept_percent is not None:
+            # Feu CSI orange (ou prudence) : même réduction que le trader perdant, notée dans les métriques.
+            light = ChannelPolicy(action="REDUCE", kept_percent=float(self.csi_light_kept_percent))
+            reduced = light.reduced(suggestion.budget)
+            sizing_metrics["csi_light_reduction"] = {"detail": self.csi_light_detail, "kept_percent": light.kept_percent,
+                                                     "budget_before": suggestion.budget, "budget": reduced}
+            suggestion = replace(suggestion, budget=reduced)
         if suggestion.budget <= 0:
             reasons.append(Reason("D_NO_BUDGET", DONNEES, "Budget automatique nul après application de la réserve"))
             return self._review(row, signal_routing.decide(reasons), now=now, policy=policy, label=label)

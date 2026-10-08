@@ -1236,6 +1236,49 @@ with tabs[1]:
                                          "daily_loss_percent": float(loss_percent)})
             st.success("Perte maximale du jour enregistrée (prise en compte par le worker en moins d'une minute).")
 
+    st.divider()
+    st.subheader("Feu de protection CSI (météo du marché)")
+    st.caption("Lit le feu de CryptoSignalIntelligence (GET /meteo : volatilité prévue de BTC, BTC contre sa moyenne "
+               "50 jours, part des paires au-dessus de la leur). **Outil de prudence, aucun gain démontré ; étude en "
+               "cours.** C'est un garde-fou de gestion du risque, comme la perte maximale du jour, pas une stratégie. "
+               "Il ne touche jamais aux positions ouvertes : rien n'est vendu ni annulé. Désactivé par défaut.")
+    from binance_spot_manager import csi_light as _csi_light
+
+    light_saved = get_settings_store().load()
+    light_saved = light_saved if isinstance(light_saved, dict) else {}
+    light_policy = _csi_light.LightPolicy.from_mapping(light_saved)
+    red_options, orange_options = list(_csi_light.RED_ACTIONS), list(_csi_light.ORANGE_ACTIONS)
+    unavailable_options = list(_csi_light.UNAVAILABLE_ACTIONS)
+    with st.form("csi_light_preferences"):
+        light_enabled = st.toggle("Activer le feu CSI", value=light_policy.enabled, key="csi_light_enabled_toggle")
+        light_red = st.selectbox("Au ROUGE", red_options, index=red_options.index(light_policy.red_action),
+                                 format_func=_csi_light.RED_ACTIONS.get, key="csi_light_red_select")
+        light_cols = st.columns(2)
+        light_orange = light_cols[0].selectbox("À l'ORANGE", orange_options,
+                                               index=orange_options.index(light_policy.orange_action),
+                                               format_func=_csi_light.ORANGE_ACTIONS.get, key="csi_light_orange_select")
+        light_kept = light_cols[1].number_input("Taille gardée à l'orange (%)", min_value=10.0, max_value=90.0, step=5.0,
+                                                value=float(light_policy.kept_percent), key="csi_light_kept_input",
+                                                help="Même calcul que la taille réduite du trader perdant ; "
+                                                     "signaux automatiques seulement.")
+        light_unavailable = st.selectbox(
+            "Si CSI est injoignable ou le feu INCONNU", unavailable_options,
+            index=unavailable_options.index(light_policy.when_unavailable),
+            format_func=_csi_light.UNAVAILABLE_ACTIONS.get, key="csi_light_unavailable_select",
+            help="Sur le VPS, CSI (sur le PC) n'est pas forcément joignable : « aucune action » laisse BSM travailler "
+                 "comme sans feu ; « prudence » applique l'action de l'orange.")
+        if st.form_submit_button("Enregistrer le feu CSI"):
+            get_settings_store().update({
+                "csi_light_enabled": bool(light_enabled), "csi_light_red_action": str(light_red),
+                "csi_light_orange_action": str(light_orange), "csi_light_orange_kept_percent": float(light_kept),
+                "csi_light_when_unavailable": str(light_unavailable),
+            })
+            st.success("Feu CSI enregistré (lu par le worker à son prochain tour ; CSI interrogé au plus toutes les "
+                       "5 minutes).")
+    light_state = _csi_light.active_status()
+    if light_state is not None:
+        st.info(f"Maintenant : {light_state.get('detail')}")
+
 
 # ==========================================================================
 # Presets

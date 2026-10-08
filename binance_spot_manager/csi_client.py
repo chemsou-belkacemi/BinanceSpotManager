@@ -139,6 +139,11 @@ class CsiClient:
         """Conseil de risque à 24 h de CSI (`GET /risk`, shadow) : ampleur typique et taille relative par paire."""
         return self._request("GET", "/risk")
 
+    def meteo(self, *, timeout: float | None = None) -> dict:
+        """Feu de protection du marché de CSI (`GET /meteo`) : VERT, ORANGE, ROUGE ou INCONNU, avec ses composantes et
+        une explication. Outil de prudence, aucun gain démontré ; lu par le garde-fou csi_light.py."""
+        return self._request("GET", "/meteo", timeout=timeout)
+
     def recent(self, limit: int = 20) -> list[dict]:
         return list(self._request("GET", "/signals/recent", params={"limit": int(limit)}).get("signals") or [])
 
