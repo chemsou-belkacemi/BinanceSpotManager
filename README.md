@@ -121,6 +121,25 @@ les mêmes données, y compris depuis deux conteneurs : un second worker est
 refusé au démarrage. Ne jamais placer les volumes sur un partage réseau
 (verrous et SQLite exigent un seul hôte), ni lancer plusieurs replicas du worker.
 
+### Liens avec CSI : tous désactivés par défaut
+
+CryptoSignalIntelligence (CSI) ne place jamais d'ordre. Tant que tu n'as rien activé, BSM ne l'appelle pas
+et n'écrit rien pour lui : c'est toi qui décides quand activer chaque lien, dans **Settings → Signaux →
+Liens avec CSI** (le feu CSI se règle dans Settings → Worker & risque). Ces valeurs par défaut ne servent que
+si le réglage est absent de `data/settings.json` : un réglage déjà enregistré garde sa valeur.
+
+| Lien | Clé de réglage | Désactivé (défaut) | Activé |
+|---|---|---|---|
+| Avis de CSI avant l'exécution automatique | `signal_csi_gate_enabled` | aucun appel à `POST /evaluate` ; aucun signal retenu à cause de CSI, même injoignable | un avis Refusé ou Défavorable (et Indéterminé en option) retient le signal « À confirmer » ; CSI injoignable : retenu, ou exécuté sans avis selon le réglage |
+| Conseil de taille de CSI | `signal_csi_size_advice_enabled` | aucun appel à `GET /risk`, rien d'affiché | taille proposée par CSI affichée sur la page Signaux, jamais appliquée |
+| Revue « volatilité haute » de CSI | `signal_review_csi_high_volatility` | un signal CSI `VOLATILITY_REGIME=HIGH` suit les autres règles | il passe « À confirmer » (motif `R8_CSI_HIGH_VOLATILITY`) |
+| Retour d'exécution vers CSI | `signal_csi_feedback_enabled` | rien n'est écrit dans `data/signal_drop/outgoing/execution_events.jsonl` | une ligne par étape des signaux CSI (hors DRY_RUN) |
+| Feu de protection CSI | `csi_light_enabled` | aucun appel à `GET /meteo` | voir plus bas |
+
+Les options de l'avis (retenir l'indéterminé, CSI injoignable, noms des groupes) ne s'affichent que si l'avis
+est activé. Restent des appels faits à ta demande seulement : la page **CSI**, le bouton « Demander l'avis de
+CSI » de la page Signaux, et le dépôt de signaux CSI (`signal_drop_enabled`, lui aussi désactivé par défaut).
+
 ### Protection marché, rapport quotidien, suivi des résultats
 
 - **Protection en cas de chute du marché** (Settings → Worker & risque, active par
@@ -165,7 +184,7 @@ refusé au démarrage. Ne jamais placer les volumes sur un partage réseau
   voir `docs/SIGNAUX.md`, section « Trader ou canal d'origine ».
 - **Exécution automatique sans listes** (Settings → Signaux, routage, **désactivés par défaut**) : « toutes les
   conversations autorisées sont de confiance » (plus de liste de groupes) et « toutes les cryptos sont acceptées »
-  (plus de liste d'actifs). Les contrôles de risque, de liquidité, de perte du jour et l'avis de CSI restent ;
+  (plus de liste d'actifs). Les contrôles de risque, de liquidité, de perte du jour et l'avis de CSI (s'il est activé) restent ;
   les activer est un élargissement (case d'autorisation).
 - **Taille selon le risque** (Settings → Signaux, **désactivée par défaut**) : budget = capital ×
   perte visée ÷ distance du stop (entrée moyenne → stop). Chaque signal perd alors le même montant
@@ -177,8 +196,8 @@ refusé au démarrage. Ne jamais placer les volumes sur un partage réseau
   positions terminées et d'une perte nette (frais compris) que tu choisis, ses signaux passent « à
   confirmer » ou partent avec une taille réduite (50 % par défaut), réduction notée dans le routage.
   Un résultat négatif sur peu de trades peut être de la malchance.
-- **Conseil de taille de CSI** (information, jamais appliqué) : pour chaque signal automatique, le
-  routage note ce que CSI proposerait (taille relative à risque égal entre paires, d'après la seule
+- **Conseil de taille de CSI** (information, jamais appliqué, **désactivé par défaut**, Settings → Signaux →
+  Liens avec CSI) : pour chaque signal automatique, le routage note ce que CSI proposerait (taille relative à risque égal entre paires, d'après la seule
   prévision de volatilité confirmée de CSI, et le stop comparé à l'ampleur typique des 24 h). Affiché
   sur la page Signaux ; protocole de mesure dans `docs/RISK_PROTOCOL.md` de CSI.
 

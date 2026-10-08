@@ -216,7 +216,8 @@ class RoutingPolicy:
     max_stop_percent: float = 10.0
     marketable_gap_percent: float = 1.0
     same_asset_review: bool = True
-    csi_high_volatility_review: bool = True
+    #: lien avec CSI, désactivé par défaut (Settings → Signaux → Liens avec CSI).
+    csi_high_volatility_review: bool = False
     trusted_chats: frozenset[int] = frozenset()
     base_assets: tuple[str, ...] = CSI_UNIVERSE_BASE_ASSETS
     #: interrupteurs du propriétaire (désactivés par défaut) : toutes les conversations autorisées à la réception
@@ -255,7 +256,7 @@ class RoutingPolicy:
             max_stop_percent=max_stop,
             marketable_gap_percent=_number(values, "signal_review_marketable_gap_percent", 1.0, 0.0, 10.0),
             same_asset_review=_flag(values, "signal_review_same_asset", True),
-            csi_high_volatility_review=_flag(values, "signal_review_csi_high_volatility", True),
+            csi_high_volatility_review=_flag(values, "signal_review_csi_high_volatility", False),
             # Groupe de confiance : uniquement parmi les conversations autorisées à la réception.
             trusted_chats=parse_chat_ids(values.get("signal_auto_trusted_chats", ())) & allowed_chats,
             base_assets=(parse_assets(values["signal_auto_base_assets"])

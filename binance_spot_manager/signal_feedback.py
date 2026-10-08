@@ -36,6 +36,11 @@ jamais compter deux fois la quantité).
 Aucune importation du projet producteur : ses règles de validation sont
 reproduites dans :func:`validate_event` et toute ligne non conforme est refusée
 avant écriture. Le retour est désactivé en DRY_RUN (aucun ordre réel).
+
+Lien avec CSI **désactivé par défaut** : le worker ne l'écrit que si le propriétaire
+active ``signal_csi_feedback_enabled`` (Settings → Signaux → Liens avec CSI), relu à
+chaque appel. Désactivé : aucune écriture dans ``execution_events.jsonl`` ni dans le
+registre.
 """
 from __future__ import annotations
 
@@ -54,6 +59,7 @@ import threading
 import time
 
 from .config import DATA_DIR
+from .csi_client import FEEDBACK_ENABLED_KEY, link_enabled
 from .models import EntryStatus
 from .position_engine import QTY_EPSILON
 
@@ -346,7 +352,7 @@ class SignalFeedbackWriter:
     """Écrit le fichier de retour ; appelé par le dépôt (réception) et par le worker (``sync``)."""
 
     def __init__(self, scope, inbox, commands, *, positions=None, client=None, directory=OUTGOING_DIR,
-                 registry_path=REGISTRY_PATH, clock=time.time, enabled=True):
+                 registry_path=REGISTRY_PATH, clock=time.time, enabled=True, preferences=None):
         self.scope = scope
         self.inbox = inbox
         self.commands = commands
@@ -357,7 +363,10 @@ class SignalFeedbackWriter:
         self.path = self.directory / FEEDBACK_FILE_NAME
         self.registry = FeedbackRegistry(registry_path)
         self.clock = clock
-        self.enabled = bool(enabled)
+        #: Faux en DRY_RUN : sans ordre réel, aucun événement ne doit prétendre à une exécution.
+        self._allowed = bool(enabled)
+        #: Lecture des réglages (data/settings.json) ; None : seul `enabled` compte (tests, outils).
+        self._preferences = preferences
         self._fee_wait: dict[tuple[str, str], float] = {}
         self._lock = threading.Lock()
         self._diagnostics = {
@@ -370,9 +379,31 @@ class SignalFeedbackWriter:
             "path": str(self.path),
         }
 
+    @property
+    def enabled(self) -> bool:
+        """Retour actif : hors DRY_RUN ET interrupteur du propriétaire activé (désactivé si la clé manque).
+
+        Relu à chaque appel : le changer dans Settings suffit, sans redémarrer le worker. Réglages
+        illisibles : désactivé (rien n'est écrit)."""
+        if not self._allowed:
+            return False
+        if self._preferences is None:
+            return True
+        try:
+            preferences = self._preferences()
+        except Exception:  # noqa: BLE001 - réglages illisibles : le retour reste coupé, jamais une exception
+            return False
+        return link_enabled(preferences, FEEDBACK_ENABLED_KEY)
+
     def snapshot(self):
+        enabled = self.enabled
         with self._lock:
-            return dict(self._diagnostics)
+            snapshot = dict(self._diagnostics)
+        if not enabled:
+            snapshot["state"] = "DISABLED"
+        elif snapshot["state"] == "DISABLED":
+            snapshot["state"] = "ACTIVE"
+        return snapshot
 
     def _update(self, **values):
         with self._lock:

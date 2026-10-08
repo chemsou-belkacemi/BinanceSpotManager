@@ -108,22 +108,25 @@ def test_csi_gate_settings_are_saved_and_csi_outage_is_shown(monkeypatch, tmp_pa
     app = AppTest.from_file(str(app_path), default_timeout=20).run()
     app.switch_page("pages/5_Settings.py").run()
     assert not app.exception
-    assert app.get_by_key("signal_csi_gate_toggle").value is True          # prudent par défaut
-    assert any("injoignable" in w.value and "retenus" in w.value for w in app.warning)
+    # Désactivé par défaut depuis 2026-10-08 : le propriétaire l'active explicitement.
+    assert app.get_by_key("signal_csi_gate_toggle").value is False
+    app.get_by_key("signal_csi_gate_toggle").set_value(True).run()
 
     app.get_by_key("signal_csi_hold_indetermine_toggle").set_value(True)
     app.get_by_key("signal_csi_when_unavailable_choice").set_value("Exécuter quand même, sans avis")
     app.get_by_key("signal_csi_source_names_input").set_value("-1001234=Suhaib")
-    next(b for b in app.button if b.label == "Enregistrer l'avis CSI").click().run()
+    next(b for b in app.button if b.label == "Enregistrer les liens avec CSI").click().run()
     assert not app.exception
     saved = store.load()
     assert saved["signal_csi_gate_enabled"] is True
     assert saved["signal_csi_hold_indetermine"] is True
     assert saved["signal_csi_when_unavailable"] == "ALLOW"
     assert saved["signal_csi_source_names"] == "-1001234=Suhaib"
+    app.run()
+    assert any("injoignable" in w.value and "exécutés sans avis" in w.value for w in app.warning)
 
     app.get_by_key("signal_csi_source_names_input").set_value("Suhaib")
-    next(b for b in app.button if b.label == "Enregistrer l'avis CSI").click().run()
+    next(b for b in app.button if b.label == "Enregistrer les liens avec CSI").click().run()
     assert any("Nom de groupe invalide" in e.value for e in app.error)
     assert store.load()["signal_csi_source_names"] == "-1001234=Suhaib"
 

@@ -324,6 +324,10 @@ position sans achat est terminée.
 
 ### Retour d'exécution v2 (`outgoing/execution_events.jsonl`)
 
+**Désactivé par défaut** : rien n'est écrit tant que « Retour d'exécution vers CSI »
+(`signal_csi_feedback_enabled`, Settings → Signaux → Liens avec CSI) n'est pas activé ;
+jamais en DRY_RUN.
+
 Pour chaque signal CSI, le worker ajoute une ligne JSON par événement, UTF-8, ajout
 en fin de fichier (flush + fsync), au format du retour v2 du producteur
 (`feedback/schema.py`) : `event_id`, `signal_id` (le `SIGNAL_ID`), `event_type`,
@@ -488,7 +492,7 @@ après la préparation du plan et avant tout gel de commande. Trois issues :
 | Même actif déjà ouvert ou en file | ≥ 1 |
 | Distance du stop | hors [1 % ; 10 %] |
 | Entrée déjà dépassée (Telegram, JSON) | > 1 % sous l'entrée la plus basse |
-| `VOLATILITY_REGIME=HIGH` (CSI) | revue |
+| `VOLATILITY_REGIME=HIGH` (CSI) | revue si activée (désactivée par défaut, Settings → Signaux → Liens avec CSI) |
 | Coupe-circuits | ≥ 4 ordres automatiques sur 24 h ; résultat réalisé des signaux depuis 00:00 UTC ≤ −2 % ; 3 pertes automatiques consécutives (jusqu'à « Réarmer l'automatique ») |
 
 Données non mesurables (Binance indisponible, actif sans cours, budget nul, plan refusé,
@@ -544,7 +548,8 @@ signal réussisse ; INDETERMINE signifie « pas assez d'éléments », pas « 50
   répond `EN_ATTENTE` le temps de télécharger l'historique (quelques minutes), puis l'avis normal
   arrive au clic suivant. Un signal **reçu par Telegram** n'ajoute jamais de paire (`REFUSE`, retenu) :
   le coller sur la page CSI pour valider la paire.
-- **Settings → Signaux → Avis CSI avant exécution automatique** : le worker demande l'avis de CSI
+- **Settings → Signaux → Liens avec CSI → Avis de CSI** (**désactivé par défaut** : aucun appel, aucun
+  signal retenu à cause de CSI) : une fois activé, le worker demande l'avis de CSI
   avant de mettre en file un signal texte automatique (jamais pour un signal CSI V3, déjà produit
   par CSI). REFUSE et DEFAVORABLE sont **retenus** : « À confirmer » (`REVIEW`, motif de confiance
   `C_CSI_OPINION`), demandé avant tout appel Binance ; la confirmation manuelle reste possible sur

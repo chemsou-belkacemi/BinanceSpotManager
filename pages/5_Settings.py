@@ -688,9 +688,7 @@ with tabs[5]:
                                     key="signal_review_gap_input")
         same_asset_input = st.toggle("Revue si le même actif est déjà ouvert ou en file",
                                      value=current_policy.same_asset_review, key="signal_review_same_asset_toggle")
-        volatility_input = st.toggle("Revue si VOLATILITY_REGIME=HIGH (CSI)",
-                                     value=current_policy.csi_high_volatility_review,
-                                     key="signal_review_volatility_toggle")
+        st.caption("Revue « volatilité haute » de CSI : section « Liens avec CSI » plus bas.")
         max_auto_input = st.number_input("Ordres automatiques au plus sur 24 h", min_value=0, max_value=100,
                                          value=int(current_policy.max_auto_per_24h), step=1,
                                          key="signal_auto_max_per_24h_input")
@@ -744,7 +742,6 @@ with tabs[5]:
                 "signal_review_max_stop_percent": float(max_stop_input),
                 "signal_review_marketable_gap_percent": float(gap_input),
                 "signal_review_same_asset": bool(same_asset_input),
-                "signal_review_csi_high_volatility": bool(volatility_input),
                 "signal_auto_max_per_24h": int(max_auto_input),
                 "signal_auto_daily_loss_percent": float(day_loss_input),
                 "signal_auto_loss_streak": int(streak_input),
@@ -760,7 +757,7 @@ with tabs[5]:
                 "signal_review_min_stop_percent": defaults.min_stop_percent,
                 "signal_review_max_stop_percent": defaults.max_stop_percent,
                 "signal_review_marketable_gap_percent": defaults.marketable_gap_percent,
-                "signal_review_same_asset": True, "signal_review_csi_high_volatility": True,
+                "signal_review_same_asset": True,
                 "signal_auto_max_per_24h": defaults.max_auto_per_24h,
                 "signal_auto_daily_loss_percent": defaults.daily_loss_percent,
                 "signal_auto_loss_streak": defaults.loss_streak,
@@ -776,59 +773,102 @@ with tabs[5]:
                             level="INFO", changes=["signal_auto_breaker_reset_at"])
         st.success("Coupe-circuits réarmés : seules les pertes automatiques suivantes comptent.")
 
-    st.subheader("Avis CSI avant exécution automatique")
+    st.divider()
+    st.subheader("Liens avec CSI (tous désactivés par défaut)")
     st.caption(
-        "CryptoSignalIntelligence évalue chaque signal Telegram (vetos, taux de base historique de la "
-        "même géométrie, bilan du groupe). Il ne place aucun ordre : il peut seulement RETENIR un signal "
-        "automatique pour confirmation manuelle, jamais l'envoyer tout seul. Détail : page CSI."
+        "CryptoSignalIntelligence (CSI, « le cerveau ») ne place aucun ordre. Sans réglage enregistré, BSM ne "
+        "l'appelle pas et n'écrit rien pour lui : c'est toi qui décides quand activer chaque lien. Un réglage déjà "
+        "enregistré garde sa valeur."
     )
-    csi_policy = GatePolicy.from_mapping(signal_preferences)
-    with st.form("signal_csi_gate_preferences"):
-        csi_gate = st.toggle(
-            "Demander l'avis de CSI avant toute exécution automatique",
-            value=csi_policy.enabled,
-            key="signal_csi_gate_toggle",
-        )
-        csi_hold_indetermine = st.toggle(
-            "Retenir aussi les signaux jugés indéterminés",
-            value=csi_policy.hold_indetermine,
-            key="signal_csi_hold_indetermine_toggle",
-            help="Refusé et Défavorable sont toujours retenus. Indéterminé : pas assez d'éléments pour préférer ce signal au hasard.",
-        )
-        csi_unavailable = st.radio(
-            "Si CSI est injoignable",
-            [CSI_HOLD_LABEL, CSI_ALLOW_LABEL],
-            index=1 if csi_policy.allow_when_unavailable else 0,
-            key="signal_csi_when_unavailable_choice",
-        )
-        csi_names = st.text_area(
-            "Noms des groupes Telegram (identifiant=nom, un par ligne)",
-            value=str(signal_preferences.get(SOURCE_NAMES_KEY, "")),
-            key="signal_csi_source_names_input",
-            height=90,
-            help="Sert au bilan par groupe chez CSI. Exemple : -1001234567890=Suhaib. Sans nom : « telegram <identifiant> ».",
-        )
-        if st.form_submit_button("Enregistrer l'avis CSI"):
-            try:
+    csi_saved = get_settings_store().load()
+    csi_saved = csi_saved if isinstance(csi_saved, dict) else {}
+    csi_policy = GatePolicy.from_mapping(csi_saved)
+    csi_volatility_before = signal_routing.RoutingPolicy.from_mapping(csi_saved).csi_high_volatility_review
+
+    csi_gate = st.toggle("Avis de CSI avant l'exécution automatique", value=csi_policy.enabled,
+                         key="signal_csi_gate_toggle")
+    st.caption("Demande l'avis de CSI (POST /evaluate) avant d'envoyer seul un signal Telegram ; un avis "
+               "défavorable le retient « À confirmer », jamais l'inverse.")
+    if csi_gate:
+        with st.container(border=True):
+            csi_hold_indetermine = st.toggle(
+                "Retenir aussi les signaux jugés indéterminés",
+                value=csi_policy.hold_indetermine,
+                key="signal_csi_hold_indetermine_toggle",
+                help="Refusé et Défavorable sont toujours retenus. Indéterminé : pas assez d'éléments pour préférer ce signal au hasard.",
+            )
+            csi_unavailable = st.radio(
+                "Si CSI est injoignable",
+                [CSI_HOLD_LABEL, CSI_ALLOW_LABEL],
+                index=1 if csi_policy.allow_when_unavailable else 0,
+                key="signal_csi_when_unavailable_choice",
+            )
+            csi_names = st.text_area(
+                "Noms des groupes Telegram (identifiant=nom, un par ligne)",
+                value=str(csi_saved.get(SOURCE_NAMES_KEY, "")),
+                key="signal_csi_source_names_input",
+                height=90,
+                help="Sert au bilan par groupe chez CSI. Exemple : -1001234567890=Suhaib. Sans nom : « telegram <identifiant> ».",
+            )
+            if csi_policy.enabled:
+                csi_health, csi_failure = csi_client.CsiClient.from_env().probe()
+                if csi_health is None:
+                    st.warning(
+                        f"CSI injoignable : {csi_failure}. Tant que CSI ne répond pas, les signaux automatiques sont "
+                        + ("exécutés sans avis (réglage)." if csi_policy.allow_when_unavailable
+                           else "retenus pour confirmation manuelle.")
+                    )
+                else:
+                    (st.success if csi_health.get("ready") else st.info)(f"CSI : {csi_health.get('detail', '')}")
+    csi_size = st.toggle("Conseil de taille de CSI", key="signal_csi_size_advice_toggle",
+                         value=csi_client.link_enabled(csi_saved, csi_client.SIZE_ADVICE_ENABLED_KEY))
+    st.caption("Demande à CSI (GET /risk) la taille qu'il proposerait et l'affiche sur la page Signaux ; "
+               "information seulement, jamais appliquée.")
+    csi_volatility = st.toggle("Revue si CSI annonce une volatilité haute", value=csi_volatility_before,
+                               key="signal_review_volatility_toggle")
+    st.caption("Un signal CSI marqué VOLATILITY_REGIME=HIGH passe « À confirmer » au lieu de partir seul.")
+    csi_feedback = st.toggle("Retour d'exécution vers CSI", key="signal_csi_feedback_toggle",
+                             value=csi_client.link_enabled(csi_saved, csi_client.FEEDBACK_ENABLED_KEY))
+    st.caption("Écrit chaque étape des signaux CSI (reçu, achat, TP, stop…) dans "
+               "data/signal_drop/outgoing/execution_events.jsonl, que CSI relit. Jamais en DRY_RUN.")
+    from binance_spot_manager import csi_light as _csi_light_link
+
+    light_on = _csi_light_link.LightPolicy.from_mapping(csi_saved).enabled
+    st.caption(f"Feu de protection CSI (météo du marché) : réglé dans Settings → Worker & risque, "
+               f"actuellement **{'activé' if light_on else 'désactivé'}** (désactivé par défaut).")
+    csi_widen_ok = True
+    if csi_volatility_before and not csi_volatility:
+        csi_widen_ok = st.checkbox("Je confirme : les signaux CSI en volatilité haute pourront partir seuls",
+                                   key="signal_csi_volatility_widen_authorization",
+                                   help="Couper cette revue élargit l'exécution automatique.")
+    if st.button("Enregistrer les liens avec CSI", key="signal_csi_links_save"):
+        try:
+            if not csi_widen_ok:
+                raise ValueError("Revue « volatilité haute » coupée : cocher la confirmation.")
+            csi_update = {
+                GATE_ENABLED_KEY: bool(csi_gate),
+                csi_client.SIZE_ADVICE_ENABLED_KEY: bool(csi_size),
+                csi_client.HIGH_VOLATILITY_REVIEW_KEY: bool(csi_volatility),
+                csi_client.FEEDBACK_ENABLED_KEY: bool(csi_feedback),
+            }
+            if csi_gate:
                 source_names(csi_names)
-                get_settings_store().update({
-                    GATE_ENABLED_KEY: bool(csi_gate),
+                csi_update |= {
                     GATE_HOLD_INDETERMINE_KEY: bool(csi_hold_indetermine),
                     GATE_WHEN_UNAVAILABLE_KEY: "ALLOW" if csi_unavailable == CSI_ALLOW_LABEL else "HOLD",
                     SOURCE_NAMES_KEY: csi_names.strip(),
-                })
-                st.success("Réglage enregistré. Le worker le relit automatiquement.")
-            except ValueError as exc:
-                st.error(str(exc))
-    csi_health, csi_failure = csi_client.CsiClient.from_env().probe()
-    if csi_health is None:
-        st.warning(
-            f"CSI injoignable : {csi_failure}. Tant que CSI ne répond pas, les signaux automatiques sont "
-            + ("exécutés sans avis (réglage)." if csi_policy.allow_when_unavailable
-               else "retenus pour confirmation manuelle.")
-        )
-    else:
-        (st.success if csi_health.get("ready") else st.info)(f"CSI : {csi_health.get('detail', '')}")
+                }
+            get_settings_store().update(csi_update)
+            if csi_volatility != csi_volatility_before:
+                EventStore().append(
+                    EventType.SIGNAL_ROUTING_CHANGED, "Revue « volatilité haute » de CSI "
+                    + ("activée" if csi_volatility else "désactivée"), level="INFO",
+                    changes=[csi_client.HIGH_VOLATILITY_REVIEW_KEY],
+                    widened=[] if csi_volatility else ["revue de la volatilité HIGH désactivée"],
+                )
+            st.success("Liens avec CSI enregistrés. Le worker les relit automatiquement.")
+        except ValueError as exc:
+            st.error(str(exc))
 
 # ==========================================================================
 # Sécurité
