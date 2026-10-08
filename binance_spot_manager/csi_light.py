@@ -1,7 +1,8 @@
 """Garde-fou « Feu de protection CSI » : lit le feu de protection du marché de CryptoSignalIntelligence (`GET /meteo`).
 
 C'est un OUTIL DE GESTION DU RISQUE, comme la perte maximale du jour : ce n'est PAS une stratégie et AUCUN GAIN
-n'est démontré (étude en cours côté CSI, docs/METEO_MARCHE.md ; règle dans docs/METEO_PROTECTION.md de CSI).
+n'est démontré (règle dans docs/METEO_PROTECTION.md de CSI). L'étude en préparation côté CSI (branche
+recherche/meteo) teste une règle voisine, pas ce feu : il ne sera mesuré que par son propre journal.
 Désactivé par défaut (Settings → Worker & risque).
 
 Effets, seulement quand le garde-fou est activé :

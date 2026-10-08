@@ -137,7 +137,9 @@ refusé au démarrage. Ne jamais placer les volumes sur un partage réseau
   `CSI_API_TOKEN`), au plus toutes les 5 minutes. Le feu de CSI vient d'une règle déclarée, jamais optimisée :
   volatilité prévue de BTC à 24 h (rang sur 365 jours), BTC contre sa moyenne 50 jours, part des paires
   au-dessus de la leur. **C'est un outil de gestion du risque, comme la perte maximale du jour : pas une
-  stratégie, aucun gain démontré** ; une étude séparée de CSI (`docs/METEO_MARCHE.md`) mesurera ce qu'il vaut.
+  stratégie, aucun gain démontré** ; l'étude en préparation de CSI (branche `recherche/meteo`) teste une
+  règle voisine, pas ce feu, qui ne sera mesuré que par son propre journal côté CSI. Si les données présentes
+  suffisent à donner ROUGE alors qu'une composante manque, CSI renvoie ROUGE (sinon INCONNU).
   Réglages : au **ROUGE**, « aucune nouvelle entrée automatique » (défaut) ou « aucune nouvelle entrée, manuelle
   ou automatique » ; à l'**ORANGE**, « taille réduite à X % » (50 % par défaut, même calcul que le trader
   perdant, notée dans le routage) ou « aucune action » ; si CSI est **injoignable ou INCONNU**, « aucune action »
