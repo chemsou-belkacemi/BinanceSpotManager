@@ -682,3 +682,16 @@ prix, PnL, états, quantités, TP/SL, historique et résultat de clôture. Ils r
 le stockage du worker ; les champs d'édition ne sont pas réinitialisés par ces
 actualisations. Les lectures REST communes aux blocs sont partagées pendant au
 maximum une seconde et ce cache n'est pas utilisé pour valider les transactions.
+
+## Licence
+
+Copyright (C) 2026 Chemseddine Belkacemi.
+
+BinanceSpotManager est un logiciel libre, publié sous la **GNU Affero General Public License, version 3 ou ultérieure**
+(AGPL-3.0-or-later) : texte complet dans [LICENSE](LICENSE). Vous pouvez l'utiliser, l'étudier, le modifier et le
+redistribuer ; toute version modifiée, y compris proposée comme service en ligne, doit être publiée sous la même
+licence, avec son code source.
+
+Le logiciel est fourni **sans aucune garantie**. Ce n'est pas un conseil en investissement : aucun résultat de
+recherche du projet ne démontre de gain, et le trading de cryptomonnaies peut faire perdre tout le capital engagé.
+BSM est verrouillé sur Binance Demo (testnet) ; il ne sert pas, en l'état, à trader avec de l'argent réel.
