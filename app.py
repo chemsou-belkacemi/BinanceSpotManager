@@ -76,9 +76,9 @@ with st.expander("Comment ça marche (2 minutes de lecture)"):
 (ce type de trade a gagné en moyenne, sans garantie). Une paire inconnue de CSI est ajoutée :
 redemande l'avis quelques minutes plus tard.
 
-**Signaux reçus automatiquement par Telegram** : si l'exécution automatique est activée
-(Settings → Signaux), CSI donne son avis avant l'ordre. Un avis défavorable **retient** le signal :
-il attend ta confirmation sur la page **Signaux**. CSI ne peut jamais envoyer un ordre tout seul.
+**Signaux reçus automatiquement par Telegram** : si tu actives l'avis de CSI (Settings → Signaux →
+Liens avec CSI, désactivé par défaut), CSI donne son avis avant l'ordre. Un avis défavorable **retient**
+le signal : il attend ta confirmation sur la page **Signaux**. CSI ne peut jamais envoyer un ordre tout seul.
 
 **Signaux trouvés par CSI** : affichés sur la page CSI avec le bouton *Tester en Demo*. Les stratégies
 de CSI ne sont **pas validées** (elles perdent en moyenne sur 5 ans) : c'est pour observer et tester.

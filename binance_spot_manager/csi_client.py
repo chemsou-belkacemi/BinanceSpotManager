@@ -37,11 +37,41 @@ MAX_TEXT_CHARS = 12_000
 MAX_SOURCE_CHARS = 80
 EVALUATE_TIMEOUT_SECONDS = 30.0
 
-#: Clés des réglages (data/settings.json, Settings → Signaux).
+#: Clés des réglages (data/settings.json, Settings → Signaux → « Liens avec CSI »).
 GATE_ENABLED_KEY = "signal_csi_gate_enabled"
 GATE_HOLD_INDETERMINE_KEY = "signal_csi_hold_indetermine"
 GATE_WHEN_UNAVAILABLE_KEY = "signal_csi_when_unavailable"  # HOLD | ALLOW
 SOURCE_NAMES_KEY = "signal_csi_source_names"
+#: Conseil de taille de CSI (GET /risk), affiché à côté du budget, jamais appliqué.
+SIZE_ADVICE_ENABLED_KEY = "signal_csi_size_advice_enabled"
+#: Retour d'exécution vers CSI (data/signal_drop/outgoing/execution_events.jsonl), hors DRY_RUN.
+FEEDBACK_ENABLED_KEY = "signal_csi_feedback_enabled"
+#: Revue des signaux CSI dont VOLATILITY_REGIME vaut HIGH (lu par signal_routing.RoutingPolicy).
+HIGH_VOLATILITY_REVIEW_KEY = "signal_review_csi_high_volatility"
+
+#: Tous les liens avec CSI sont DÉSACTIVÉS par défaut : c'est le propriétaire qui les active. Ces valeurs ne
+#: servent que si la clé est absente de data/settings.json ; un réglage déjà enregistré garde sa valeur.
+#: Le feu CSI (csi_light.py, clé csi_light_enabled) suit la même règle.
+CSI_LINK_DEFAULTS = {
+    GATE_ENABLED_KEY: False,
+    SIZE_ADVICE_ENABLED_KEY: False,
+    HIGH_VOLATILITY_REVIEW_KEY: False,
+    FEEDBACK_ENABLED_KEY: False,
+}
+_TRUE_TEXTS = frozenset({"1", "true", "vrai", "oui", "yes", "on"})
+
+
+def link_enabled(preferences, key: str) -> bool:
+    """Interrupteur d'un lien avec CSI : valeur enregistrée si présente, sinon le défaut (désactivé).
+
+    Un texte n'active que s'il dit oui (`bool("false")` vaudrait True)."""
+    preferences = preferences if isinstance(preferences, dict) else {}
+    value = preferences.get(key, CSI_LINK_DEFAULTS.get(key, False))
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in _TRUE_TEXTS
+    return bool(value)
 
 
 class CsiUnavailable(RuntimeError):
@@ -186,9 +216,12 @@ class CsiClient:
 
 @dataclass(frozen=True)
 class GatePolicy:
-    """Ce que l'avis CSI fait d'un signal Telegram AUTOMATIQUE : il peut le retenir, jamais l'envoyer."""
+    """Ce que l'avis CSI fait d'un signal Telegram AUTOMATIQUE : il peut le retenir, jamais l'envoyer.
 
-    enabled: bool = True
+    Désactivé par défaut : sans réglage enregistré, le worker n'appelle jamais `POST /evaluate` et aucun
+    signal n'est retenu à cause de CSI (ni avis, ni panne de CSI)."""
+
+    enabled: bool = False
     hold_indetermine: bool = False
     allow_when_unavailable: bool = False
 
@@ -196,7 +229,7 @@ class GatePolicy:
     def from_mapping(cls, preferences) -> GatePolicy:
         preferences = preferences if isinstance(preferences, dict) else {}
         return cls(
-            enabled=bool(preferences.get(GATE_ENABLED_KEY, True)),
+            enabled=link_enabled(preferences, GATE_ENABLED_KEY),
             hold_indetermine=bool(preferences.get(GATE_HOLD_INDETERMINE_KEY, False)),
             allow_when_unavailable=str(preferences.get(GATE_WHEN_UNAVAILABLE_KEY, "HOLD")).upper() == "ALLOW",
         )

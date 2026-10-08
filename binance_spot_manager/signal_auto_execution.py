@@ -15,7 +15,7 @@ import logging
 import time
 
 from . import performance, signal_routing
-from .csi_client import CsiUnavailable, GatePolicy, size_advice, source_label
+from .csi_client import SIZE_ADVICE_ENABLED_KEY, CsiUnavailable, GatePolicy, link_enabled, size_advice, source_label
 from .fee_valuation import fee_rates
 from .trader_name import trader_of
 from .models import EventType
@@ -529,7 +529,9 @@ class AutomaticSignalExecutor:
         reasons += risk_reasons + breaker + channel_reasons
         metrics |= risk_metrics | breaker_metrics
         # Ce que CSI proposerait (information seulement, jamais appliqué : docs/RISK_PROTOCOL.md de CSI).
-        metrics["csi_size"] = self._csi_size(parsed.symbol, suggestion.budget, metrics.get("stop_distance_pct"))
+        # Désactivé par défaut (Settings → Signaux → Liens avec CSI) : aucun appel à GET /risk, rien d'affiché.
+        if link_enabled(preferences, SIZE_ADVICE_ENABLED_KEY):
+            metrics["csi_size"] = self._csi_size(parsed.symbol, suggestion.budget, metrics.get("stop_distance_pct"))
         try:
             liquidity, liquidity_metrics = liquidity_reasons(self.client.get_ticker_24h(parsed.symbol), preferences)
         except Exception as exc:  # noqa: BLE001 - statistiques indisponibles : revue, jamais refus définitif

@@ -172,9 +172,12 @@ class Worker:
         )
         # Retour d'execution des signaux V2 (data/signal_drop/outgoing/), hors DRY_RUN :
         # sans ordre reel, aucun evenement ne doit pretendre a une execution.
+        # Lien avec CSI desactive par defaut : ecrit seulement si signal_csi_feedback_enabled est active
+        # (Settings -> Signaux -> Liens avec CSI), relu a chaque cycle.
         self.signal_feedback = SignalFeedbackWriter(
             account_scope(self.settings), self.signal_inbox, self.commands,
             positions=self.positions, client=self.client, enabled=not self.settings.dry_run,
+            preferences=lambda: get_settings_store().load(),
         )
         # Depot direct (generateur ML v1 ou CSI V3) : lecture de data/signal_drop/incoming/.
         self.signal_drop = SignalDropImporter(

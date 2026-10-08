@@ -196,9 +196,13 @@ ADVICE = {"available": True, "origin": "2026-10-06T00:00:00+00:00",
           "pairs": {"BTCUSDT": {"move_24h_pct": 2.5, "relative_size": 1.6, "stop_floor_pct": 2.5}}}
 
 
+#: Conseil de taille de CSI désactivé par défaut depuis 2026-10-08 : activé explicitement dans ces tests.
+SIZE_ON = {"signal_csi_size_advice_enabled": True}
+
+
 def test_csi_size_advice_is_shown_never_applied(tmp_path):
     csi = RiskCsi(ADVICE)
-    _, payload = _queued_metrics(tmp_path, enabled_preferences(), csi_client=csi)
+    _, payload = _queued_metrics(tmp_path, enabled_preferences(**SIZE_ON), csi_client=csi)
     advice = payload["route"]["metrics"]["csi_size"]
     assert advice["available"] and advice["proposed_budget"] == pytest.approx(144.0)      # 90 × 1,6
     assert payload["route"]["metrics"]["budget"] == 90                                    # rien n'est appliqué
@@ -212,7 +216,7 @@ def test_csi_size_advice_is_shown_never_applied(tmp_path):
     {"available": True, "pairs": {"BTCUSDT": {"move_24h_pct": "x", "relative_size": 1.2}}},
 ], ids=["vide", "paires-en-liste", "nan", "texte"])
 def test_a_malformed_csi_answer_never_holds_a_signal(tmp_path, risk):
-    outcome, payload = _queued_metrics(tmp_path, enabled_preferences(), csi_client=RiskCsi(risk))
+    outcome, payload = _queued_metrics(tmp_path, enabled_preferences(**SIZE_ON), csi_client=RiskCsi(risk))
     assert outcome == ["QUEUED"] and payload["route"]["metrics"]["csi_size"]["available"] is False
 
 
@@ -222,7 +226,7 @@ def test_an_unavailable_csi_never_blocks_a_signal_and_is_asked_once_a_minute(tmp
     for message in (1, 2):
         inbox.receive("demo", SIMPLE.replace("84000", str(84000 - message)), source="telegram",
                       external_id=telegram_id(message), source_timestamp=995)
-    worker, commands = executor(tmp_path, inbox, enabled_preferences(signal_risk_sizing_enabled=False),
+    worker, commands = executor(tmp_path, inbox, enabled_preferences(signal_risk_sizing_enabled=False, **SIZE_ON),
                                 csi_client=csi)
     assert worker.process_pending() == ["QUEUED"]                        # une panne de CSI ne retient rien
     worker.process_pending()                                             # second signal, même minute

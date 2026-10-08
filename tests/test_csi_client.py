@@ -83,7 +83,8 @@ def test_from_env_reads_url_and_token():
 
 
 def test_gate_policy_can_only_hold_never_send():
-    default = GatePolicy.from_mapping({})
+    # Désactivé par défaut depuis 2026-10-08 : l'avis est activé explicitement ici.
+    default = GatePolicy.from_mapping({"signal_csi_gate_enabled": True})
     assert default.enabled and not default.hold_indetermine and not default.allow_when_unavailable
     assert default.decide(opinion("DEFAVORABLE"))[0] is False
     assert default.decide(opinion("REFUSE"))[0] is False
@@ -92,9 +93,9 @@ def test_gate_policy_can_only_hold_never_send():
     allowed, detail = default.decide(None, failure="CSI injoignable")
     assert allowed is False and "retenue" in detail and "CSI injoignable" in detail
 
-    strict = GatePolicy.from_mapping({"signal_csi_hold_indetermine": True})
+    strict = GatePolicy.from_mapping({"signal_csi_gate_enabled": True, "signal_csi_hold_indetermine": True})
     assert strict.decide(opinion("INDETERMINE"))[0] is False
-    lenient = GatePolicy.from_mapping({"signal_csi_when_unavailable": "allow"})
+    lenient = GatePolicy.from_mapping({"signal_csi_gate_enabled": True, "signal_csi_when_unavailable": "allow"})
     assert lenient.decide(None, failure="panne")[0] is True
     disabled = GatePolicy.from_mapping({"signal_csi_gate_enabled": False})
     assert disabled.decide(opinion("REFUSE"))[0] is True

@@ -186,7 +186,8 @@ def test_risk_reasons(tmp_path, case, code, absent):
 def test_csi_high_volatility_is_reviewed(tmp_path, regime, expected):
     inbox = SignalInbox(tmp_path / "signals.db")
     row = receive_csi(inbox, csi_text(VOLATILITY_REGIME=regime))
-    worker, _ = executor(tmp_path, inbox, drop_preferences(), now=NOW)
+    # Règle désactivée par défaut depuis 2026-10-08 : activée explicitement ici.
+    worker, _ = executor(tmp_path, inbox, drop_preferences(signal_review_csi_high_volatility=True), now=NOW)
 
     assert worker.process_pending() == [expected]
     if expected == "REVIEW":
