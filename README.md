@@ -132,6 +132,22 @@ refusé au démarrage. Ne jamais placer les volumes sur un partage réseau
   jamais à la baisse, jamais une position dont un achat attend encore. Début et fin
   sont notifiés ; le Dashboard affiche la pause. Une même chute ne relance pas la
   pause : après elle, seule une nouvelle baisse depuis le déclenchement compte.
+- **Feu de protection CSI** (« météo du marché », Settings → Worker & risque, **désactivé par défaut**) :
+  le worker lit `GET /meteo` de CryptoSignalIntelligence (même client, même `BSM_CSI_API_URL`, même
+  `CSI_API_TOKEN`), au plus toutes les 5 minutes. Le feu de CSI vient d'une règle déclarée, jamais optimisée :
+  volatilité prévue de BTC à 24 h (rang sur 365 jours), BTC contre sa moyenne 50 jours, part des paires
+  au-dessus de la leur. **C'est un outil de gestion du risque, comme la perte maximale du jour : pas une
+  stratégie, aucun gain démontré** ; l'étude en préparation de CSI (branche `recherche/meteo`) teste une
+  règle voisine, pas ce feu, qui ne sera mesuré que par son propre journal côté CSI. Si les données présentes
+  suffisent à donner ROUGE alors qu'une composante manque, CSI renvoie ROUGE (sinon INCONNU).
+  Réglages : au **ROUGE**, « aucune nouvelle entrée automatique » (défaut) ou « aucune nouvelle entrée, manuelle
+  ou automatique » ; à l'**ORANGE**, « taille réduite à X % » (50 % par défaut, même calcul que le trader
+  perdant, notée dans le routage) ou « aucune action » ; si CSI est **injoignable ou INCONNU**, « aucune action »
+  (défaut : sur le VPS, CSI du PC n'est pas forcément joignable) ou « prudence » (traité comme l'orange). Les
+  positions ouvertes restent suivies, rien n'est vendu ni annulé ; les signaux retenus restent dans la boîte.
+  Bandeau sur le Dashboard quand le feu bloque ou réduit, notification au début et à la fin d'un ROUGE, ligne
+  « Feu CSI » dans `/statut`. Une lecture réussie reste valable 15 minutes si CSI ne répond plus, même après un
+  redémarrage du worker. Délais de l'appel : 2 s pour la connexion, 3 s pour la lecture (résolution DNS non bornée).
 - **Rapport quotidien** (Settings → Notifications, 20 h UTC par défaut) : résultat
   du jour et des 7 derniers jours (frais compris), positions ouvertes, capital
   engagé, latent, risque si tous les stops sont touchés, meilleur et pire trader ou canal.
@@ -512,6 +528,7 @@ une copie hors Docker (`make backup-chiffre` sur un serveur).
 | `data/daily_report.json` | date du dernier rapport quotidien envoyé |
 | `data/daily_guard.json` | perte maximale du jour : blocage en cours (jour, montant, seuil) |
 | `data/pause_manuelle.json` | pause manuelle des nouvelles entrées (commande Telegram `/pause`) |
+| `data/csi_light.json` | feu de protection CSI : dernière couleur lue, effet en cours, ROUGE en cours |
 | `logs/events.jsonl` | journal d'événements, une ligne JSON par événement |
 | `logs/bot.log` | journal d'exécution |
 | `logs/errors.log` | erreurs applicatives |

@@ -162,6 +162,10 @@ if route_metrics.get("channel_reduction"):
     reduction = route_metrics["channel_reduction"]
     st.caption(f"Taille réduite à {reduction['kept_percent']:g} % ({reduction['budget_before']:.2f} → "
                f"{reduction['budget']:.2f}) : {reduction['detail']}")
+if route_metrics.get("csi_light_reduction"):
+    light_cut = route_metrics["csi_light_reduction"]
+    st.caption(f"Feu CSI : taille réduite à {light_cut['kept_percent']:g} % ({light_cut['budget_before']:.2f} → "
+               f"{light_cut['budget']:.2f}) : {light_cut['detail']}")
 if route_metrics.get("csi_size"):
     st.caption(csi_client.size_advice_text(route_metrics["csi_size"]))
 if row["payload"] is None and st.button("Réanalyser ce signal", help="Reprendre le texte enregistré avec les formats actuellement reconnus."):

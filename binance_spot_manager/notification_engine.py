@@ -53,6 +53,7 @@ NOTIFIABLE_EVENTS: dict[str, str] = {
     "MARKET_GUARD": "Protection marche (chute de BTC)",
     "DAILY_REPORT": "Rapport quotidien",
     "DAILY_LOSS": "Perte maximale du jour",
+    "CSI_LIGHT": "Feu de protection CSI (rouge)",
     "LOGIN": "Connexion a l'interface",
 }
 
@@ -590,6 +591,17 @@ class NotificationEngine:
             else "Perte maximale du jour levee — nouvelles entrees permises",
             body=detail,
             level="CRITICAL" if started else "INFO",
+        )
+
+    def csi_light(self, kind: str, detail: str) -> Notification:
+        """Debut (kind="STARTED") ou fin d'un feu ROUGE de CSI qui retient les nouvelles entrees."""
+        started = kind == "STARTED"
+        return Notification(
+            event="CSI_LIGHT",
+            title="Feu CSI rouge — nouvelles entrees retenues" if started
+            else "Feu CSI n'est plus rouge — entrees a nouveau permises",
+            body=detail + ("\nOutil de prudence, aucun gain demontre ; positions ouvertes suivies." if started else ""),
+            level="WARNING" if started else "INFO",
         )
 
     def daily_report(self, title: str, body: str) -> Notification:
