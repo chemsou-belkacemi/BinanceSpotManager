@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from test_automation import events, settings  # noqa: F401 - fixtures partagées
+from test_automation import events, rules, settings  # noqa: F401 - fixtures partagées
 from test_signal_auto_execution import SIMPLE, enabled_preferences, executor, telegram_id
 
 from binance_spot_manager import csi_light as cl
@@ -32,7 +32,7 @@ class FakeCsi:
         self.answers, self.calls = list(answers), 0
 
     def meteo(self, *, timeout=None):
-        assert timeout is not None and timeout <= 5                  # délai court : le worker n'attend pas
+        assert timeout == (2.0, 3.0)                                 # connexion, lecture : le worker n'attend pas
         self.calls += 1
         answer = self.answers[min(self.calls, len(self.answers)) - 1]
         if isinstance(answer, Exception):
@@ -166,9 +166,9 @@ def test_the_client_reads_get_meteo_with_the_token():
         return Response()
 
     client = CsiClient("http://csi-api:8503", "jeton", session=SimpleNamespace(request=request))
-    assert client.meteo(timeout=3.0)["color"] == "VERT"
+    assert client.meteo(timeout=(2.0, 3.0))["color"] == "VERT"
     assert seen == {"method": "GET", "url": "http://csi-api:8503/meteo",
-                    "headers": {"Accept": "application/json", "Authorization": "Bearer jeton"}, "timeout": 3.0}
+                    "headers": {"Accept": "application/json", "Authorization": "Bearer jeton"}, "timeout": (2.0, 3.0)}
 
 
 # -- routage automatique ----------------------------------------------------------------------------------------
@@ -246,7 +246,8 @@ def test_red_blocks_manual_entries_only_when_set(tmp_path, events):  # noqa: F81
     worker._check_csi_light()
     assert worker.auto_signal_executor.csi_light_reason and worker._entry_refusal() == ""   # manuel permis
     assert sent and sent[0][0] == "STARTED" and events.tail(limit=1)[0]["event"] == "CSI_LIGHT_STARTED"
-    assert "Feu CSI : ROUGE" in worker._status_text() and "Blocage : Feu CSI ROUGE" in worker._status_text()
+    status = worker._status_text()
+    assert status.count("Blocage : Feu CSI ROUGE") == 1 and "Feu CSI : ROUGE" not in status  # une seule fois
     everything, _ = light_worker(tmp_path / "all", events, ON | {"csi_light_red_action": "ALL"}, [reading("ROUGE")])
     everything._check_csi_light()
     assert "manuelle ou automatique" in everything._entry_refusal()
@@ -331,3 +332,136 @@ def test_settings_save_the_csi_light(monkeypatch, tmp_path):
     assert saved["csi_light_enabled"] is True and saved["csi_light_red_action"] == "ALL"
     assert saved["csi_light_orange_kept_percent"] == 40.0 and saved["csi_light_when_unavailable"] == "CAUTION"
     assert cl.LightPolicy.from_mapping(saved) == cl.LightPolicy(True, "ALL", "REDUCE", 40.0, "CAUTION")
+
+
+# -- relecture du 2026-10-08 : écritures, NaN, réponses mal formées, délai de grâce, redémarrage -------------------
+
+class CountingStore:
+    """Fichier d'état en mémoire qui compte les écritures ; `fail` simule un disque plein."""
+
+    def __init__(self, fail=False):
+        self.data, self.writes, self.fail = None, 0, fail
+
+    def read(self, path):
+        return self.data
+
+    def write(self, path, payload):
+        self.writes += 1
+        if self.fail:
+            raise OSError("disque plein")
+        import json
+        self.data = json.loads(json.dumps(payload, allow_nan=False))                 # comme atomic_write_json
+
+
+def counted(store, client, preferences, clock):
+    return cl.CsiLightGuard(client, lambda: preferences, path=Path("csi_light.json"), clock=lambda: clock[0],
+                            read=store.read, write=store.write)
+
+
+def test_ten_disabled_checks_write_nothing():
+    store, clock = CountingStore(), [1_000_000.0]
+    light = counted(store, FakeCsi(reading("ROUGE")), {}, clock)
+    for _ in range(10):
+        clock[0] += 30
+        assert light.check() == []
+    assert store.writes == 0
+    store.data = {"enabled": False, "color": cl.DISABLED, "active": False, "red_active": False}   # ancien état désactivé
+    again = counted(store, FakeCsi(reading("ROUGE")), {"csi_light_enabled": "false"}, clock)  # texte « false » : désactivé
+    for _ in range(10):
+        again.check()
+    assert store.writes == 0
+
+
+def test_enabled_writes_only_on_change_or_every_few_minutes():
+    store, clock = CountingStore(), [1_000_000.0]
+    light = counted(store, FakeCsi(reading("ORANGE")), ON, clock)
+    for _ in range(20):                                                               # 20 tours de 5 s
+        light.check()
+        clock[0] += 5
+    assert store.writes == 1
+    clock[0] += cl.REFRESH_SECONDS
+    light.check()
+    assert store.writes == 2 and store.data["checked_at"] == clock[0]
+
+
+@pytest.mark.parametrize("answer", [
+    {"color": "ROUGE", "explanation": "Feu ROUGE", "computed_at": float("nan")},     # NaN : refusé par allow_nan=False
+    {"color": "ROUGE", "explanation": float("inf"), "computed_at": {"x": float("nan")}},
+])
+def test_nan_in_the_answer_never_breaks_the_state(tmp_path, answer):
+    light, _ = guard(tmp_path, FakeCsi(answer), ON)                                  # vraie écriture JSON atomique
+    assert [kind for kind, _ in light.check()] == ["STARTED"] and light.effect().block_auto
+    saved = cl.active_status(tmp_path / "csi_light.json", now=light.clock())
+    assert saved is not None and saved["csi_computed_at"] == "" and saved["red_active"] is True
+
+
+@pytest.mark.parametrize("answer", [["ROUGE"], "ROUGE", None, {"color": 5}, {"colour": "ROUGE"}, {"color": ["ROUGE"]}])
+def test_malformed_answers_are_never_read_as_red(tmp_path, answer):
+    light, _ = guard(tmp_path, FakeCsi(answer), ON)
+    assert light.check() == []
+    assert light.effect().color in (cl.UNKNOWN, cl.UNREACHABLE) and not light.effect().active
+
+
+def test_a_failed_write_never_freezes_the_guard(tmp_path, events, caplog):  # noqa: F811
+    store, clock = CountingStore(fail=True), [1_000_000.0]
+    worker, sent = light_worker(tmp_path, events, ON, [reading("ROUGE")])
+    worker.csi_light = counted(store, FakeCsi(reading("ROUGE"), reading("VERT")), ON, clock)
+    with caplog.at_level("WARNING", logger="bsm.csi_light"):
+        worker._check_csi_light()
+        assert worker.auto_signal_executor.csi_light_reason and [k for k, _ in sent] == ["STARTED"]
+        clock[0] += 60
+        worker._check_csi_light()                                                     # pas de second « début »
+        clock[0] += cl.CACHE_SECONDS
+        worker._check_csi_light()                                                     # VERT : levé malgré le disque
+    assert worker.auto_signal_executor.csi_light_reason == "" and [k for k, _ in sent] == ["STARTED", "ENDED"]
+    assert store.writes >= 2 and sum("non enregistré" in r.message for r in caplog.records) == 1   # journalisé une fois
+
+
+def test_the_grace_period_is_fifteen_minutes_and_survives_a_restart(tmp_path):
+    clock = [1_000_000.0]
+    light, _ = guard(tmp_path, FakeCsi(reading("ROUGE"), CsiUnavailable("CSI injoignable")), ON, clock)
+    t0 = clock[0]
+    light.check()
+    clock[0] = t0 + 10 * 60
+    restarted, _ = guard(tmp_path, FakeCsi(CsiUnavailable("CSI injoignable")), ON, clock)   # redémarrage, CSI coupé
+    assert restarted.check() == [] and restarted.effect().block_auto                  # lecture reprise du fichier
+    clock[0] = t0 + cl.STALE_SECONDS
+    assert restarted.check() == [] and restarted.effect().block_auto                   # 15 min pile : encore valable
+    clock[0] = t0 + cl.STALE_SECONDS + 1
+    assert [kind for kind, _ in restarted.check()] == ["ENDED"]                        # au-delà : injoignable
+    assert restarted.effect().color == cl.UNREACHABLE
+
+
+def test_string_switches_are_read_correctly():
+    assert cl.LightPolicy.from_mapping({"csi_light_enabled": "false"}).enabled is False
+    assert cl.LightPolicy.from_mapping({"csi_light_enabled": "0"}).enabled is False
+    assert cl.LightPolicy.from_mapping({"csi_light_enabled": "true"}).enabled is True
+    assert cl.LightPolicy.from_mapping({"csi_light_enabled": 1}).enabled is False
+
+
+def test_losing_trader_and_orange_light_keep_a_quarter(tmp_path, rules):  # noqa: F811
+    from test_journal_telegram_corrections import losing_position
+    from test_signal_auto_execution import positions_stub
+    from test_suivi_canaux_protection import labelled
+
+    losers = [labelled(losing_position(rules), "Canal A") for _ in range(10)]
+    preferences = enabled_preferences(signal_channel_review_enabled=True, signal_channel_review_min_trades=10,
+                                      signal_channel_action="REDUCE", signal_channel_kept_percent=50)
+    inbox = SignalInbox(tmp_path / "signals.db")
+    row = inbox.receive("demo", SIMPLE, source="telegram", external_id=telegram_id(1), source_timestamp=995,
+                        origin="Canal A")
+    worker, commands = executor(tmp_path, inbox, preferences, positions=positions_stub(losers))
+    worker.csi_light_kept_percent, worker.csi_light_detail = 50.0, "Feu CSI ORANGE"
+    assert worker.process_pending() == ["QUEUED"]
+    metrics = commands.get_by_request_key("demo", f"signal:{row['id']}")["payload"]["route"]["metrics"]
+    assert metrics["budget"] == pytest.approx(22.5)                                   # 90 × 50 % × 50 % = 25 %
+    assert metrics["channel_reduction"]["budget"] == 45.0 and metrics["csi_light_reduction"]["budget_before"] == 45.0
+
+
+def test_a_size_cut_below_min_notional_goes_to_review(tmp_path):
+    inbox = SignalInbox(tmp_path / "signals.db")
+    inbox.receive("demo", SIMPLE, source="telegram", external_id=telegram_id(1), source_timestamp=995)
+    worker, commands = executor(tmp_path, inbox, enabled_preferences(signal_fixed_budget=40))
+    worker.csi_light_kept_percent, worker.csi_light_detail = 10.0, "Feu CSI ORANGE"   # 40 → 4 USDT < minNotional 5
+    assert worker.process_pending() == ["REVIEW"] and commands.list_recent("demo") == []
+    assert '"D_PLAN"' in inbox.recent("demo")[0]["route"]

@@ -144,7 +144,8 @@ refusé au démarrage. Ne jamais placer les volumes sur un partage réseau
   (défaut : sur le VPS, CSI du PC n'est pas forcément joignable) ou « prudence » (traité comme l'orange). Les
   positions ouvertes restent suivies, rien n'est vendu ni annulé ; les signaux retenus restent dans la boîte.
   Bandeau sur le Dashboard quand le feu bloque ou réduit, notification au début et à la fin d'un ROUGE, ligne
-  « Feu CSI » dans `/statut`. Une lecture réussie reste valable 15 minutes si CSI ne répond plus.
+  « Feu CSI » dans `/statut`. Une lecture réussie reste valable 15 minutes si CSI ne répond plus, même après un
+  redémarrage du worker. Délais de l'appel : 2 s pour la connexion, 3 s pour la lecture (résolution DNS non bornée).
 - **Rapport quotidien** (Settings → Notifications, 20 h UTC par défaut) : résultat
   du jour et des 7 derniers jours (frais compris), positions ouvertes, capital
   engagé, latent, risque si tous les stops sont touchés, meilleur et pire trader ou canal.

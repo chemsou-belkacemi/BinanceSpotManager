@@ -549,12 +549,13 @@ class Worker:
             self.market_guard.active_reason() if hasattr(self, "market_guard") else "",
             self.csi_light.auto_refusal() if hasattr(self, "csi_light") else "",
         ) if reason]
+        light_blocks = hasattr(self, "csi_light") and bool(self.csi_light.auto_refusal())
         lines = ["BinanceSpotManager (Binance Demo)",
                  f"Worker : {'en veille' if getattr(self, '_in_standby', False) else 'actif'}",
                  f"Positions ouvertes : {len(positions)} ; capital engagé {committed:.2f} USDT ; "
                  f"latent {latent:+.2f} USDT"]
         lines += [f"Blocage : {reason}" for reason in blocks] or ["Blocages : aucun (nouvelles entrées permises)"]
-        if hasattr(self, "csi_light"):
+        if hasattr(self, "csi_light") and not light_blocks:     # un ROUGE est déjà dans les blocages : une fois
             lines.append(self.csi_light.status_line())
         return "\n".join(lines)
 
@@ -606,11 +607,15 @@ class Worker:
     def _check_csi_light(self) -> None:
         """Feu de protection CSI : jamais bloquant pour le suivi des positions (rien n'est vendu ni annulé)."""
         log = logging.getLogger("bsm.worker")
+        changes: list = []
         try:
             changes = self.csi_light.check()
-            effect = self.csi_light.effect()
-        except Exception:  # noqa: BLE001 - etat illisible : le feu ne bloque rien
+        except Exception:  # noqa: BLE001 - contrôle interrompu : l'effet connu reste transmis
             log.exception("Feu CSI : contrôle interrompu")
+        try:
+            effect = self.csi_light.effect()
+        except Exception:  # noqa: BLE001 - effet illisible : le dernier transmis reste en place
+            log.exception("Feu CSI : effet illisible")
             return
         if hasattr(self, "auto_signal_executor"):
             self.auto_signal_executor.csi_light_reason = effect.detail if effect.block_auto else ""

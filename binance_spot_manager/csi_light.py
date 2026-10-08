@@ -14,10 +14,12 @@ Rien n'est vendu ni annulé : les positions ouvertes restent suivies (stops, obj
 retenus restent dans la boîte et ne partent ensuite que s'ils sont encore assez récents, comme pour la protection
 en cas de chute de BTC (market_guard.py).
 
-Le worker interroge CSI au plus toutes les CACHE_SECONDS secondes (délai court) ; une lecture réussie reste valable
-STALE_SECONDS secondes si CSI ne répond plus, pour ne pas lever un rouge sur une simple coupure. L'état est écrit
-dans `data/csi_light.json` (bandeau du Dashboard, notification de début et de fin d'un ROUGE sans doublon après un
-redémarrage).
+Le worker interroge CSI au plus toutes les CACHE_SECONDS secondes (délais courts) ; une lecture réussie reste valable
+STALE_SECONDS secondes (âge vérifié à chaque tour) si CSI ne répond plus, pour ne pas lever un rouge sur une simple
+coupure, y compris après un redémarrage du worker. L'état est écrit dans `data/csi_light.json` (bandeau du Dashboard,
+dernière lecture réussie, ROUGE en cours sans second « début » après un redémarrage), seulement quand il change ou
+au plus toutes les REFRESH_SECONDS secondes quand le garde-fou est activé ; désactivé, rien n'est écrit. Une
+écriture impossible (disque plein…) est journalisée une fois et ne fige jamais l'effet du feu.
 """
 from __future__ import annotations
 
@@ -38,7 +40,13 @@ PREFIX = "csi_light_"
 STATE_FILE = DATA_DIR / "csi_light.json"
 CACHE_SECONDS = 300
 STALE_SECONDS = 900
-REQUEST_TIMEOUT_SECONDS = 3.0
+#: (connexion, lecture) pour `requests` : chaque délai vaut séparément ; la résolution DNS n'est PAS bornée (une
+#: adresse `BSM_CSI_API_URL` en IP ou un nom résolu localement, comme `csi-api` dans Compose, évite l'attente).
+REQUEST_TIMEOUT_SECONDS = (2.0, 3.0)
+#: Écriture de l'état : quand il change, et au plus toutes les REFRESH_SECONDS sinon (fraîcheur du bandeau).
+REFRESH_SECONDS = 300
+MAX_TEXT = 400
+TRUE_TEXTS = frozenset({"true", "1", "oui", "yes", "on", "vrai"})
 #: Au-delà, l'état écrit par le worker n'est plus affiché (worker arrêté).
 DISPLAY_MAX_AGE_SECONDS = 1800
 
@@ -52,6 +60,28 @@ KEPT_BOUNDS = (10.0, 90.0)
 DEFAULTS: dict[str, Any] = {"enabled": False, "red_action": "AUTO", "orange_action": "REDUCE", "orange_kept_percent": 50.0,
             "when_unavailable": "NONE"}
 NOTE = "Outil de prudence, aucun gain démontré ; étude en cours."
+
+
+def _enabled(value: Any) -> bool:
+    """Interrupteur lu correctement : `bool("false")` vaudrait True ; un texte n'active que s'il dit oui."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in TRUE_TEXTS
+    return False
+
+
+def clean_reading(reading: Any) -> dict | None:
+    """Ce qui est gardé d'une réponse de `GET /meteo` : couleur, explication et heure de calcul, en textes seulement
+    (un NaN ou un objet inattendu ne peut ni casser l'écriture JSON ni passer pour une couleur). None si ce n'est
+    pas un objet JSON."""
+    if not isinstance(reading, dict):
+        return None
+    out = {}
+    for key in ("color", "explanation", "computed_at"):
+        value = reading.get(key)
+        out[key] = value[:MAX_TEXT] if isinstance(value, str) else ""
+    return out
 
 
 @dataclass(frozen=True)
@@ -78,7 +108,7 @@ class LightPolicy:
             kept = float(DEFAULTS["orange_kept_percent"])
         if math.isnan(kept):
             kept = float(DEFAULTS["orange_kept_percent"])
-        return cls(enabled=bool(prefs.get(PREFIX + "enabled", False)), red_action=choice("red_action", RED_ACTIONS),
+        return cls(enabled=_enabled(prefs.get(PREFIX + "enabled", False)), red_action=choice("red_action", RED_ACTIONS),
                    orange_action=choice("orange_action", ORANGE_ACTIONS),
                    kept_percent=min(max(kept, KEPT_BOUNDS[0]), KEPT_BOUNDS[1]),
                    when_unavailable=choice("when_unavailable", UNAVAILABLE_ACTIONS))
@@ -141,7 +171,10 @@ def active_status(path: Path = STATE_FILE, now: float | None = None) -> dict | N
     state = read_json(Path(path))
     if not isinstance(state, dict) or not state.get("active"):
         return None
-    checked = float(state.get("checked_at") or 0)
+    try:
+        checked = float(state.get("checked_at") or 0)
+    except (TypeError, ValueError):
+        return None
     if (time.time() if now is None else now) - checked > DISPLAY_MAX_AGE_SECONDS:
         return None
     return state
@@ -165,10 +198,30 @@ class CsiLightGuard:
         self._next_fetch = 0.0
         self._failure = ""
         self._effect = LightEffect()
+        self._state: dict | None = None           # état connu (fichier relu une fois au premier contrôle)
+        self._written_at = 0.0
+        self._write_failed = False
 
     def state(self) -> dict:
-        raw = self._read(self.path)
-        return raw if isinstance(raw, dict) else {}
+        """État enregistré (lu au premier appel, puis tenu en mémoire : une écriture ratée ne fait rien oublier)."""
+        if self._state is None:
+            try:
+                raw = self._read(self.path)
+            except Exception:  # noqa: BLE001 - fichier illisible : on repart d'un état vide
+                raw = None
+            self._state = raw if isinstance(raw, dict) else {}
+            self._restore(self._state)
+        return self._state
+
+    def _restore(self, state: dict) -> None:
+        """Après un redémarrage : la dernière lecture réussie reprend avec son heure (même délai de grâce)."""
+        reading = clean_reading(state.get("last_reading"))
+        try:
+            read_at = float(state.get("read_at") or 0)
+        except (TypeError, ValueError):
+            read_at = 0.0
+        if reading is not None and math.isfinite(read_at) and read_at > 0:
+            self._reading, self._read_at = reading, read_at
 
     def _fetch(self, now: float) -> None:
         if now < self._next_fetch:
@@ -177,28 +230,30 @@ class CsiLightGuard:
         try:
             if self.client is None or not hasattr(self.client, "meteo"):
                 raise RuntimeError("aucun client CSI configuré")
-            reading = self.client.meteo(timeout=REQUEST_TIMEOUT_SECONDS)
-            if not isinstance(reading, dict):
+            reading = clean_reading(self.client.meteo(timeout=REQUEST_TIMEOUT_SECONDS))
+            if reading is None:
                 raise TypeError("réponse inattendue de CSI")
         except Exception as exc:  # noqa: BLE001 - CSI ne doit jamais arrêter le worker
-            self._failure = str(exc) or exc.__class__.__name__
+            self._failure = (str(exc) or exc.__class__.__name__)[:MAX_TEXT]
             logger.info("Feu CSI indisponible : %s", self._failure)
-            if self._reading is not None and now - self._read_at > STALE_SECONDS:
-                self._reading = None                    # lecture trop ancienne : CSI injoignable
             return
         self._reading, self._read_at, self._failure = reading, now, ""
 
     def check(self, now: float | None = None) -> list[tuple[str, str]]:
         """Un contrôle (CSI interrogé au plus toutes les CACHE_SECONDS) ; rend les événements à annoncer :
-        ("STARTED", détail) au début d'un ROUGE qui bloque, ("ENDED", détail) à sa fin."""
+        ("STARTED", détail) au début d'un ROUGE qui bloque, ("ENDED", détail) à sa fin. Ne lève jamais pour une
+        écriture impossible."""
         now = self.clock() if now is None else now
+        previous = self.state()
         policy = LightPolicy.from_mapping(self.preferences())
         if policy.enabled:
             self._fetch(now)
+            if self._reading is not None and not (0 <= now - self._read_at <= STALE_SECONDS):
+                self._reading = None                    # lecture trop ancienne (vérifié à chaque tour) : injoignable
+                self._failure = self._failure or "dernière lecture de CSI trop ancienne"
         else:
             self._next_fetch = 0.0                      # réactivé : lecture immédiate
         self._effect = effect_of(policy, self._reading if policy.enabled else None, self._failure)
-        previous = self.state()
         was_red = bool(previous.get("red_active"))
         is_red = self._effect.block_auto
         events: list[tuple[str, str]] = []
@@ -209,14 +264,33 @@ class CsiLightGuard:
                         UNKNOWN: "feu INCONNU"}.get(self._effect.color, f"feu {self._effect.color}")
             events.append(("ENDED", (f"Feu CSI n'est plus rouge ({now_text}) : nouvelles entrées à nouveau permises "
                                      "par ce garde-fou.")))
-        reading = self._reading or {}
-        self._write(self.path, {"checked_at": now, "enabled": policy.enabled, "color": self._effect.color,
-                                "active": self._effect.active, "red_active": is_red,
-                                "block_auto": self._effect.block_auto, "block_manual": self._effect.block_manual,
-                                "kept_percent": self._effect.kept_percent, "detail": self._effect.detail,
-                                "csi_computed_at": reading.get("computed_at"), "failure": self._failure,
-                                "red_since": (previous.get("red_since") or now) if is_red else None})
+        red_since = previous.get("red_since") if was_red else now
+        content = {"enabled": policy.enabled, "color": self._effect.color, "active": self._effect.active,
+                   "red_active": is_red, "block_auto": self._effect.block_auto,
+                   "block_manual": self._effect.block_manual, "kept_percent": self._effect.kept_percent,
+                   "detail": self._effect.detail, "failure": self._failure,
+                   "csi_computed_at": (self._reading or {}).get("computed_at", ""),
+                   "red_since": red_since if is_red else None,
+                   "last_reading": self._reading, "read_at": self._read_at if self._reading is not None else 0.0}
+        already_off = (not policy.enabled and previous.get("enabled") in (None, False)
+                       and not previous.get("active") and not previous.get("red_active"))
+        unchanged = already_off or {k: previous.get(k) for k in content} == content
+        due = policy.enabled and now - self._written_at >= REFRESH_SECONDS
+        if not unchanged or due:
+            self._save(content | {"checked_at": now}, now)
         return events
+
+    def _save(self, state: dict, now: float) -> None:
+        self._state = state                           # en mémoire d'abord : l'effet et les événements suivent toujours
+        try:
+            self._write(self.path, state)
+        except Exception as exc:  # noqa: BLE001 - disque plein, valeur illisible… : jamais bloquant
+            if not self._write_failed:
+                logger.warning("Feu CSI : état non enregistré dans %s (%s) ; l'effet reste appliqué",
+                               self.path.name, exc.__class__.__name__)
+            self._write_failed = True
+            return
+        self._written_at, self._write_failed = now, False
 
     def effect(self) -> LightEffect:
         """Effet du dernier contrôle (aucun appel réseau)."""
