@@ -1,5 +1,7 @@
 # BinanceSpotManager V2
 
+[![Licence : AGPL-3.0](https://img.shields.io/badge/licence-AGPL--3.0-blue.svg)](LICENSE) ![Python 3.12 | 3.14](https://img.shields.io/badge/python-3.12%20%7C%203.14-blue.svg) ![Binance Demo uniquement](https://img.shields.io/badge/Binance-Demo%20uniquement-orange.svg)
+
 Gestionnaire intelligent de positions Spot Binance. Chaque stratégie a son propre ID, même sur une paire identique.
 Développé en **Python + Streamlit**, conçu pour fonctionner **exclusivement sur Binance Demo**
 pendant la phase de développement et de validation.
@@ -8,6 +10,64 @@ pendant la phase de développement et de validation.
 > protection, vente) est refusée si l'URL cible n'est pas dans la liste blanche Demo,
 > avec le message `SECURITE : operation interdite hors Binance Demo`. Le mode Live
 > n'est pas implémenté : `BSM_RUN_MODE=LIVE` est ramené à `DRY_RUN` au chargement.
+
+Contribuer : [CONTRIBUTING.md](CONTRIBUTING.md). Signaler une faille : [SECURITY.md](SECURITY.md). Historique :
+[CHANGELOG.md](CHANGELOG.md).
+
+## Démarrage rapide
+
+En trois lignes :
+
+- BSM gère des positions Spot (entrées, objectifs, stop, signaux Telegram ou de CryptoSignalIntelligence) avec une
+  interface Streamlit et un worker séparé qui les surveille ;
+- il est **verrouillé sur Binance Demo** (testnet) : aucune écriture ne part ailleurs, le mode Live n'existe pas ;
+- c'est un outil d'exécution et de gestion du risque, **pas une stratégie** : il ne promet aucun gain.
+
+Exemple **sans clé et sans Docker** (Linux, Python 3.14 ou 3.12), en `DRY_RUN` : prix réels du testnet, calculs
+réels, **aucun ordre envoyé**. À lancer depuis la racine du dépôt :
+
+```bash
+# 1. Installation (nécessite Internet)
+python3.14 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+
+# 2. Une sélection de tests hors ligne (verrou Demo, moteurs de calcul, droits des clés, durcissement)
+.venv/bin/python -m pytest -m "not integration" tests/test_safety_audit.py tests/test_engines.py \
+    tests/test_api_key_policy.py tests/test_hardening.py
+
+# 3. Vérification de connexion, sans clé (nécessite Internet : lecture publique du testnet, aucun ordre)
+export BSM_RUN_MODE=DRY_RUN
+.venv/bin/python scripts/check_connection.py
+
+# 4. Le worker en DRY_RUN (Ctrl+C pour l'arrêter proprement)
+.venv/bin/python scripts/bot_worker.py
+
+# 5. L'interface, dans un second terminal (même dossier, même BSM_RUN_MODE)
+.venv/bin/streamlit run app.py --server.headless true
+```
+
+Sortie attendue (vérifiée le 2026-10-09) :
+
+| Étape | Résumé |
+|---|---|
+| 1 | installation sans erreur (Streamlit, pandas, pydantic, requests, cryptography, pytest…) |
+| 2 | `272 passed` |
+| 3 | `Mode : DEMO · DRY_RUN`, `URL autorisee : OUI`, `Cles API : ABSENTES`, `Ping : OK`, `Compte : non verifie`, puis la paire `BTCUSDT OK` et ses filtres (`tickSize`, `stepSize`, `minNotional`) et le prix actuel **du testnet** |
+| 4 | une ligne `Worker BinanceSpotManager — DEMO · DRY_RUN — https://testnet.binance.vision` ; le heartbeat s'écrit dans `data/bot_runtime.json` ; après Ctrl+C, `"state": "STOPPED"` et `"last_message": "Worker arrete"` |
+| 5 | `URL: http://127.0.0.1:8501` (ou le port libre suivant), à ouvrir dans un navigateur ; aucune connexion demandée tant qu'aucun compte n'existe |
+
+Limites connues :
+
+- en `DRY_RUN`, **aucun ordre n'existe chez Binance** : c'est voulu. Sans clés Demo, le compte et les soldes ne sont
+  pas vérifiés et aucune position ne peut être exécutée ;
+- les prix du testnet Binance ne sont pas ceux du marché réel, et ses remplissages non plus ;
+- sans Docker, `data/` et `logs/` sont créés dans le dossier du projet (ignorés par Git) ; un seul worker à la fois ;
+- sans compte créé, l'interface n'a **aucune authentification** : elle écoute sur `127.0.0.1` seulement, ne la
+  publiez pas ;
+- les notifications Telegram, les signaux et les liens avec CSI demandent une configuration (`.env`, Settings) ;
+- l'installation de référence pour un usage continu reste Docker (sections suivantes).
+
+Suite complète hors ligne, comme la CI : `.venv/bin/python -m pytest -m "not integration"` (ou `make test` avec Docker).
 
 ---
 
