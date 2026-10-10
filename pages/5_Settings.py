@@ -624,7 +624,9 @@ with tabs[5]:
         manual_mode = settings.run_mode.value == "DEMO_MANUAL" and current_policy.honor_demo_manual
         st.markdown(
             f"- Mode : `{settings.run_mode.value}`"
-            + (" — tout signal demande une confirmation manuelle" if manual_mode else "") + "\n"
+            + (" — **tout signal demande une confirmation manuelle** (désactiver « DEMO_MANUAL : tout signal demande "
+               "une confirmation manuelle » plus bas pour laisser partir l'automatique)" if manual_mode else "") + "\n"
+            f"- Exécution automatique : {'activée' if routing_prefs.get('signal_auto_execute_enabled') else 'désactivée'}\n"
             f"- Autorisation datée : {'oui' if routing_prefs.get('signal_auto_execute_enabled_since') else 'non'}\n"
             f"- Groupes Telegram de confiance : "
             f"{'toutes les conversations autorisées' if current_policy.trust_all_chats else len(current_policy.trusted_chats)}\n"
@@ -698,9 +700,12 @@ with tabs[5]:
         streak_input = st.number_input("Pertes automatiques consécutives avant réarmement", min_value=1, max_value=50,
                                        value=int(current_policy.loss_streak), step=1,
                                        key="signal_auto_loss_streak_input")
-    widen_authorization = st.checkbox("J'autorise l'élargissement de l'exécution automatique",
+    widen_authorization = st.checkbox("Je confirme cet élargissement (à cocher juste avant « Enregistrer le routage »)",
                                       key="signal_routing_widen_authorization",
                                       help="Obligatoire pour tout changement qui ne peut qu'augmenter l'automatique.")
+    st.caption("Cette case ne reste **jamais** cochée : elle confirme un seul enregistrement. Coche-la, puis clique "
+               "aussitôt « Enregistrer le routage des signaux » sans recharger la page. Ce qui est gardé, ce sont les "
+               "interrupteurs ci-dessus ; leur état enregistré est rappelé dans « État de préparation ».")
 
     def save_routing(update: dict, message: str) -> None:
         new_policy = signal_routing.RoutingPolicy.from_mapping(routing_prefs | update, routing_limits)
@@ -711,7 +716,11 @@ with tabs[5]:
         get_settings_store().update(update)
         EventStore().append(EventType.SIGNAL_ROUTING_CHANGED, message, level="INFO",
                             changes=sorted(update), widened=widened)
-        st.success("Routage enregistré. Le worker le relit à chaque cycle ; les signaux déjà décidés ne sont pas re-routés.")
+        saved = signal_routing.RoutingPolicy.from_mapping(get_settings_store().load(), routing_limits)
+        st.success("Routage enregistré. Le worker le relit à chaque cycle ; les signaux déjà décidés ne sont pas re-routés.\n\n"
+                   f"Enregistré : conversations de confiance = {'toutes' if saved.trust_all_chats else len(saved.trusted_chats)} · "
+                   f"cryptos acceptées = {'toutes' if saved.all_assets else len(saved.base_assets)} · "
+                   f"DEMO_MANUAL impose la confirmation = {'oui' if saved.honor_demo_manual else 'non'}.")
 
     routing_buttons = st.columns(3)
     if routing_buttons[0].button("Enregistrer le routage des signaux", type="primary"):
