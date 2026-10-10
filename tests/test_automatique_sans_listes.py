@@ -79,3 +79,36 @@ def test_settings_save_the_switches_with_the_widening_authorisation(monkeypatch,
     next(b for b in app.button if b.label == "Enregistrer le routage des signaux").click().run()
     saved = store.load()
     assert saved["signal_auto_trust_all_chats"] is True and saved["signal_auto_all_assets"] is True
+
+
+def test_routing_save_shows_what_was_stored_and_the_confirmation_never_stays(tmp_path, monkeypatch):
+    """La case de confirmation ne reste jamais cochée (une confirmation par enregistrement) ; le message de réussite
+    rappelle ce qui est réellement enregistré, pour qu'on ne croie pas avoir enregistré en cochant seulement."""
+    from pathlib import Path
+
+    from streamlit.testing.v1 import AppTest
+
+    from binance_spot_manager.position_store import JsonFileStore
+
+    store = JsonFileStore(tmp_path / "settings.json")
+    monkeypatch.setattr("binance_spot_manager.position_store.get_settings_store", lambda: store)
+    monkeypatch.setattr("binance_spot_manager.binance_client.BinanceSpotClient.get_balances",
+                        lambda self: {"BNB": {"free": 0.1, "locked": 0}})
+    monkeypatch.setattr("binance_spot_manager.binance_client.BinanceSpotClient.get_price", lambda self, symbol: 500)
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py"), default_timeout=20).run()
+    app.switch_page("pages/5_Settings.py").run()
+    app.toggle(key="signal_trust_all_chats_toggle").set_value(True)
+    app.toggle(key="signal_all_assets_toggle").set_value(True)
+    app.toggle(key="signal_honor_demo_manual_toggle").set_value(False)
+    app.checkbox(key="signal_routing_widen_authorization").check()
+    next(b for b in app.button if b.label == "Enregistrer le routage des signaux").click().run()
+    assert not app.exception
+    message = " ".join(s.value for s in app.success)
+    assert "conversations de confiance = toutes" in message and "cryptos acceptées = toutes" in message
+    assert "DEMO_MANUAL impose la confirmation = non" in message
+    saved = store.load()
+    assert saved["signal_auto_trust_all_chats"] is True and saved["signal_route_honor_demo_manual"] is False
+    fresh = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py"), default_timeout=20).run()
+    fresh.switch_page("pages/5_Settings.py").run()
+    assert fresh.checkbox(key="signal_routing_widen_authorization").value is False          # jamais gardée
+    assert fresh.toggle(key="signal_trust_all_chats_toggle").value is True                  # l'interrupteur, si
